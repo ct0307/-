@@ -101,7 +101,7 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
           {{ s.label }}
         </button>
       </div>
-      <DemoBadge />
+      <DemoBadge module="reports" />
     </div>
 
     <!-- 多维钻取 -->

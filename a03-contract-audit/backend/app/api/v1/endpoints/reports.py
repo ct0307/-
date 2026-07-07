@@ -10,11 +10,21 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.models import User
 from app.services import audit_log
-from app.services.report.exporter import export_risk_ledger
+from app.services.report.exporter import export_risk_ledger, report_summary
 
 router = APIRouter()
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.get("/summary")
+def reports_summary(
+    range: str = Query(default="month", description="时间分段：month/quarter/year"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """多维报表聚合数据（KPI/趋势/风险分布/部门/Top5），供前端 ReportsView。"""
+    return report_summary(db, range)
 
 
 @router.get("/export")

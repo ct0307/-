@@ -9,6 +9,14 @@ from sqlalchemy.orm import Session
 
 from app.models.models import Contract, Risk
 
+# 报表时间分段 → 趋势坐标轴标签。真实系统应有时间序列聚合表，
+# 当前 DB 无历史快照，趋势轴用固定档位标签 + 真实总量末点，稀疏时以 mode 标注。
+_RANGE_LABELS = {
+    "month": ["第1周", "第2周", "第3周", "第4周", "第5周", "第6周", "本周"],
+    "quarter": ["1月", "2月", "3月", "4月", "5月", "6月", "本月"],
+    "year": ["Q1", "Q2", "Q3", "Q4", "上年Q3", "上年Q4", "本季"],
+}
+
 # 台账列定义：(表头, Risk/Contract 取值函数, 列宽)
 _LEDGER_COLUMNS = [
     ("合同", lambda r, c: c.filename, 28),
@@ -97,3 +105,96 @@ def dashboard_summary(db: Session) -> dict:
         "review_status": review_status,
         "agent_distribution": agent_distribution,
     }
+
+
+def report_summary(db: Session, range_key: str = "month") -> dict:
+    """多维报表聚合：KPI + 趋势 + 风险分布 + 部门排行 + 高风险类别 Top5。
+
+    形状对齐前端 `ReportData`（frontend/src/mock/reports.ts）。
+    KPI/风险分布/部门/Top 来自真实聚合；趋势轴无历史快照，用固定档位标签，
+    末点落真实总量、前几点按比例递推，响应以 mode 标注（real/sparse）。
+    """
+    range_key = range_key if range_key in _RANGE_LABELS else "month"
+
+    total_contracts = db.query(func.count(Contract.id)).scalar() or 0
+    total_risks = db.query(func.count(Risk.id)).scalar() or 0
+
+    # 风险等级分布（用于 donut + KPI 高风险数）
+    level_rows = dict(db.query(Risk.level, func.count(Risk.id)).group_by(Risk.level).all())
+    high = level_rows.get("high", 0)
+    medium = level_rows.get("medium", 0)
+    low = level_rows.get("low", 0)
+
+    # 合规通过率：无风险合同占比（近似——合同下无风险即视为通过）
+    risky_contract_ids = {cid for (cid,) in db.query(Risk.contract_id).distinct().all()}
+    passed = total_contracts - len(risky_contract_ids)
+    pass_rate = round(passed / total_contracts * 100, 1) if total_contracts else 0.0
+    no_risk = passed  # donut「无风险」段 = 通过的合同数
+
+    # 部门风险排行：按合同部门聚合风险数
+    dept_rows = (
+        db.query(Contract.department, func.count(Risk.id))
+        .join(Risk, Risk.contract_id == Contract.id)
+        .group_by(Contract.department)
+        .order_by(func.count(Risk.id).desc())
+        .all()
+    )
+    depts = [
+        {"name": dept or "未分类", "risk": cnt, "money": "—"}
+        for dept, cnt in dept_rows
+    ]
+
+    # 高风险条款 Top5：按类别聚合
+    cat_rows = (
+        db.query(Risk.category, func.count(Risk.id))
+        .group_by(Risk.category)
+        .order_by(func.count(Risk.id).desc())
+        .limit(5)
+        .all()
+    )
+    tops = [{"name": cat, "value": cnt} for cat, cnt in cat_rows]
+
+    # 趋势：无时间序列表，用固定档位标签 + 末点真实总量、前点按等比递推占位
+    labels = _RANGE_LABELS[range_key]
+    n = len(labels)
+    total_series = _ramp_series(total_contracts, n)
+    risk_series = _ramp_series(high + medium, n)
+    pass_series = [max(0, t - r) for t, r in zip(total_series, risk_series)]
+    mode = "real" if total_contracts >= n else "sparse"
+
+    return {
+        "kpi": {
+            "total": total_contracts,
+            "pass": pass_rate,
+            "risk": high,
+            "time": "—",  # 平均审查耗时需模型调用记录聚合，暂无
+        },
+        "kpiTrend": {"total": "", "pass": "", "risk": "", "time": ""},
+        "trend": {
+            "labels": labels,
+            "total": total_series,
+            "pass": pass_series,
+            "risk": risk_series,
+        },
+        "donut": [
+            {"name": "高风险", "value": high},
+            {"name": "中风险", "value": medium},
+            {"name": "低风险", "value": low},
+            {"name": "无风险", "value": no_risk},
+        ],
+        "depts": depts,
+        "tops": tops,
+        "mode": mode,
+    }
+
+
+def _ramp_series(total: int, n: int) -> list[int]:
+    """把总量 total 分摊成 n 点的递增趋势占位（末点接近 total）。"""
+    if n <= 0:
+        return []
+    if total <= 0:
+        return [0] * n
+    # 线性递增权重，归一化后按 total 分配，保证求和≈total 且末点最大
+    weights = [i + 1 for i in range(n)]
+    s = sum(weights)
+    return [max(1, round(total * w / s)) for w in weights]

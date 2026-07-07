@@ -1,10 +1,12 @@
 <script setup lang="ts">
-// 工作台首页：KPI 卡（部分从 store 派生）+ 待办（随演示视角变）+ 快捷入口 + 近期动态。
-import { computed } from 'vue'
+// 工作台首页：KPI 卡（真实 summary + store 派生）+ 待办（随演示视角变）+ 快捷入口 + 近期动态。
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useRectifyStore } from '@/stores/rectify'
 import { useAuditSessionStore } from '@/stores/audit-session'
 import { useDemoStore, type ViewRole } from '@/stores/demo'
+import { getDashboardSummary } from '@/api/dashboard'
+import type { DashboardSummary } from '@/mock/dashboard'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
 const router = useRouter()
@@ -12,12 +14,40 @@ const rectify = useRectifyStore()
 const session = useAuditSessionStore()
 const demo = useDemoStore()
 
-// KPI：整改/风险数从 store 实时派生（体现联动），其余为演示基线值
+// 后端看板聚合：总量/复核状态分布等
+const summary = ref<DashboardSummary | null>(null)
+const loading = ref(true)
+const error = ref('')
+
+async function loadSummary() {
+  loading.value = true
+  error.value = ''
+  try {
+    summary.value = await getDashboardSummary()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '看板数据加载失败'
+  } finally {
+    loading.value = false
+  }
+}
+onMounted(loadSummary)
+
+// 合规通过率：已确认 / 总复核数（近似），无数据回退 0
+const passRate = computed(() => {
+  const rs = summary.value?.review_status
+  if (!rs) return '—'
+  const total = Object.values(rs).reduce((a, b) => a + b, 0)
+  if (!total) return '0'
+  const passed = (rs['已确认'] ?? 0) + (rs['已忽略'] ?? 0)
+  return String(Math.round((passed / total) * 1000) / 10)
+})
+
+// KPI：审查合同/检出风险来自真实 summary，待整改项从 store 实时派生（体现联动）
 const kpis = computed(() => [
-  { label: '本月审查合同', value: '148', unit: '份', trend: '+12.5%', up: true },
+  { label: '累计审查合同', value: String(summary.value?.total_contracts ?? '—'), unit: '份', trend: '累计', up: true },
   { label: '待整改项', value: String(rectify.openCount), unit: '项', trend: '实时', up: false },
-  { label: '本次检出风险', value: String(session.riskCount), unit: '条', trend: '当前会话', up: false },
-  { label: '合规通过率', value: '87.3', unit: '%', trend: '+3.2%', up: true },
+  { label: '累计检出风险', value: String(summary.value?.total_risks ?? '—'), unit: '条', trend: '累计', up: false },
+  { label: '合规通过率', value: passRate.value, unit: '%', trend: '复核派生', up: true },
 ])
 
 // 待办随演示视角切换
@@ -66,9 +96,23 @@ const activity = [
 
 <template>
   <div class="dash">
-    <div class="dash-note"><DemoBadge /></div>
+    <div class="dash-note"><DemoBadge module="dashboard" /></div>
 
-    <section class="kpi-row">
+    <el-alert
+      v-if="error"
+      :title="error"
+      type="error"
+      show-icon
+      :closable="false"
+      class="dash-error"
+    >
+      <el-button size="small" text @click="loadSummary">重试</el-button>
+    </el-alert>
+
+    <section v-if="loading" class="kpi-row">
+      <el-skeleton v-for="i in 4" :key="i" :rows="2" animated class="kpi-card" />
+    </section>
+    <section v-else class="kpi-row">
       <article v-for="k in kpis" :key="k.label" class="kpi-card">
         <span class="kpi-label">{{ k.label }}</span>
         <strong class="kpi-value mono">{{ k.value }}<i>{{ k.unit }}</i></strong>
@@ -114,6 +158,9 @@ const activity = [
 <style scoped>
 .dash-note {
   margin-bottom: 14px;
+}
+.dash-error {
+  margin-bottom: 16px;
 }
 .kpi-row {
   display: grid;

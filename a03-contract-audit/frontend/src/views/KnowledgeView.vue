@@ -92,7 +92,7 @@ function submitAdd() {
         </div>
       </div>
       <div class="tool-right">
-        <DemoBadge />
+        <DemoBadge module="knowledge" />
         <el-button type="primary" :icon="'Plus'" @click="addOpen = true">添加知识</el-button>
       </div>
     </div>

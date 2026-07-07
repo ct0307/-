@@ -4,9 +4,9 @@
 // 后端补齐对应接口后，把开关置 false 即可，页面零改动。
 // ============================================================
 export const MOCK_ENABLED = {
-  dashboard: true,
-  reports: true,
-  knowledge: true,
+  dashboard: false, // 后端 /dashboard/summary 已就绪 + seed 数据
+  reports: false, // 后端 /reports/summary 已就绪
+  knowledge: false, // 后端 /knowledge/cards + /stats 已就绪
   rules: true,
   history: true,
   admin: true,
