@@ -11,6 +11,7 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { index: '/dashboard', name: 'dashboard', label: '工作台', icon: 'Odometer' },
   { index: '/audit', name: 'audit', label: '合同审查', icon: 'DocumentChecked' },
+  { index: '/collaboration', name: 'collaboration', label: '双 Agent 协作', icon: 'Connection' },
   { index: '/rectify', name: 'rectify', label: '整改跟踪', icon: 'SetUp' },
   { index: '/reports', name: 'reports', label: '多维报表', icon: 'DataAnalysis' },
   { index: '/knowledge', name: 'knowledge', label: '法规知识库', icon: 'Collection' },

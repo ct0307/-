@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { RiskOut } from '@/api/types'
+import type { CrossCheckOut, RiskOut } from '@/api/types'
 import {
   auditContract,
   getRisks,
@@ -15,6 +15,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   const filename = ref('')
   const elements = ref<Record<string, unknown> | null>(null)
   const risks = ref<RiskOut[]>([])
+  const crossChecks = ref<CrossCheckOut[]>([])
   const busy = ref(false)
   // 0 未上传 / 1 已解析 / 2 已审查
   const step = ref(0)
@@ -32,6 +33,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     filename.value = ''
     elements.value = null
     risks.value = []
+    crossChecks.value = []
     step.value = 0
   }
 
@@ -56,7 +58,8 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     if (!contractId.value) return
     busy.value = true
     try {
-      await auditContract(contractId.value)
+      const res = await auditContract(contractId.value)
+      crossChecks.value = res.cross_checks ?? []
       risks.value = await getRisks(contractId.value)
       step.value = 2
     } finally {
@@ -74,6 +77,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     filename,
     elements,
     risks,
+    crossChecks,
     busy,
     step,
     riskCount,

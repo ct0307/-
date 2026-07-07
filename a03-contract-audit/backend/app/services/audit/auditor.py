@@ -1,9 +1,11 @@
-"""合规审查：核心业务，多智能体协同编排。
+"""合规审查：核心业务，多智能体主从协同编排。
 
-对应前端原型的"法务 Agent 查合规 + 财务 Agent 对账目"双泳道协同：
-按角色分维度审查，各自带定向 RAG 依据独立调 LLM，结果打 agent 标签汇总成一份报告。
+对应前端"双 Agent 协作"页：法务 Agent 先行、财务 Agent 二次加工、交叉验证冲突消解、分级风险。
+与"各跑各的"不同，这里是主从串行 + 共享上下文：
 
-流程：合同要素 + 分角色 RAG 依据 → 各 Agent LLM 出结构化风险 → 汇总。
+  法务先行 → 结论写入共享上下文（shared_context） → 财务读取法务输出再审
+  → 交叉验证产出冲突项 → 每条风险分级归档（green/yellow/red）
+
 每条风险包含（企业责任边界要求）：
   - 归属 agent（legal/finance）
   - 原文引用（original_text）
@@ -11,6 +13,7 @@
   - 风险等级（level: high/medium/low）
   - 置信度（confidence: 0-100）
   - 建议修改（suggestion）
+  - 人工干预档位（tier: green/yellow/red）
 
 真实版每个 Agent 走 LLM chat；某 Agent 不可用或返回无法解析时，仅该角色降级到
 对应 Mock 规则（另一角色不受影响），保证审查链路始终可用 —— 企业可用性刚需。
@@ -29,44 +32,86 @@ log = get_logger("audit")
 DISCLAIMER = "本结论由系统自动生成，仅供参考，以人工复核为准。"
 
 _VALID_LEVELS = {"high", "medium", "low"}
+_VALID_TIERS = {"green", "yellow", "red"}
+
+# 红档敏感类别关键词：命中即强制升到红档（需三员会审），与前端分档口径一致。
+_RED_KEYWORDS = ("关联交易", "关联方", "重大赔偿", "税法争议", "舞弊", "主体缺失", "收款账户")
 
 # 智能体定义：角色 → 关注维度 + 定向 RAG 检索主题 + 角色化 prompt 侧重。
-# 与前端原型规则库的 agent 分派（legal/finance）一致。
+# 与前端 collaboration mock 的 AGENTS 定义一致。
 _AGENTS = {
     "legal": {
         "name": "法务专家 Agent",
-        "focus": "违约责任、争议解决、知识产权归属、保密条款、验收标准、合同主体资格",
-        "topics": ["违约 违约责任 违约金", "争议 仲裁 诉讼 管辖", "知识产权 著作权 保密", "合同主体 甲方 乙方"],
+        "focus": "违约责任、争议解决、知识产权归属、保密条款、验收标准、合同主体资格、关联交易识别",
+        "topics": ["违约 违约责任 违约金", "争议 仲裁 诉讼 管辖", "知识产权 著作权 保密", "合同主体 甲方 乙方 关联交易"],
     },
     "finance": {
         "name": "财务会计 Agent",
-        "focus": "合同金额、付款节点、发票绑定、违约金上限、币种与大小写一致性、预算合规",
-        "topics": ["金额 价款 币种", "付款 发票 结算", "违约金 上限 赔偿", "期限 履约"],
+        "focus": "合同金额、付款节点、发票绑定、违约金上限、币种与大小写一致性、预算合规、收款账户与价格公允性",
+        "topics": ["金额 价款 币种", "付款 发票 结算", "违约金 上限 赔偿", "期限 履约 现金流"],
     },
 }
 
+# 审查执行顺序：法务先行，财务后行（可读取法务输出）。
+_AGENT_ORDER = ["legal", "finance"]
 
-def audit_contract(elements: dict, contract_text: str) -> list[dict]:
-    """多智能体协同审查：法务 + 财务 Agent 各出风险，汇总返回。
 
+def audit_contract(elements: dict, contract_text: str) -> dict:
+    """多智能体主从协同审查。
+
+    返回 {"risks": [...], "cross_checks": [...]}：
+      - risks：两个 Agent 的风险清单（每条带 tier 分档）
+      - cross_checks：交叉验证产出的跨 Agent 冲突项
+
+    执行顺序为串行：法务先行写入共享上下文，财务读取后再审。
     每个 Agent 优先 LLM；不可用或解析失败仅该角色降级到 Mock（不影响另一角色）。
     """
     all_risks: list[dict] = []
-    for role in _AGENTS:
+    # 共享上下文（共享记忆窗口）：上游 Agent 的结论供下游读取，避免重复解析。
+    shared_context: dict = {"elements": elements}
+
+    for role in _AGENT_ORDER:
         try:
-            risks = _agent_audit(role, elements, contract_text)
+            risks = _agent_audit(role, elements, contract_text, shared_context)
             log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(risks))
         except (LLMError, ValueError) as exc:
             log.warning("audit.agent_fallback", agent=role, error=str(exc)[:120])
             risks = _mock_audit(role, elements)
             log.info("audit.agent_done", agent=role, mode="mock", risk_count=len(risks))
         all_risks.extend(risks)
-    log.info("audit.done", total=len(all_risks), agents=list(_AGENTS))
-    return all_risks
+        # 把该角色结论写入共享上下文，供下游 Agent 读取
+        shared_context[role] = _summarize_for_context(role, risks, elements)
+
+    # 交叉验证：比对两 Agent 结论，产出冲突项
+    cross_checks = detect_conflicts(shared_context, elements)
+
+    # 分级归档：卷入冲突的类别在分档时强制升红
+    conflict_categories = {c["category"] for c in cross_checks if c["verdict"] == "conflict"}
+    for r in all_risks:
+        r["tier"] = classify_tier(r, conflict_categories)
+
+    log.info("audit.done", total=len(all_risks), conflicts=len(cross_checks), agents=_AGENT_ORDER)
+    return {"risks": all_risks, "cross_checks": cross_checks}
 
 
-def _agent_audit(role: str, elements: dict, contract_text: str) -> list[dict]:
-    """单个 Agent 审查：定向 RAG 依据 + 角色 prompt → chat → 解析，打 agent 标签。"""
+def _summarize_for_context(role: str, risks: list[dict], elements: dict) -> dict:
+    """把某 Agent 的结论提炼为共享上下文条目，供下游 Agent 读取（共享记忆窗口）。"""
+    categories = sorted({r["category"] for r in risks})
+    # 法务是否识别出关联交易（下游财务需据此做价格公允性复查）
+    related_party = any(
+        ("关联交易" in r["category"] or "关联方" in r["category"] or "关联" in r["original_text"])
+        for r in risks
+    )
+    return {
+        "risk_count": len(risks),
+        "categories": categories,
+        "related_party": related_party,
+        "high_count": sum(1 for r in risks if r["level"] == "high"),
+    }
+
+
+def _agent_audit(role: str, elements: dict, contract_text: str, shared_context: dict) -> list[dict]:
+    """单个 Agent 审查：定向 RAG 依据 + 角色 prompt（含上游共享上下文）→ chat → 解析。"""
     cfg = _AGENTS[role]
 
     # 该角色关注维度的定向 RAG 依据
@@ -92,8 +137,20 @@ def _agent_audit(role: str, elements: dict, contract_text: str) -> list[dict]:
         "suggestion(修改建议)、confidence(0-100 的整数置信度)。\n"
         "结论仅供参考，最终以人工复核为准。"
     )
+
+    # 财务 Agent 读取法务的共享上下文（主从协同的关键）：不重复解析，聚焦二次加工。
+    upstream_block = ""
+    if role == "finance" and "legal" in shared_context:
+        legal_ctx = shared_context["legal"]
+        upstream_block = (
+            f"\n【法务 Agent 已完成的前置审查（共享上下文，请勿重复解析法律条款）】\n"
+            f"- 法务已检出风险类别：{('、'.join(legal_ctx['categories']) or '无')}\n"
+            f"- 是否识别为关联交易：{'是（请重点复查交易价格公允性）' if legal_ctx['related_party'] else '否'}\n"
+            f"请在此基础上，专注金额、付款、现金流与价格公允性维度做二次加工审查。\n"
+        )
+
     user_prompt = (
-        f"【给定的法规/规则依据】\n{basis_block}\n\n"
+        f"【给定的法规/规则依据】\n{basis_block}\n{upstream_block}\n"
         f"【已抽取的合同要素】\n{json.dumps({k: v for k, v in elements.items() if not k.startswith('has_')}, ensure_ascii=False)}\n\n"
         f"【合同全文】\n{contract_text[:8000]}\n\n"
         f"请以{cfg['name']}的视角，输出 JSON 数组形式的风险清单。"
@@ -139,6 +196,79 @@ def _normalize(r: dict, agent: str) -> dict:
         "confidence": confidence,
         "disclaimer": DISCLAIMER,
     }
+
+
+def classify_tier(risk: dict, conflict_categories: set[str] | None = None) -> str:
+    """分级风险人工干预：把单条风险归入 green/yellow/red 档。
+
+    口径与前端一致：
+      - 红档：高风险，或命中敏感类别（关联交易/重大赔偿/税法争议…），或卷入跨 Agent 冲突；
+      - 绿档：低风险且置信度 > 95；
+      - 其余：黄档。
+    """
+    conflict_categories = conflict_categories or set()
+    text = risk.get("category", "") + risk.get("original_text", "") + risk.get("basis", "")
+    sensitive = any(kw in text for kw in _RED_KEYWORDS)
+    in_conflict = risk.get("category", "") in conflict_categories
+    if risk.get("level") == "high" or sensitive or in_conflict:
+        return "red"
+    if risk.get("level") == "low" and risk.get("confidence", 0) > 95:
+        return "green"
+    return "yellow"
+
+
+def detect_conflicts(shared_context: dict, elements: dict) -> list[dict]:
+    """交叉验证 / 冲突消解：比对两 Agent 结论，产出跨 Agent 冲突项。
+
+    协同核心：一个 Agent 的发现触发对另一个 Agent 结论的定向复查。
+    返回 [{id, from, to, trigger, action, verdict, note, category}]。
+    """
+    legal = shared_context.get("legal", {})
+    finance = shared_context.get("finance", {})
+    checks: list[dict] = []
+
+    # 规则 1：法务识别关联交易 → 触发财务对价格公允性复查
+    if legal.get("related_party"):
+        checks.append({
+            "id": "X1",
+            "from": "legal",
+            "to": "finance",
+            "trigger": "法务识别合同为「关联方交易」",
+            "action": "强制触发财务 Agent 对交易价格做「公允性」审查",
+            "verdict": "conflict",
+            "note": "关联交易需财务复核价格公允性，防止利益输送 → 联合推理判高风险，建议三员会审。",
+            "category": "关联交易",
+        })
+
+    # 规则 2：收款账户与合同主体不一致（要素级信号）→ 财务回传法务
+    payee = str(elements.get("payee", "") or elements.get("收款账户", ""))
+    party_b = str(elements.get("party_b", "") or elements.get("乙方", ""))
+    if payee and party_b and payee not in party_b and party_b not in payee:
+        checks.append({
+            "id": "X2",
+            "from": "finance",
+            "to": "legal",
+            "trigger": "财务发现「收款账户与合同主体不一致」",
+            "action": "阻断流程并回传法务 Agent 提示法律与舞弊风险",
+            "verdict": "conflict",
+            "note": "收款账户与乙方主体不符，存在合同主体资格与资金安全双重风险 → 建议驳回。",
+            "category": "收款账户",
+        })
+
+    # 规则 3：法务与财务都检出高风险，提示需联合决策
+    if legal.get("high_count", 0) > 0 and finance.get("high_count", 0) > 0:
+        checks.append({
+            "id": "X3",
+            "from": "legal",
+            "to": "finance",
+            "trigger": "法务与财务均检出高风险条款",
+            "action": "双 Agent 高风险结论汇入中央节点联合决策",
+            "verdict": "watch",
+            "note": "法律与财务维度同时告警，建议协商并列为重点复核，进入待观察。",
+            "category": "联合高风险",
+        })
+
+    return checks
 
 
 # 各角色的 Mock 降级规则：(判定函数, 风险模板)。判定为真则命中该风险。

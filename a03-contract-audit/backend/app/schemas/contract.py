@@ -13,9 +13,31 @@ class RiskOut(BaseModel):
     basis: str
     suggestion: str
     confidence: int
+    tier: str  # 人工干预档位：green/yellow/red
     review_status: str
 
     model_config = {"from_attributes": True}
+
+
+class CrossCheckOut(BaseModel):
+    """交叉验证 / 冲突消解项：跨 Agent 触发的复查结果（审查态动态结果，不落库）。"""
+    id: str
+    from_agent: str
+    to_agent: str
+    trigger: str
+    action: str
+    verdict: str  # conflict/watch/confirmed
+    note: str
+    category: str
+
+
+class AuditResponse(BaseModel):
+    """审查触发响应：同步返回风险数与冲突项；异步返回 task_id。"""
+    contract_id: int
+    status: str
+    risk_count: int | None = None
+    cross_checks: list[CrossCheckOut] = []
+    task_id: str | None = None
 
 
 class ContractOut(BaseModel):

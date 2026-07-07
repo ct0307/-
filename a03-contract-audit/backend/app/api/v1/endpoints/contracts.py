@@ -9,7 +9,7 @@ from app.api.deps import get_current_user, require_roles
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.models import Contract, Risk, User
-from app.schemas.contract import ContractOut, RiskOut
+from app.schemas.contract import AuditResponse, ContractOut, CrossCheckOut, RiskOut
 from app.services import audit_log
 from app.services.audit.runner import run_audit
 from app.services.parser.extractor import extract_elements, extract_text
@@ -66,28 +66,48 @@ def parse_contract(contract_id: int, db: Session = Depends(get_db), user: User =
     return {"contract_id": contract_id, "elements": elements, "text_length": len(text)}
 
 
-@router.post("/{contract_id}/audit")
+@router.post("/{contract_id}/audit", response_model=AuditResponse)
 def audit_contract_endpoint(
     contract_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("legal", "finance")),
-) -> dict:
+) -> AuditResponse:
     contract = _get_contract(db, contract_id)
 
     if settings.AUDIT_ASYNC:
         # 异步：派发 Celery 任务，立即返回 task_id，前端轮询任务状态。
+        # 冲突项在任务完成后由前端拉取风险时另行获取（此处不阻塞）。
         from app.tasks.audit_tasks import run_contract_audit
 
         task = run_contract_audit.delay(contract_id)
         contract.status = "auditing"
         db.commit()
         audit_log.record(db, user_id=user.id, action="audit_dispatch", target=f"contract:{contract_id}", detail=f"task:{task.id}")
-        return {"contract_id": contract_id, "task_id": task.id, "status": "auditing"}
+        return AuditResponse(contract_id=contract_id, task_id=task.id, status="auditing")
 
     # 同步：本地无 Redis 时直接执行，行为与 Celery 任务一致（共用 run_audit）。
-    count = run_audit(db, contract)
-    audit_log.record(db, user_id=user.id, action="audit", target=f"contract:{contract_id}", detail=f"risks={count}")
-    return {"contract_id": contract_id, "risk_count": count, "status": "done"}
+    result = run_audit(db, contract)
+    audit_log.record(db, user_id=user.id, action="audit", target=f"contract:{contract_id}", detail=f"risks={result['risk_count']}")
+    return AuditResponse(
+        contract_id=contract_id,
+        status="done",
+        risk_count=result["risk_count"],
+        cross_checks=[_to_cross_out(c) for c in result["cross_checks"]],
+    )
+
+
+def _to_cross_out(c: dict) -> CrossCheckOut:
+    """把 auditor 的冲突项 dict（键含保留字 from/to）映射到 schema。"""
+    return CrossCheckOut(
+        id=c["id"],
+        from_agent=c["from"],
+        to_agent=c["to"],
+        trigger=c["trigger"],
+        action=c["action"],
+        verdict=c["verdict"],
+        note=c["note"],
+        category=c["category"],
+    )
 
 
 @router.get("/{contract_id}/risks", response_model=list[RiskOut])

@@ -26,6 +26,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '合同合规审查', eyebrow: 'AI-POWERED CONTRACT REVIEW' },
       },
       {
+        path: 'collaboration',
+        name: 'collaboration',
+        component: () => import('@/views/CollaborationView.vue'),
+        meta: { title: '双 Agent 协作', eyebrow: 'MULTI-AGENT COLLABORATION' },
+      },
+      {
         path: 'rectify',
         name: 'rectify',
         component: () => import('@/views/RectifyView.vue'),

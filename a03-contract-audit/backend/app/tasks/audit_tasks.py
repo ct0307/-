@@ -20,8 +20,13 @@ def run_contract_audit(self, contract_id: int) -> dict:
         contract = db.query(Contract).filter(Contract.id == contract_id).first()
         if not contract:
             return {"contract_id": contract_id, "error": "not_found"}
-        count = run_audit(db, contract)
-        return {"contract_id": contract_id, "risk_count": count, "status": "done"}
+        result = run_audit(db, contract)
+        return {
+            "contract_id": contract_id,
+            "risk_count": result["risk_count"],
+            "cross_checks": result["cross_checks"],
+            "status": "done",
+        }
     except Exception as exc:  # noqa: BLE001
         log.error("audit_task.failed", contract_id=contract_id, error=str(exc))
         raise self.retry(exc=exc, countdown=10)

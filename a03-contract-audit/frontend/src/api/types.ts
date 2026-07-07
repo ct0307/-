@@ -20,11 +20,24 @@ export interface ParseResult {
   text_length: number
 }
 
+// 交叉验证 / 冲突消解项（后端审查态动态结果，不落库，随 audit 响应返回）
+export interface CrossCheckOut {
+  id: string
+  from_agent: 'legal' | 'finance'
+  to_agent: 'legal' | 'finance'
+  trigger: string
+  action: string
+  verdict: 'conflict' | 'watch' | 'confirmed'
+  note: string
+  category: string
+}
+
 export interface AuditResult {
   contract_id: number
   risk_count?: number
   task_id?: string
   status: string
+  cross_checks?: CrossCheckOut[]
 }
 
 export interface RiskOut {
@@ -36,5 +49,6 @@ export interface RiskOut {
   basis: string
   suggestion: string
   confidence: number
+  tier: 'green' | 'yellow' | 'red' // 人工干预档位
   review_status: 'pending' | 'confirmed' | 'ignored' | 'to_modify'
 }
