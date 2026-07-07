@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 环境变量与密钥
+.env
+*.env
+!.env.example
+
+# 前端
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# 合同文件私有化存储（严禁入库，含敏感数据）
+storage/
+!storage/.gitkeep
+
+# 数据库/日志
+*.db
+*.sqlite3
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store

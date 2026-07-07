@@ -1,0 +1,84 @@
+// ============================================================
+// 卷宗风设计令牌 · 迁移自 a03-demo 日间卷宗方向（浅色 / 护眼）
+// 调色板：卷宗纸米 / 信笺白 / 墨蓝字 / 印章朱 / 黄铜金 / 合规绿
+// 同时把卷宗色板映射为 Element Plus 的 --el-* token，实现全局换肤。
+// ============================================================
+:root {
+  // —— 卷宗底色与文字 ——
+  --ink: #efe9da; // 卷宗米 · 页面底
+  --ink-2: #fcf9f1; // 信笺白 · 面板底
+  --ink-3: #f5f0e4; // 凹陷块 / 输入框底
+  --line: rgba(58, 50, 34, 0.14); // 淡分隔线
+  --line-strong: rgba(58, 50, 34, 0.26);
+  --ivory: #2a3248; // 深墨蓝 · 主文字（非纯黑，护眼）
+  --ivory-dim: #565e70; // 次级文字
+  --muted: #8c8574; // 弱文字 · 暖墨灰
+
+  // —— 语义强调色（压深保对比）——
+  --seal: #b23a2c; // 印章朱 · 高风险 / 警示
+  --seal-soft: rgba(178, 58, 44, 0.12);
+  --brass: #8a6a1c; // 黄铜金 · 主色 / 激活
+  --brass-lite: #b8912f; // 亮铜 · hover
+  --brass-soft: rgba(138, 106, 28, 0.12);
+  --amber: #b0741a; // 琥珀 · 中风险
+  --amber-soft: rgba(176, 116, 26, 0.14);
+  --sage: #3e7a5c; // 合规绿 · 低风险 / 通过
+  --sage-soft: rgba(62, 122, 92, 0.14);
+
+  // —— 阴影 / 圆角 / 字体 / 缓动 ——
+  --shadow: 0 18px 50px rgba(53, 44, 28, 0.14);
+  --shadow-sm: 0 8px 22px rgba(53, 44, 28, 0.1);
+  --serif: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  --sans: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+  --r-lg: 10px;
+  --r-md: 8px;
+  --r-sm: 6px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  // ==========================================================
+  // 映射到 Element Plus token（覆盖默认蓝主题）
+  // ==========================================================
+  --el-color-primary: var(--brass);
+  // primary 派生浅色档：必须一起覆盖，否则 hover/plain/disabled 残留蓝底
+  --el-color-primary-light-3: #a5842f;
+  --el-color-primary-light-5: #bfa055;
+  --el-color-primary-light-7: #d6c290;
+  --el-color-primary-light-8: #e4d7b3;
+  --el-color-primary-light-9: #f1e9d3;
+  --el-color-primary-dark-2: #6e5416;
+
+  --el-color-danger: var(--seal);
+  --el-color-danger-light-3: #c86a5f;
+  --el-color-danger-light-5: #d99a92;
+  --el-color-danger-light-9: #f6e8e6;
+  --el-color-error: var(--seal);
+
+  --el-color-warning: var(--amber);
+  --el-color-warning-light-3: #c4934a;
+  --el-color-warning-light-9: #f6ede0;
+
+  --el-color-success: var(--sage);
+  --el-color-success-light-3: #6b9a82;
+  --el-color-success-light-9: #e7f0eb;
+
+  // 中性色 / 背景 / 文字
+  --el-bg-color: var(--ink-2);
+  --el-bg-color-page: var(--ink);
+  --el-bg-color-overlay: var(--ink-2);
+  --el-fill-color-blank: var(--ink-2);
+  --el-fill-color-light: var(--ink-3);
+  --el-text-color-primary: var(--ivory);
+  --el-text-color-regular: var(--ivory-dim);
+  --el-text-color-secondary: var(--muted);
+  --el-text-color-placeholder: var(--muted);
+  --el-border-color: var(--line);
+  --el-border-color-light: var(--line);
+  --el-border-color-lighter: var(--line);
+  --el-border-color-hover: var(--line-strong);
+
+  --el-border-radius-base: var(--r-md);
+  --el-border-radius-small: var(--r-sm);
+  --el-box-shadow-light: var(--shadow-sm);
+  --el-font-family: var(--sans);
+}

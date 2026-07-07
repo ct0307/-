@@ -1,0 +1,21 @@
+"""认证端点：登录发放 JWT。"""
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+from app.core.security import create_access_token, verify_password
+from app.db.session import get_db
+from app.models.models import User
+from app.services import audit_log
+
+router = APIRouter()
+
+
+@router.post("/login")
+def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)) -> dict:
+    user = db.query(User).filter(User.username == form.username).first()
+    if not user or not verify_password(form.password, user.password_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
+    token = create_access_token(subject=user.username, role=user.role)
+    audit_log.record(db, user_id=user.id, action="login", target=user.username)
+    return {"access_token": token, "token_type": "bearer", "role": user.role}

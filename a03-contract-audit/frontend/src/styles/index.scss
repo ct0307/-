@@ -1,0 +1,84 @@
+// ============================================================
+// 卷宗风主题入口 · 在 main.ts 于 element-plus css 之后引入
+// 顺序：字体 → 令牌 → 组件覆盖 → 全局基样式
+// ============================================================
+@use "./fonts";
+@use "./tokens";
+@use "./element-overrides";
+@use "./mixins" as *;
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--sans);
+  color: var(--ivory);
+  background: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+// 全局横线信笺纹理（极淡，铺在页面底）
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  @include paper-texture(32px, 0.5);
+}
+#app {
+  position: relative;
+  z-index: 1;
+}
+
+// —— 排版签名：标题衬线、数据等宽 ——
+h1,
+h2,
+h3 {
+  font-family: var(--serif);
+  color: var(--ivory);
+  font-weight: 600;
+}
+.serif {
+  font-family: var(--serif);
+}
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+// —— 复用工具类 ——
+.seal-badge {
+  @include seal-badge;
+}
+.annotate {
+  @include annotate-wavy;
+}
+
+// 自定义滚动条（暖色）
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(138, 106, 28, 0.3);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(138, 106, 28, 0.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

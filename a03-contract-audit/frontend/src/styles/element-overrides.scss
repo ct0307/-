@@ -1,0 +1,106 @@
+// ============================================================
+// Element Plus 组件级样式覆盖 · 对齐卷宗风
+// token 已在 tokens.scss 映射，这里补组件粒度的质感调整。
+// ============================================================
+@use "./mixins" as *;
+
+// —— 主按钮：黄铜金，hover 亮铜 ——
+.el-button--primary {
+  --el-button-bg-color: var(--brass);
+  --el-button-border-color: var(--brass);
+  --el-button-hover-bg-color: var(--brass-lite);
+  --el-button-hover-border-color: var(--brass-lite);
+  --el-button-active-bg-color: var(--el-color-primary-dark-2);
+  font-weight: 600;
+}
+
+// —— 卡片：信笺白底 + 暖棕阴影 ——
+.el-card {
+  --el-card-border-color: var(--line);
+  --el-card-border-radius: var(--r-lg);
+  background: var(--ink-2);
+  box-shadow: var(--shadow-sm);
+}
+.el-card__header {
+  font-family: var(--serif);
+  font-weight: 600;
+  color: var(--ivory);
+  border-bottom: 1px solid var(--line);
+}
+
+// —— 菜单：透明底，激活项黄铜左竖条 ——
+.el-menu {
+  --el-menu-bg-color: transparent;
+  --el-menu-text-color: var(--ivory-dim);
+  --el-menu-active-color: var(--brass);
+  --el-menu-hover-bg-color: var(--brass-soft);
+  border-right: none;
+}
+.el-menu-item.is-active {
+  background: var(--brass-soft);
+  position: relative;
+  font-weight: 600;
+  &::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 3px;
+    background: var(--brass);
+    border-radius: 0 2px 2px 0;
+  }
+}
+
+// —— 标签：风险等级软底 ——
+.el-tag {
+  border: none;
+  font-family: var(--mono);
+  &.el-tag--danger {
+    background: var(--seal-soft);
+    color: var(--seal);
+  }
+  &.el-tag--warning {
+    background: var(--amber-soft);
+    color: var(--amber);
+  }
+  &.el-tag--success {
+    background: var(--sage-soft);
+    color: var(--sage);
+  }
+}
+
+// —— 表格：表头米底、行淡横线 ——
+.el-table {
+  --el-table-border-color: var(--line);
+  --el-table-header-bg-color: var(--ink-3);
+  --el-table-header-text-color: var(--ivory);
+  --el-table-row-hover-bg-color: var(--brass-soft);
+  background: transparent;
+  th.el-table__cell {
+    font-family: var(--serif);
+    font-weight: 600;
+  }
+}
+
+// —— 步骤条 / 抽屉 / 弹窗：圆角与字体对齐 ——
+.el-drawer__header,
+.el-dialog__header {
+  font-family: var(--serif);
+  font-weight: 600;
+  color: var(--ivory);
+  margin-right: 0;
+}
+.el-dialog {
+  border-radius: var(--r-lg);
+}
+.el-descriptions__label {
+  color: var(--ivory-dim);
+}
+
+// —— 输入 / 下拉：凹陷米底 ——
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  background-color: var(--ink-3);
+}

@@ -1,0 +1,62 @@
+// ============================================================
+// 卷宗风签名视觉元素 · 可复用 mixin / 工具类
+// 信笺纹理 / 印章徽标 / 红笔波浪线 / 卡片彩色竖条
+// ============================================================
+
+// 极淡横线信笺纹理（用于页面底 / 合同正文背景）
+@mixin paper-texture($gap: 30px, $opacity: 0.4) {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent calc(#{$gap} - 1px),
+    rgba(58, 50, 34, 0.05) #{$gap}
+  );
+  background-attachment: local;
+  opacity: $opacity;
+}
+
+// 印章式徽标：朱红描边方块 + 衬线粗字
+@mixin seal-badge($size: 38px, $color: var(--seal)) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: $size;
+  height: $size;
+  border: 2px solid $color;
+  border-radius: 4px;
+  color: $color;
+  font-family: var(--serif);
+  font-weight: 700;
+  background: rgba(178, 58, 44, 0.06);
+  letter-spacing: 0;
+}
+
+// 红笔波浪下划线：标注风险条款
+@mixin annotate-wavy($color: var(--seal)) {
+  text-decoration: underline wavy $color;
+  text-underline-offset: 3px;
+  background: var(--seal-soft);
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+// 卡片左侧 3px 彩色竖条（按风险等级）
+@mixin left-accent($color) {
+  position: relative;
+  &::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: $color;
+    border-radius: var(--r-sm) 0 0 var(--r-sm);
+  }
+}
+
+// 顶栏底部黄铜分隔线（公文抬头感）
+@mixin brass-underline {
+  border-bottom: 2px solid var(--brass);
+  box-shadow: 0 1px 0 var(--line);
+}

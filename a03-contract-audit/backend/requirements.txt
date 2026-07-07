@@ -1,0 +1,38 @@
+# Web 框架
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# 数据校验/配置
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# 数据库 + 向量
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg[binary]==3.2.3
+pgvector==0.3.6
+
+# 认证安全
+# 注：不用 python-jose(多个 CVE+停维)和 passlib(停维,与 bcrypt 5.x 不兼容)，
+# 改用 FastAPI 官方现推荐的 PyJWT + 直接使用 bcrypt。
+PyJWT==2.10.1
+bcrypt==4.2.1
+
+# 异步任务
+celery==5.4.0
+redis==5.2.1
+
+# 文档解析
+pdfplumber==0.11.4
+pypdf==5.1.0
+python-docx==1.1.2
+
+# 报表
+openpyxl==3.1.5
+
+# LLM 客户端（统一 Adapter 内部使用，可对接私有化模型）
+httpx==0.28.1
+
+# 日志
+structlog==24.4.0
