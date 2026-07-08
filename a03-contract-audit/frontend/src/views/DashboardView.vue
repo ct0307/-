@@ -1,20 +1,18 @@
 <script setup lang="ts">
-// 工作台首页：KPI 卡（真实 summary + store 派生）+ 待办（随演示视角变）+ 快捷入口 + 近期动态。
+// 工作台首页：KPI + 真实整改待办 + 近期审查动态（全部接真实数据，去掉演示假数据）
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useRectifyStore } from '@/stores/rectify'
-import { useAuditSessionStore } from '@/stores/audit-session'
-import { useDemoStore, type ViewRole } from '@/stores/demo'
 import { getDashboardSummary } from '@/api/dashboard'
+import { getHistory } from '@/api/history'
 import type { DashboardSummary } from '@/mock/dashboard'
+import type { HistoryRow } from '@/mock/history'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
 const router = useRouter()
 const rectify = useRectifyStore()
-const session = useAuditSessionStore()
-const demo = useDemoStore()
 
-// 后端看板聚合：总量/复核状态分布等
+// —— 看板聚合 ——
 const summary = ref<DashboardSummary | null>(null)
 const loading = ref(true)
 const error = ref('')
@@ -30,12 +28,26 @@ async function loadSummary() {
     loading.value = false
   }
 }
+
+// —— 近期审查记录（动态来源）——
+const recentContracts = ref<HistoryRow[]>([])
+
+async function loadRecentContracts() {
+  try {
+    const data = await getHistory()
+    recentContracts.value = data.slice(0, 5)
+  } catch {
+    // 非核心功能，静默失败
+  }
+}
+
 onMounted(() => {
   loadSummary()
-  rectify.load() // 拉整改项，供「待整改项」KPI 实时派生
+  rectify.load()
+  loadRecentContracts()
 })
 
-// 合规通过率：已确认 / 总复核数（近似），无数据回退 0
+// —— KPI ——
 const passRate = computed(() => {
   const rs = summary.value?.review_status
   if (!rs) return '—'
@@ -45,7 +57,6 @@ const passRate = computed(() => {
   return String(Math.round((passed / total) * 1000) / 10)
 })
 
-// KPI：审查合同/检出风险来自真实 summary，待整改项从 store 实时派生（体现联动）
 const kpis = computed(() => [
   { label: '累计审查合同', value: String(summary.value?.total_contracts ?? '—'), unit: '份', trend: '累计', up: true },
   { label: '待整改项', value: String(rectify.openCount), unit: '项', trend: '实时', up: false },
@@ -53,28 +64,10 @@ const kpis = computed(() => [
   { label: '合规通过率', value: passRate.value, unit: '%', trend: '复核派生', up: true },
 ])
 
-// 待办随演示视角切换
-const todoByRole: Record<ViewRole, { title: string; level: string; time: string }[]> = {
-  legal: [
-    { title: '复核「软件开发外包合同」高风险条款', level: 'high', time: '今天 14:00' },
-    { title: '确认争议解决条款整改结果', level: 'medium', time: '今天 16:30' },
-    { title: '审阅采购合同违约责任补充', level: 'medium', time: '明天 10:00' },
-    { title: '归档已闭环整改台账', level: 'low', time: '本周内' },
-  ],
-  finance: [
-    { title: '对账「采购合同」付款节点', level: 'high', time: '今天 15:00' },
-    { title: '核查合同金额币种标注', level: 'medium', time: '今天 17:00' },
-    { title: '汇总本月涉及金额报表', level: 'low', time: '明天' },
-    { title: '预算偏差项复核', level: 'medium', time: '本周内' },
-  ],
-  admin: [
-    { title: '审批新增审查规则申请', level: 'medium', time: '今天' },
-    { title: '巡检操作审计日志异常', level: 'high', time: '今天' },
-    { title: '维护角色权限矩阵', level: 'low', time: '本周内' },
-    { title: '导出系统运行月报', level: 'low', time: '月底' },
-  ],
-}
-const todos = computed(() => todoByRole[demo.viewRole])
+// —— 待办：取真实"待处理"整改项，最多展示 5 条 ——
+const pendingTodos = computed(() =>
+  rectify.items.filter((r) => r.status === '待处理').slice(0, 5),
+)
 
 const levelColor: Record<string, string> = {
   high: 'var(--seal)',
@@ -82,19 +75,26 @@ const levelColor: Record<string, string> = {
   low: 'var(--sage)',
 }
 
-const quick = [
-  { label: '合同审查', to: '/audit', icon: 'DocumentChecked' },
-  { label: '多维报表', to: '/reports', icon: 'DataAnalysis' },
-  { label: '知识库', to: '/knowledge', icon: 'Collection' },
-  { label: '审查记录', to: '/history', icon: 'Clock' },
-]
+// —— 近期动态：从真实审查记录推导 ——
+function formatRelativeTime(isoStr: string): string {
+  const diff = Date.now() - new Date(isoStr).getTime()
+  const m = Math.floor(diff / 60000)
+  if (m < 1) return '刚刚'
+  if (m < 60) return `${m} 分钟前`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h} 小时前`
+  const d = Math.floor(h / 24)
+  if (d < 7) return `${d} 天前`
+  return new Date(isoStr).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
+}
 
-const activity = [
-  { text: '完成「技术服务合同」审查，检出 3 条风险', time: '10 分钟前' },
-  { text: '曾庆豪确认 1 项高风险并生成整改项', time: '1 小时前' },
-  { text: '知识库新增《民法典》合同编条款 12 条', time: '3 小时前' },
-  { text: 'OpenClaw 一体机完成批量审查 26 份', time: '今天 09:20' },
-]
+const activity = computed(() =>
+  recentContracts.value.map((c) => ({
+    text: `完成「${c.name}」审查，检出 ${c.riskCount} 条风险`,
+    time: formatRelativeTime(c.time),
+    high: c.level === '高风险',
+  })),
+)
 </script>
 
 <template>
@@ -112,6 +112,7 @@ const activity = [
       <el-button size="small" text @click="loadSummary">重试</el-button>
     </el-alert>
 
+    <!-- KPI 行 -->
     <section v-if="loading" class="kpi-row">
       <el-skeleton v-for="i in 4" :key="i" :rows="2" animated class="kpi-card" />
     </section>
@@ -124,35 +125,64 @@ const activity = [
     </section>
 
     <section class="dash-grid">
+      <!-- 左：整改待办（真实数据） -->
       <el-card shadow="never" class="todo-panel">
         <template #header>
           <div class="panel-head">
-            <span>我的待办</span>
-            <span class="role-badge">{{ demo.profile.viewLabel }}</span>
+            <span>待处理整改</span>
+            <span v-if="pendingTodos.length" class="count-badge">{{ pendingTodos.length }} 项</span>
           </div>
         </template>
-        <div v-for="(t, i) in todos" :key="i" class="todo-item">
-          <span class="todo-bar" :style="{ background: levelColor[t.level] }" />
-          <span class="todo-title">{{ t.title }}</span>
-          <span class="todo-time mono">{{ t.time }}</span>
+
+        <!-- 空状态 -->
+        <div v-if="rectify.loading" class="todo-loading">
+          <el-skeleton :rows="3" animated />
+        </div>
+        <div v-else-if="pendingTodos.length === 0" class="todo-empty">
+          <el-icon :size="28"><CircleCheck /></el-icon>
+          <span>暂无待处理整改项</span>
+        </div>
+        <div v-else>
+          <div
+            v-for="t in pendingTodos"
+            :key="t.id"
+            class="todo-item"
+            @click="router.push('/rectify')"
+          >
+            <span class="todo-bar" :style="{ background: levelColor[t.level] }" />
+            <div class="todo-body">
+              <span class="todo-contract">{{ t.contract }}</span>
+              <span class="todo-risk">{{ t.risk }}</span>
+            </div>
+            <span class="todo-due mono">{{ t.due }}</span>
+            <el-icon class="todo-go"><ArrowRight /></el-icon>
+          </div>
         </div>
       </el-card>
 
-      <el-card shadow="never" class="side-panel">
-        <template #header>快捷入口</template>
-        <div class="quick-grid">
-          <button v-for="q in quick" :key="q.to" class="quick-item" @click="router.push(q.to)">
-            <el-icon :size="22"><component :is="q.icon" /></el-icon>
-            <span>{{ q.label }}</span>
-          </button>
+      <!-- 右：近期审查动态（真实数据） -->
+      <el-card shadow="never" class="activity-panel">
+        <template #header>近期审查动态</template>
+        <div v-if="recentContracts.length === 0" class="activity-empty">
+          暂无审查记录
         </div>
-        <div class="activity-head">近期动态</div>
-        <ul class="activity-list">
+        <ul v-else class="activity-list">
           <li v-for="(a, i) in activity" :key="i">
-            <span class="dot" />
-            <div><p>{{ a.text }}</p><small class="mono">{{ a.time }}</small></div>
+            <span class="dot" :class="{ alert: a.high }" />
+            <div>
+              <p>{{ a.text }}</p>
+              <small class="mono">{{ a.time }}</small>
+            </div>
           </li>
         </ul>
+        <el-button
+          link
+          type="primary"
+          class="history-link"
+          @click="router.push('/history')"
+        >
+          查看全部审查记录 →
+        </el-button>
       </el-card>
     </section>
   </div>
@@ -165,6 +195,8 @@ const activity = [
 .dash-error {
   margin-bottom: 16px;
 }
+
+/* KPI */
 .kpi-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -201,6 +233,8 @@ const activity = [
 .kpi-trend.up {
   color: var(--sage);
 }
+
+/* 两栏网格 */
 .dash-grid {
   display: grid;
   grid-template-columns: 1.5fr 1fr;
@@ -212,66 +246,83 @@ const activity = [
   justify-content: space-between;
   align-items: center;
 }
-.role-badge {
+.count-badge {
   font-size: 12px;
-  color: var(--brass);
-  background: var(--brass-soft);
+  color: var(--seal);
+  background: var(--seal-soft);
   padding: 2px 10px;
   border-radius: 20px;
+}
+
+/* 待办列表 */
+.todo-loading {
+  padding: 8px 0;
+}
+.todo-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 0;
+  color: var(--sage);
+  font-size: 13px;
 }
 .todo-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 4px;
+  padding: 11px 6px;
   border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  transition: background-color 0.15s ease;
 }
 .todo-item:last-child {
   border-bottom: none;
 }
+.todo-item:hover {
+  background: var(--ink-3);
+}
 .todo-bar {
   width: 3px;
-  height: 28px;
+  height: 32px;
   border-radius: 2px;
   flex: none;
 }
-.todo-title {
+.todo-body {
   flex: 1;
-  font-size: 14px;
-  color: var(--ivory);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
-.todo-time {
+.todo-contract {
+  font-size: 13px;
+  color: var(--ivory);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.todo-risk {
   font-size: 12px;
   color: var(--muted);
 }
-.quick-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-bottom: 18px;
+.todo-due {
+  font-size: 11px;
+  color: var(--ivory-dim);
+  white-space: nowrap;
 }
-.quick-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--ink-3);
-  color: var(--ivory);
-  cursor: pointer;
-  transition: border-color 0.2s var(--ease), color 0.2s var(--ease);
+.todo-go {
+  color: var(--muted);
+  font-size: 14px;
 }
-.quick-item:hover {
-  border-color: var(--brass);
-  color: var(--brass);
-}
-.activity-head {
-  font-family: var(--serif);
-  font-weight: 600;
-  color: var(--ivory);
-  margin-bottom: 10px;
+
+/* 近期动态 */
+.activity-empty {
+  padding: 20px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
 }
 .activity-list {
   list-style: none;
@@ -282,6 +333,10 @@ const activity = [
   display: flex;
   gap: 10px;
   padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.activity-list li:last-child {
+  border-bottom: none;
 }
 .activity-list .dot {
   width: 7px;
@@ -290,6 +345,9 @@ const activity = [
   background: var(--brass);
   margin-top: 6px;
   flex: none;
+}
+.activity-list .dot.alert {
+  background: var(--seal);
 }
 .activity-list p {
   margin: 0;
@@ -301,6 +359,11 @@ const activity = [
   color: var(--muted);
   font-size: 11px;
 }
+.history-link {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
 @media (max-width: 1180px) {
   .kpi-row {
     grid-template-columns: 1fr 1fr;
