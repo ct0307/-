@@ -9,18 +9,19 @@
 ## 完成情况总览（截至 2026-07-08）
 
 ### 整体架构
-- **前端**：Vue 3 + TS + Element Plus + ECharts，卷宗风 UI。10 个视图（登录 + 8 业务 + 双Agent协作），侧栏导航齐全。
-- **后端**：FastAPI + SQLAlchemy + SQLite（开发）/PostgreSQL（生产），JWT+RBAC，Celery 异步（可切同步），LLM Adapter + RAG 检索，审计日志，LLM 调用记录，部门访问隔离，合同加密存储，字段级脱敏。
-- **数据策略**：前端 `MOCK_ENABLED` 全部 false，100% 调真接口。10张数据库表，23条 API 路由。
+- **前端**：Vue 3 + TS + Element Plus + ECharts，卷宗风 UI。10 个视图（登录 + 9 业务），侧栏支持折叠，全站中文业务语言。
+- **后端**：FastAPI + SQLAlchemy + SQLite（开发）/PostgreSQL（生产），JWT+RBAC，Celery 异步，LLM Adapter + RAG 检索，审计日志，LLM 调用记录，部门访问隔离，合同加密存储，字段级脱敏。
+- **数据策略**：前端 `MOCK_ENABLED` 全部 false，100% 调真接口。10 张数据库表，**24 条 API 路由**（含 `/chat`）。
 
 ### 模块完成度
 | 模块 | 前端 | 后端 | 状态 |
 |---|---|---|---|
 | 登录 / RBAC（4角色：admin/legal/finance/business） | ✅ | ✅ | 闭环 |
 | 合同审查（上传→加密存储→解析→LLM双Agent审查→复核→整改） | ✅ | ✅ | 核心闭环已通 |
-| 双Agent协作（串行协同/冲突消解/分级分档） | ✅ | ✅ | 前后端联动完成 |
-| 工作台 Dashboard | ✅ | ✅ | ✅ 真接口 |
-| 多维报表 Reports（含 Excel 导出） | ✅ | ✅ | ✅ 真接口 |
+| 智能协同审查（冲突消解/分级分档，有会话才展示结果） | ✅ | ✅ | 前后端联动完成 |
+| **风险条款追问 AI**（绑定上下文，对话历史管理） | ✅ | ✅ | ✅ 新增 |
+| 工作台（真实整改待办 + 真实审查动态） | ✅ | ✅ | ✅ 真接口 |
+| 多维报表 Reports（含 Excel 导出，KPI口径说明） | ✅ | ✅ | ✅ 真接口 |
 | 法规知识库 Knowledge（含添加持久化） | ✅ | ✅ | ✅ 真接口 |
 | 整改跟踪 Rectify（含状态流转按钮） | ✅ | ✅ | ✅ 真接口 |
 | 审查记录 History（含点击行风险钻取） | ✅ | ✅ | ✅ 真接口 |
@@ -34,14 +35,116 @@
 | 字段级脱敏 | 响应层按角色分级：business 看提交人首字+**，风险原文截断+[已脱敏] | ✅ |
 | 部门访问隔离 | business 角色仅可见本部门合同（WHERE dept 过滤，403 跨部门） | ✅ |
 | 审计日志 + IP 追踪 | 全操作留痕，login/upload 等写入真实客户端 IP（X-Forwarded-For 优先） | ✅ |
-| LLM 调用可观测性 | 每次 chat 调用写入 llm_call_logs，Admin Tab 展示三种 provider 算力对比 | ✅ |
+| LLM 调用可观测性 | 每次 chat/追问调用写入 llm_call_logs，Admin Tab 展示三种 provider 算力对比 | ✅ |
 | 准确率责任边界 | 每条风险：原文引用 + 法规依据 + 置信度 + 人工复核状态 + 免责声明 | ✅ |
 | 私有化模型可切换 | LLM Adapter 支持 Qwen/DeepSeek/OpenClaw，当前 DeepSeek（开发用） | ✅ |
 
 ### 待办（仅剩 P3）
 1. **P3** 生产 PostgreSQL alembic 迁移脚本（当前 SQLite 开发期补列兜底）
 2. **P3** 生产切私有化 Qwen（合同数据出公网，DeepSeek 仅开发/演示用）
-3. **P3** AuditView 合同文件上传后显示文件名（Vue el-upload input 响应式问题，功能本身通过 curl 验证）
+
+---
+
+## 2026-07-08 · 风险条款追问 AI（✅ 已完成）
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/app/api/v1/endpoints/chat.py`（新建） | `POST /chat`：接收风险上下文（category/original_text/basis/suggestion/confidence）+ 用户消息 + 对话历史，构造 system prompt 后调 LLM Adapter 作答；对话历史最多携带 6 条；调用写入 llm_call_logs（agent=chat，mode=chat） |
+| `backend/app/api/v1/router.py` | 注册 `/chat` 路由 |
+| `frontend/src/api/chat.ts`（新建） | `chatWithRisk()` 封装请求 |
+| `frontend/src/components/audit/RiskReviewDrawer.vue` | 风险详情下方加追问面板：空状态示例引导、用户/AI 气泡消息列表、Enter 发送、切换风险自动清空历史、抽屉宽度 440→480px |
+
+### 功能说明
+用户点击风险条目进入复核抽屉，可就该条款向 AI 追问（例如"违约金上限在行业里正常吗""我方有哪些谈判空间"）。每次对话均绑定当前条款的完整上下文，AI 不会泛泛作答。对话历史在当次抽屉内保留，关闭/切换风险自动清空。
+
+### 验证结论
+- 后端 `chat` 模块导入无报错 ✅
+- 前端抽屉页面加载 0 errors ✅
+
+---
+
+## 2026-07-08 · 工作台去演示假数据（✅ 已完成）
+
+### 改动
+| 区块 | 改前 | 改后 |
+|---|---|---|
+| 待办面板 | `todoByRole` 硬编码 4 条，随演示视角切换 | 真实整改项（`status=待处理`，最多 5 条，点击跳转整改跟踪页） |
+| 近期动态 | 固定 4 条假字符串 | `GET /contracts` 真实审查记录，相对时间格式化（刚刚/N分钟前/N小时前/N天前） |
+| 快捷入口 | 2×2 按钮格，与侧栏完全重复 | 删除 |
+
+涉及文件：`DashboardView.vue`（删除 `useDemoStore`/`todoByRole`/`quick`/`activity` 全部演示逻辑）
+
+### 验证结论
+真实整改项（品牌年度推广服务合同.pdf · 关联交易）正常显示，近期动态 5 条真实数据，相对时间格式正确 ✅
+
+---
+
+## 2026-07-08 · P1 去技术展示冗余（✅ 已完成）
+
+### 问题
+前端混入了两类内容——"AI 是怎么工作的"（技术展示）和"AI 帮你发现了什么"（业务决策）。前者对法务/财务用户无决策价值，且让产品显得像演示平台而非企业工具。
+
+### 改动
+
+**合同审查页（AuditView.vue）**
+- 删除审查结果里的"多智能体协同双泳道"（`collabSteps`，固定 SOP 步骤字符串）
+- 删除相关 CSS（`.collab` / `.collab-lanes` / `.lane-head` / `.collab-step` 等，共减少约 70 行）
+
+**智能协同审查页（CollaborationView.vue）**
+- 删除"协作链路·主从串行工作流"整卡（固定 SOP 图示，技术展示无决策价值）
+- 删除 Agent 名片中"定向 RAG 检索主题"和"Prompt 侧重"区块（AI 实现细节）
+- 无真实审查会话时：整页演示数据 → 引导提示"完成合同审查后此处将显示协同结果"+ 跳转按钮
+- 冲突消解 / 分级风险 / 结果对比加 `v-if="isLive"`，有真实数据才展示
+- 清理无用 import（`COLLAB_CHAIN`/`ChainStage`）及 `ownerMeta`/`chain` 常量
+
+净删 236 行，新增 25 行。
+
+### 模块职责边界（改后清晰）
+- **合同审查页** = 操作（上传 → 复核 → 生成整改）
+- **智能协同审查页** = 结果分析（冲突消解 + 分级策略 + 风险对比）
+
+### 验证结论
+- 协同审查页 0 errors，无演示数据残留，"完成合同审查后…"引导正常显示 ✅
+- 合同审查页审查结果区域直接展示风险清单，无 SOP 噪音 ✅
+
+---
+
+## 2026-07-08 · UI 文案业务化 + 体验优化（✅ 已完成）
+
+### P1 文案改造
+| 文件 | 改动 |
+|---|---|
+| `router/index.ts` | 全站 9 个页面 eyebrow 由英文技术术语（`AI-POWERED CONTRACT REVIEW` 等）改为中文业务语言（`合同智能审查`等） |
+| `nav.ts` | `双Agent协作` → `智能协同审查` |
+| `OpenClawBadge.vue` | `算力运行状态 · OpenClaw一体机` → `本地算力 · 运行中` |
+| `LoginView.vue` | 清演示账号默认值；`hint` 用 `isDev` 隐藏；补 `name`/`autocomplete`；副标题改"私有化部署 · 数据不出企业" |
+
+### P2 交互优化
+| 文件 | 改动 |
+|---|---|
+| `AuditView.vue` | `el-empty` 替换为 3 步可视化引导（上传合同→智能审查→人工复核/生成整改），带 active/done 状态跟随 `session.step` |
+| `ReportsView.vue` | "合规通过率"和"平均审查耗时" KPI 卡加口径说明 tooltip（`?` 图标悬停显示） |
+| 多个 `.vue` 文件 | 全站移除 `transition: all`（5 处）→ 精确指定过渡属性，避免 GPU 处理无关 CSS 变化 |
+
+### 验证结论
+浏览器实测：侧栏"智能协同审查"、底部"本地算力·运行中"、页面 eyebrow "法务工作台"均正确显示 ✅
+
+---
+
+## 2026-07-08 · 侧栏折叠 + 演示切换隐藏 + 文件名即时反馈（✅ 已完成）
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `MainLayout.vue` | `provide` 注入 `collapsed: Ref<boolean>`；`v-bind(sidebarWidth)` 驱动 grid 宽度（64px↔264px），带 CSS `transition` |
+| `AppSidebar.vue` | `inject` 接收 collapsed；`el-menu :collapse` 切图标模式；底部"收起侧栏/展开侧栏"按钮 |
+| `UserSwitcher.vue` | 演示视角切换列表用 `import.meta.env.DEV` 包裹，`npm run build` 后自动隐藏 |
+| `AuditView.vue` | 新增 `pendingFilename` ref，文件选择后立即显示文件名+loading 图标，不等后端返回 |
+
+### 验证结论
+- 侧栏折叠/展开：点击正确切换，菜单变图标模式，主内容区宽度同步扩展 ✅
+- 演示视角切换：dev 模式可见（npm run dev），生产构建自动隐藏 ✅
 
 ---
 
