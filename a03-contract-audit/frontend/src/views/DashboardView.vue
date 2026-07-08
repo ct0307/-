@@ -30,7 +30,10 @@ async function loadSummary() {
     loading.value = false
   }
 }
-onMounted(loadSummary)
+onMounted(() => {
+  loadSummary()
+  rectify.load() // 拉整改项，供「待整改项」KPI 实时派生
+})
 
 // 合规通过率：已确认 / 总复核数（近似），无数据回退 0
 const passRate = computed(() => {

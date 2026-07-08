@@ -20,3 +20,15 @@ export async function getKnowledgeStats(): Promise<typeof KNOWLEDGE_STATS> {
   }
   return client.get('/knowledge/stats')
 }
+
+/** 导入知识片段到知识库（持久化到后端）。*/
+export async function importKnowledge(payload: {
+  category: string // law / rule / template / case
+  source: string   // 来源/标题
+  content: string  // 正文
+}): Promise<void> {
+  if (MOCK_ENABLED.knowledge) {
+    return // mock 模式下无需持久化
+  }
+  await client.post('/knowledge/import', payload)
+}

@@ -7,8 +7,17 @@ from app.models.models import AuditLog
 log = get_logger("audit_log")
 
 
-def record(db: Session, *, user_id: int, action: str, target: str = "", detail: str = "") -> None:
-    entry = AuditLog(user_id=user_id, action=action, target=target, detail=detail)
+def record(
+    db: Session,
+    *,
+    user_id: int,
+    action: str,
+    target: str = "",
+    detail: str = "",
+    ip: str = "",
+) -> None:
+    """记录审计日志。ip 从调用方按需传入（auth/合同操作等），其余内部操作留空。"""
+    entry = AuditLog(user_id=user_id, action=action, target=target, detail=detail, ip=ip)
     db.add(entry)
     db.commit()
-    log.info("audit_log", user_id=user_id, action=action, target=target)
+    log.info("audit_log", user_id=user_id, action=action, target=target, ip=ip or "-")

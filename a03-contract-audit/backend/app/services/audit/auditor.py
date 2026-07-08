@@ -21,11 +21,16 @@
 """
 import json
 import re
+from typing import TYPE_CHECKING
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.llm.base import LLMError
 from app.llm.factory import get_llm_adapter
 from app.services.rag.retriever import retrieve
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 log = get_logger("audit")
 
@@ -56,7 +61,39 @@ _AGENTS = {
 _AGENT_ORDER = ["legal", "finance"]
 
 
-def audit_contract(elements: dict, contract_text: str) -> dict:
+def _record_llm_call(
+    db: "Session | None",
+    contract_id: int | None,
+    agent: str,
+    resp,
+    mode: str = "llm",
+) -> None:
+    """写入 LLM 调用日志。db 为 None（测试/独立调用）时跳过，不阻断审查。"""
+    if db is None:
+        return
+    try:
+        from app.models.models import LLMCallLog
+        db.add(LLMCallLog(
+            contract_id=contract_id,
+            agent=agent,
+            provider=settings.LLM_PROVIDER,
+            model=resp.model,
+            prompt_tokens=resp.prompt_tokens,
+            completion_tokens=resp.completion_tokens,
+            latency_ms=resp.latency_ms,
+            mode=mode,
+        ))
+        db.commit()
+    except Exception as exc:  # 不让日志写入失败影响审查主链路
+        log.warning("audit.llm_log_failed", error=str(exc)[:120])
+
+
+def audit_contract(
+    elements: dict,
+    contract_text: str,
+    db: "Session | None" = None,
+    contract_id: int | None = None,
+) -> dict:
     """多智能体主从协同审查。
 
     返回 {"risks": [...], "cross_checks": [...]}：
@@ -72,7 +109,7 @@ def audit_contract(elements: dict, contract_text: str) -> dict:
 
     for role in _AGENT_ORDER:
         try:
-            risks = _agent_audit(role, elements, contract_text, shared_context)
+            risks = _agent_audit(role, elements, contract_text, shared_context, db=db, contract_id=contract_id)
             log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(risks))
         except (LLMError, ValueError) as exc:
             log.warning("audit.agent_fallback", agent=role, error=str(exc)[:120])
@@ -110,8 +147,17 @@ def _summarize_for_context(role: str, risks: list[dict], elements: dict) -> dict
     }
 
 
-def _agent_audit(role: str, elements: dict, contract_text: str, shared_context: dict) -> list[dict]:
-    """单个 Agent 审查：定向 RAG 依据 + 角色 prompt（含上游共享上下文）→ chat → 解析。"""
+def _agent_audit(
+    role: str,
+    elements: dict,
+    contract_text: str,
+    shared_context: dict,
+    db: "Session | None" = None,
+    contract_id: int | None = None,
+) -> list[dict]:
+    """单个 Agent 审查：定向 RAG 依据 + 角色 prompt（含上游共享上下文）→ chat → 解析。
+    db/contract_id 可选，仅用于写 LLM 调用日志，不影响审查主链路。
+    """
     cfg = _AGENTS[role]
 
     # 该角色关注维度的定向 RAG 依据
@@ -158,6 +204,8 @@ def _agent_audit(role: str, elements: dict, contract_text: str, shared_context: 
 
     adapter = get_llm_adapter()
     resp = adapter.chat(system_prompt, user_prompt)
+    # 记录本次 LLM 调用（provider/model/token/latency），供可解释性溯源与算力对比
+    _record_llm_call(db, contract_id, agent=role, resp=resp, mode="llm")
     raw = _parse_risk_json(resp.text)
     return [_normalize(r, role) for r in raw]
 

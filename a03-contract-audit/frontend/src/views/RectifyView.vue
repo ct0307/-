@@ -1,11 +1,15 @@
 <script setup lang="ts">
 // 整改跟踪：源自 rectify store（含 AuditView 复核确认生成的真实整改项）。
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import { useRectifyStore, type RectifyStatus } from '@/stores/rectify'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
 const rectify = useRectifyStore()
 const filter = ref<'全部' | RectifyStatus>('全部')
+const changing = ref<Set<string>>(new Set()) // 正在流转的整改项 ID 集合
+
+onMounted(() => rectify.load())
 
 const filtered = computed(() =>
   filter.value === '全部' ? rectify.items : rectify.items.filter((r) => r.status === filter.value),
@@ -22,6 +26,28 @@ const statusType: Record<RectifyStatus, 'info' | 'warning' | 'success'> = {
   已闭环: 'success',
 }
 const segs: ('全部' | RectifyStatus)[] = ['全部', '待处理', '处理中', '已闭环']
+
+// 状态流转：待处理 → 处理中 → 已闭环 → 待处理（循环）
+const nextStatusMap: Record<RectifyStatus, { next: RectifyStatus; label: string; btnType: 'primary' | 'success' | '' }> = {
+  待处理: { next: '处理中', label: '开始处理', btnType: 'primary' },
+  处理中: { next: '已闭环', label: '标记闭环', btnType: 'success' },
+  已闭环: { next: '待处理', label: '重新开启', btnType: '' },
+}
+
+async function advance(id: string, current: RectifyStatus) {
+  if (changing.value.has(id)) return
+  const { next } = nextStatusMap[current]
+  changing.value = new Set([...changing.value, id])
+  try {
+    await rectify.setStatus(id, next)
+  } catch {
+    ElMessage.error('状态更新失败，请重试')
+  } finally {
+    const s = new Set(changing.value)
+    s.delete(id)
+    changing.value = s
+  }
+}
 </script>
 
 <template>
@@ -37,8 +63,19 @@ const segs: ('全部' | RectifyStatus)[] = ['全部', '待处理', '处理中', 
           {{ s }}
         </button>
       </div>
-      <DemoBadge />
+      <DemoBadge module="rectify" />
     </div>
+
+    <el-alert
+      v-if="rectify.error"
+      :title="rectify.error"
+      type="error"
+      show-icon
+      :closable="false"
+      style="margin-bottom: 16px"
+    >
+      <el-button size="small" @click="rectify.load(true)">重试</el-button>
+    </el-alert>
 
     <section class="rk-row">
       <article class="rk-card"><span>待处理</span><strong class="mono">{{ rectify.countByStatus.待处理 }}</strong></article>
@@ -47,11 +84,11 @@ const segs: ('全部' | RectifyStatus)[] = ['全部', '待处理', '处理中', 
       <article class="rk-card"><span>整改项合计</span><strong class="mono">{{ rectify.total }}</strong></article>
     </section>
 
-    <el-card shadow="never">
+    <el-card v-loading="rectify.loading" shadow="never">
       <template #header>
         <div class="panel-head"><span>整改项列表</span><span class="count mono">共 {{ filtered.length }} 项</span></div>
       </template>
-      <el-empty v-if="!filtered.length" description="暂无整改项" />
+      <el-empty v-if="!rectify.loading && !filtered.length" description="暂无整改项" />
       <article v-for="r in filtered" :key="r.id" class="rect-item" :class="`lvl-${r.level}`">
         <div class="rect-main">
           <div class="rect-head">
@@ -63,10 +100,22 @@ const segs: ('全部' | RectifyStatus)[] = ['全部', '待处理', '处理中', 
           <p class="rect-risk">风险：{{ r.risk }}</p>
           <p v-if="r.note" class="rect-note">{{ r.note }}</p>
         </div>
-        <div class="rect-meta mono">
-          <span>责任人 {{ r.owner }}</span>
-          <span>创建 {{ r.created }}</span>
-          <span>截止 {{ r.due }}</span>
+        <div class="rect-right">
+          <div class="rect-meta mono">
+            <span>责任人 {{ r.owner }}</span>
+            <span>创建 {{ r.created }}</span>
+            <span>截止 {{ r.due }}</span>
+          </div>
+          <el-button
+            size="small"
+            :type="nextStatusMap[r.status].btnType || undefined"
+            :loading="changing.has(r.id)"
+            :plain="r.status === '已闭环'"
+            class="advance-btn"
+            @click="advance(r.id, r.status)"
+          >
+            {{ nextStatusMap[r.status].label }}
+          </el-button>
         </div>
       </article>
     </el-card>
@@ -179,6 +228,13 @@ const segs: ('全部' | RectifyStatus)[] = ['全部', '待处理', '处理中', 
   color: var(--ivory-dim);
   line-height: 1.5;
 }
+.rect-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  flex-shrink: 0;
+}
 .rect-meta {
   display: flex;
   flex-direction: column;
@@ -188,6 +244,9 @@ const segs: ('全部' | RectifyStatus)[] = ['全部', '待处理', '处理中', 
   text-align: right;
   white-space: nowrap;
 }
+.advance-btn {
+  width: 88px;
+}
 @media (max-width: 1180px) {
   .rk-row {
     grid-template-columns: 1fr 1fr;
@@ -195,11 +254,18 @@ const segs: ('全部' | RectifyStatus)[] = ['全部', '待处理', '处理中', 
   .rect-item {
     flex-direction: column;
   }
+  .rect-right {
+    align-items: flex-start;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
   .rect-meta {
     text-align: left;
     flex-direction: row;
     flex-wrap: wrap;
     gap: 12px;
   }
+  .advance-btn { width: auto; }
 }
 </style>

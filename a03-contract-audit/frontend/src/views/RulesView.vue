@@ -1,8 +1,15 @@
 <script setup lang="ts">
-// 规则与模板管理（仅 admin）：审查规则库 + 合同模板库，增删（mock 本地态）。
+// 规则与模板管理（仅 admin）：审查规则库 + 合同模板库，增删调 api。
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getRules, getTemplates } from '@/api/rules'
+import {
+  getRules,
+  getTemplates,
+  createRule,
+  deleteRule,
+  createTemplate,
+  deleteTemplate,
+} from '@/api/rules'
 import type { AuditRule, ContractTemplate } from '@/mock/rules'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
@@ -30,48 +37,71 @@ const levelMeta: Record<string, { label: string; type: 'danger' | 'warning' | 'i
 
 async function delRule(r: AuditRule) {
   await ElMessageBox.confirm(`确认删除规则「${r.name}」？`, '删除确认', { type: 'warning' })
-  rules.value = rules.value.filter((x) => x.id !== r.id)
-  ElMessage.success('已删除')
+  try {
+    await deleteRule(r.id)
+    rules.value = rules.value.filter((x) => x.id !== r.id)
+    ElMessage.success('已删除')
+  } catch {
+    ElMessage.error('删除失败（内置规则不可删除）')
+  }
 }
 async function delTemplate(t: ContractTemplate) {
   await ElMessageBox.confirm(`确认删除模板「${t.name}」？`, '删除确认', { type: 'warning' })
-  templates.value = templates.value.filter((x) => x.id !== t.id)
-  ElMessage.success('已删除')
+  try {
+    await deleteTemplate(t.id)
+    templates.value = templates.value.filter((x) => x.id !== t.id)
+    ElMessage.success('已删除')
+  } catch {
+    ElMessage.error('删除失败（内置模板不可删除）')
+  }
 }
 
 // 新增规则
 const ruleOpen = ref(false)
+const ruleSaving = ref(false)
 const ruleForm = ref({ name: '', dimension: '法律条款合规性', level: 'medium' as AuditRule['level'], agent: '法务 Agent', desc: '' })
-function submitRule() {
+async function submitRule() {
   if (!ruleForm.value.name) return ElMessage.warning('请填写规则名称')
-  rules.value.unshift({ id: `R${Date.now()}`, ...ruleForm.value, builtin: false })
-  ruleOpen.value = false
-  ruleForm.value = { name: '', dimension: '法律条款合规性', level: 'medium', agent: '法务 Agent', desc: '' }
-  ElMessage.success('已新增规则')
+  ruleSaving.value = true
+  try {
+    const item = await createRule({ ...ruleForm.value })
+    rules.value = [item, ...rules.value]
+    ruleOpen.value = false
+    ruleForm.value = { name: '', dimension: '法律条款合规性', level: 'medium', agent: '法务 Agent', desc: '' }
+    ElMessage.success('已新增规则')
+  } catch {
+    ElMessage.error('新增失败（需管理员权限）')
+  } finally {
+    ruleSaving.value = false
+  }
 }
 
 // 新增模板
 const tplOpen = ref(false)
+const tplSaving = ref(false)
 const tplForm = ref({ name: '', type: '软件开发外包合同', clausesText: '' })
-function submitTpl() {
+async function submitTpl() {
   if (!tplForm.value.name) return ElMessage.warning('请填写模板名称')
-  templates.value.unshift({
-    id: `T${Date.now()}`,
-    name: tplForm.value.name,
-    type: tplForm.value.type,
-    clauses: tplForm.value.clausesText.split('\n').map((s) => s.trim()).filter(Boolean),
-    builtin: false,
-  })
-  tplOpen.value = false
-  tplForm.value = { name: '', type: '软件开发外包合同', clausesText: '' }
-  ElMessage.success('已新增模板')
+  tplSaving.value = true
+  try {
+    const clauses = tplForm.value.clausesText.split('\n').map((s) => s.trim()).filter(Boolean)
+    const item = await createTemplate({ name: tplForm.value.name, type: tplForm.value.type, clauses })
+    templates.value = [item, ...templates.value]
+    tplOpen.value = false
+    tplForm.value = { name: '', type: '软件开发外包合同', clausesText: '' }
+    ElMessage.success('已新增模板')
+  } catch {
+    ElMessage.error('新增失败（需管理员权限）')
+  } finally {
+    tplSaving.value = false
+  }
 }
 </script>
 
 <template>
   <div v-loading="loading">
     <div class="toolbar">
-      <DemoBadge />
+      <DemoBadge module="rules" />
       <div class="tool-btns">
         <el-button :icon="'EditPen'" @click="tplOpen = true">新增合同模板</el-button>
         <el-button type="primary" :icon="'Plus'" @click="ruleOpen = true">新增审查规则</el-button>

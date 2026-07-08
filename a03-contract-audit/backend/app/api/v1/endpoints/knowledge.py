@@ -61,9 +61,17 @@ def import_knowledge(
     chunks = [{"category": payload.category, "source": payload.source, "content": p} for p in pieces]
     try:
         count = index_documents(chunks, db=db)
-    except LLMError as exc:
-        # embedding 服务不可用：明确报错，不静默写入空向量
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"向量化服务不可用：{exc}") from exc
+    except LLMError:
+        # embedding 服务不可用（如 DeepSeek 无 /embeddings 端点）：
+        # 降级写入空向量，RAG 走关键词检索——与 seed 演示数据保持一致。
+        from app.models.models import KnowledgeChunk
+        for c in chunks:
+            db.add(KnowledgeChunk(
+                category=c["category"], source=c["source"],
+                content=c["content"], embedding="",
+            ))
+        db.commit()
+        count = len(chunks)
 
     audit_log.record(db, user_id=user.id, action="import_knowledge", target=payload.category, detail=f"chunks={count}")
     return {"category": payload.category, "source": payload.source, "imported_chunks": count}

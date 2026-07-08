@@ -3,7 +3,10 @@
 文本抽取为真实实现（pdfplumber / python-docx / pypdf）。
 要素抽取用正则做启发式抽取，覆盖常见字段；复杂条款后续交给 LLM 抽取增强。
 扫描件 PDF 无文本层时抽取结果为空，后续接 OCR（风险点已记录）。
+
+加密存储支持：启用 FILE_ENCRYPT_KEY 后，extract_text 自动解密再解析，调用方无感知。
 """
+import io
 import re
 
 from app.core.logging import get_logger
@@ -11,37 +14,46 @@ from app.core.logging import get_logger
 log = get_logger("parser")
 
 
+def _read_decrypted(file_path: str) -> bytes:
+    """读取文件内容并按需解密。密钥未设置则返回原始字节（明文模式，向后兼容）。"""
+    with open(file_path, "rb") as f:
+        raw = f.read()
+    from app.core.crypto import decrypt_bytes
+    return decrypt_bytes(raw)
+
+
 def extract_text(file_path: str) -> str:
-    """按扩展名抽取合同纯文本。"""
+    """按扩展名抽取合同纯文本。自动处理加密/明文两种存储模式。"""
+    data = _read_decrypted(file_path)
     lower = file_path.lower()
     if lower.endswith(".pdf"):
-        return _extract_pdf(file_path)
+        return _extract_pdf_bytes(data)
     if lower.endswith(".docx"):
-        return _extract_docx(file_path)
+        return _extract_docx_bytes(data)
     if lower.endswith(".txt"):
-        with open(file_path, encoding="utf-8", errors="ignore") as f:
-            return f.read()
+        return data.decode("utf-8", errors="ignore")
     raise ValueError(f"不支持的文件类型: {file_path}")
 
 
-def _extract_pdf(file_path: str) -> str:
+def _extract_pdf_bytes(data: bytes) -> str:
     import pdfplumber
 
     parts: list[str] = []
-    with pdfplumber.open(file_path) as pdf:
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
         for page in pdf.pages:
             parts.append(page.extract_text() or "")
     text = "\n".join(parts).strip()
     if not text:
-        log.warning("parser.pdf_empty", file=file_path, hint="可能是扫描件，需 OCR")
+        log.warning("parser.pdf_empty", hint="可能是扫描件，需 OCR")
     return text
 
 
-def _extract_docx(file_path: str) -> str:
+def _extract_docx_bytes(data: bytes) -> str:
     from docx import Document
 
-    doc = Document(file_path)
+    doc = Document(io.BytesIO(data))
     return "\n".join(p.text for p in doc.paragraphs).strip()
+
 
 
 # 关键要素抽取规则：字段名 → 正则（取第一个捕获组）

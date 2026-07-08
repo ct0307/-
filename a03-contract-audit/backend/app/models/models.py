@@ -75,4 +75,85 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(64))       # login/upload/audit/update_risk/export...
     target: Mapped[str] = mapped_column(String(128), default="")
     detail: Mapped[str] = mapped_column(Text, default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")  # 操作来源 IP（从请求真实提取，追责用）
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AuditRule(Base):
+    """审查规则：驱动 Agent 判定风险的业务规则，支持内置与自定义。"""
+    __tablename__ = "audit_rules"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    dimension: Mapped[str] = mapped_column(String(64), default="")   # 审查维度
+    level: Mapped[str] = mapped_column(String(8))                    # high/medium/low
+    agent: Mapped[str] = mapped_column(String(32), default="法务 Agent")  # 法务 Agent/财务 Agent
+    desc: Mapped[str] = mapped_column(Text, default="")
+    builtin: Mapped[bool] = mapped_column(Integer, default=0)        # SQLite 没有 Boolean，0/1
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ContractTemplate(Base):
+    """合同模板：标准条款清单，供审查时比对与参考。"""
+    __tablename__ = "contract_templates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    type: Mapped[str] = mapped_column(String(64), default="")        # 合同类型
+    clauses: Mapped[str] = mapped_column(Text, default="[]")         # JSON 序列化的条款列表
+    builtin: Mapped[bool] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccessRole(Base):
+    """权限矩阵：角色与模块的读写权限映射，支持在线编辑。
+
+    perms 为 JSON 列表，与 modules 固定顺序一一对应：
+    7 个模块 → ['工作台','合同审查','整改跟踪','多维报表','法规知识库','规则与模板','权限与审计']
+    值 ∈ 读写/只读/无
+    """
+    __tablename__ = "access_roles"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(32), unique=True)     # business/legal/finance/admin
+    label: Mapped[str] = mapped_column(String(32))                # 显示名称
+    perms: Mapped[str] = mapped_column(Text, default="[]")        # JSON 序列化的权限列表
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class LLMCallLog(Base):
+    """LLM 调用记录：每次 Agent chat 调用留痕，供算力对比与可解释性审计。
+
+    provider/model/token 用量/延迟等信息可用于：
+    - OpenClaw 与通用模型的成本/延迟对比（竞赛技术分重点）
+    - 审查结论可解释性溯源（哪次 LLM 调用产出了哪批风险）
+    - 模型更换/降级影响分析
+    """
+    __tablename__ = "llm_call_logs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int | None] = mapped_column(ForeignKey("contracts.id"), nullable=True)
+    agent: Mapped[str] = mapped_column(String(16), default="")       # legal/finance
+    provider: Mapped[str] = mapped_column(String(32), default="")    # deepseek/qwen/openclaw
+    model: Mapped[str] = mapped_column(String(64), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    mode: Mapped[str] = mapped_column(String(8), default="llm")       # llm/mock（降级时不记录）
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Rectification(Base):
+    """整改项：由已确认风险生成，进入整改跟踪闭环。核心审查闭环的下游。
+
+    字段对齐前端 stores/rectify.ts：level 用英文档位、status 用中文流转态、
+    created/due 存 YYYY-MM-DD 字符串（前端直接展示，非 ISO）。
+    """
+    __tablename__ = "rectifications"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract: Mapped[str] = mapped_column(String(255))   # 合同名（冗余存储，便于台账直读）
+    risk: Mapped[str] = mapped_column(String(255))       # 风险描述（风险 category）
+    level: Mapped[str] = mapped_column(String(8))        # high/medium/low
+    owner: Mapped[str] = mapped_column(String(64), default="")   # 责任人
+    status: Mapped[str] = mapped_column(String(16), default="待处理")  # 待处理/处理中/已闭环
+    created: Mapped[str] = mapped_column(String(16))     # YYYY-MM-DD
+    due: Mapped[str] = mapped_column(String(16))         # YYYY-MM-DD（默认创建日 +7 天）
+    note: Mapped[str] = mapped_column(Text, default="")  # 备注（整改建议）
+    risk_id: Mapped[int | None] = mapped_column(ForeignKey("risks.id"), nullable=True)  # 溯源风险，可空
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

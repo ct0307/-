@@ -2,7 +2,7 @@
 // 法规知识库(RAG)：搜索 + 分类 chip + 4 统计卡 + 卡片网格 + 关键词高亮 + 详情。
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getKnowledgeCards, getKnowledgeStats } from '@/api/knowledge'
+import { getKnowledgeCards, getKnowledgeStats, importKnowledge } from '@/api/knowledge'
 import type { KnowledgeCard, KnowledgeCat } from '@/mock/knowledge'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
@@ -62,23 +62,39 @@ function openDetail(c: KnowledgeCard) {
 
 // 添加知识
 const addOpen = ref(false)
+const addSaving = ref(false)
 const form = ref({ title: '', cat: '法律法规' as KnowledgeCat, desc: '' })
-function submitAdd() {
+
+// 前端分类名 → 后端 category 英文键
+const catKeyMap: Record<KnowledgeCat, string> = {
+  法律法规: 'law',
+  标准条款: 'template',
+  风险规则: 'rule',
+  典型案例: 'case',
+}
+
+async function submitAdd() {
   if (!form.value.title || !form.value.desc) {
     ElMessage.warning('请填写标题和摘要')
     return
   }
-  cards.value.unshift({
-    id: `K${Date.now()}`,
-    title: form.value.title,
-    cat: form.value.cat,
-    desc: form.value.desc,
-    chips: ['自定义'],
-    date: new Date().toISOString().slice(0, 10),
-  })
-  addOpen.value = false
-  form.value = { title: '', cat: '法律法规', desc: '' }
-  ElMessage.success('已入库（演示：仅前端）')
+  addSaving.value = true
+  try {
+    await importKnowledge({
+      category: catKeyMap[form.value.cat],
+      source: form.value.title,
+      content: form.value.desc,
+    })
+    // 导入成功后刷新卡片列表（后端已入库）
+    await load()
+    addOpen.value = false
+    form.value = { title: '', cat: '法律法规', desc: '' }
+    ElMessage.success('已入库')
+  } catch {
+    ElMessage.error('入库失败，请重试')
+  } finally {
+    addSaving.value = false
+  }
 }
 </script>
 
@@ -147,7 +163,7 @@ function submitAdd() {
       </el-form>
       <template #footer>
         <el-button @click="addOpen = false">取消</el-button>
-        <el-button type="primary" @click="submitAdd">入库</el-button>
+        <el-button type="primary" :loading="addSaving" @click="submitAdd">入库</el-button>
       </template>
     </el-dialog>
   </div>

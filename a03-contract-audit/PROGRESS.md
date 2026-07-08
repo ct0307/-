@@ -6,193 +6,221 @@
 
 ---
 
-## 完成情况总览（截至 2026-07-07）
+## 完成情况总览（截至 2026-07-08）
 
 ### 整体架构
-- **前端**：Vue 3 + TS + Element Plus + ECharts，卷宗风 UI。8 个业务视图 + 登录，侧栏导航齐全。
-- **后端**：FastAPI + SQLAlchemy + SQLite（开发）/PostgreSQL（生产），JWT+RBAC，Celery 异步（可切同步），LLM Adapter + RAG 检索，审计日志。
-- **数据策略**：前端 `MOCK_ENABLED` 总开关，页面只调 `api/*.ts`，后端接口就绪后置 false 即可零改动切换。
+- **前端**：Vue 3 + TS + Element Plus + ECharts，卷宗风 UI。10 个视图（登录 + 8 业务 + 双Agent协作），侧栏导航齐全。
+- **后端**：FastAPI + SQLAlchemy + SQLite（开发）/PostgreSQL（生产），JWT+RBAC，Celery 异步（可切同步），LLM Adapter + RAG 检索，审计日志，LLM 调用记录，部门访问隔离，合同加密存储，字段级脱敏。
+- **数据策略**：前端 `MOCK_ENABLED` 全部 false，100% 调真接口。10张数据库表，23条 API 路由。
 
 ### 模块完成度
-| 模块 | 前端 | 后端 | 数据来源 | 状态 |
-|---|---|---|---|---|
-| 登录 / RBAC | ✅ | ✅ | 真接口 | 闭环 |
-| 合同审查（上传→解析→审查→复核→整改） | ✅ | ✅ | 真接口 | 核心闭环已通 |
-| 双 Agent 协作（串行协同/冲突消解/分级分档） | ✅ | ✅ | 真接口 + mock 降级 | 前后端联动完成 |
-| 工作台 Dashboard | ✅ | ✅（dashboard/summary） | 真接口 + seed | ✅ 已切真接口 |
-| 多维报表 Reports | ✅ | ✅（summary + 导出） | 真接口 + seed | ✅ 已切真接口 |
-| 法规知识库 Knowledge | ✅ | ✅（cards/stats/导入） | 真接口 + seed | ✅ 已切真接口 |
-| 规则与模板 Rules | ✅ | ⬜ 无端点 | 纯前端 mock | 后端未做（下一步，方案见下） |
-| 审查记录 History | ✅ | ⬜ 无端点 | 纯前端 mock | 后端未做（下一步，可复用 contracts/risks） |
-| 权限与审计 Admin | ✅ | 部分（audit_logs 表有，缺 ip 列） | 前端仍挂 mock | 后端未做（下一步） |
-| 整改跟踪 Rectify | ✅ | ⬜ 无端点 | 前端 store 本地态 | 后端未做（下一步，价值最高） |
+| 模块 | 前端 | 后端 | 状态 |
+|---|---|---|---|
+| 登录 / RBAC（4角色：admin/legal/finance/business） | ✅ | ✅ | 闭环 |
+| 合同审查（上传→加密存储→解析→LLM双Agent审查→复核→整改） | ✅ | ✅ | 核心闭环已通 |
+| 双Agent协作（串行协同/冲突消解/分级分档） | ✅ | ✅ | 前后端联动完成 |
+| 工作台 Dashboard | ✅ | ✅ | ✅ 真接口 |
+| 多维报表 Reports（含 Excel 导出） | ✅ | ✅ | ✅ 真接口 |
+| 法规知识库 Knowledge（含添加持久化） | ✅ | ✅ | ✅ 真接口 |
+| 整改跟踪 Rectify（含状态流转按钮） | ✅ | ✅ | ✅ 真接口 |
+| 审查记录 History（含点击行风险钻取） | ✅ | ✅ | ✅ 真接口 |
+| 规则与模板 Rules | ✅ | ✅ | ✅ 真接口 |
+| 权限与审计 Admin（3 Tab：矩阵/审计日志/LLM调用记录） | ✅ | ✅ | ✅ 真接口 |
 
-### 关键待办（优先级）
-1. ✅ ~~**P1** LLM 502~~ 已修（切 DeepSeek，真实 audit 跑通，见 2026-07-07 条）
-2. ✅ ~~**P1** Dashboard/Reports/Knowledge 切真接口~~ 已完成并浏览器实测
-3. ✅ ~~**P2** DemoBadge 按页显示数据来源~~ 已完成（改为按 `MOCK_ENABLED` 自动切实时/演示态）
-4. **P2** Rules / History / Rectify / Admin 后端端点尚未创建（前端仍纯 mock）—— 下一步主攻
-5. **P1** 数据安全硬约束：上传加密存储、字段级脱敏、审计日志增强（CLAUDE.md 第一目标，尚未动）
-6. **P3** 生产 PostgreSQL 的 alembic 迁移脚本（当前 SQLite 用开发期补列兜底）
-7. **P3** 生产切私有化 Qwen（合同数据出公网与「私有化优先」冲突，DeepSeek 仅开发/演示用）
-
----
-
-## 2026-07-07 · 【下一步计划·未开工】补全 Rectify/History/Rules/Admin 后端
-
-> ⚠️ 本条是**待办计划**，尚未写任何代码。下次新窗口从这里开始。方向已定：一次补全四个 mock 模块的后端（用户选「补全全部剩余模块」）。
-> 前端契约已由 Explore 子代理调研确认（结论见下），后端现有模式已摸清。
-
-### 后端现有模式（照此写新端点）
-- 端点：`APIRouter()` + `Depends(get_db)` + `Depends(require_roles("legal","finance"))`（admin 通配），参考 `endpoints/risks.py`。
-- 审计留痕：每个写操作调 `from app.services import audit_log; audit_log.record(db, user_id=user.id, action=..., target=..., detail=...)`。
-- schema：`app/schemas/contract.py`（Pydantic，`model_config={"from_attributes": True}` 支持 ORM 直转）。
-- 路由注册：`app/api/v1/router.py` 加 `api_router.include_router(xxx.router, prefix="/xxx", tags=[...])`。
-- 建表：`app/db/init_db.py` `create_all` + SQLite 开发期 `_migrate_dev_columns()` 补列（`_DEV_COLUMNS` 字典加表列即可）；生产走 alembic。
-- seed：仿 `backend/scripts/seed_demo.py`（幂等判重哨兵），四模块都要灌演示数据否则切接口后页面空。
-
-### 数据模型改动（`app/models/models.py` 新增表）
-| 表 | 字段 | 备注 |
+### 企业交付硬约束（全部完成）
+| 约束 | 实现方式 | 状态 |
 |---|---|---|
-| `Rectification` | id, contract(合同名), risk(风险描述), level(**英文** high/medium/low), owner, status(**中文** 待处理/处理中/已闭环), created(YYYY-MM-DD), due(默认+7天), note, risk_id(外键可空) | 对齐前端 `stores/rectify.ts` |
-| `AuditRule` | id, name, dimension, level(high/medium/low), agent(法务Agent/财务Agent), desc, builtin(bool) | Rules |
-| `ContractTemplate` | id, name, type, clauses(JSON 数组), builtin(bool) | Rules |
-| 权限矩阵 | 可用 DB 表 `AccessRole`(key,label,perms JSON) 或直接配置常量 | Admin，**待定：DB 表 or 配置常量** |
-| `audit_logs` | **需补 `ip` 列**（现表无 ip）→ 加进 `_DEV_COLUMNS` | Admin |
+| 合同文件加密存储 | Fernet AES-128-CBC+HMAC，密钥注入 `.env`，上传即加密落盘 | ✅ |
+| 字段级脱敏 | 响应层按角色分级：business 看提交人首字+**，风险原文截断+[已脱敏] | ✅ |
+| 部门访问隔离 | business 角色仅可见本部门合同（WHERE dept 过滤，403 跨部门） | ✅ |
+| 审计日志 + IP 追踪 | 全操作留痕，login/upload 等写入真实客户端 IP（X-Forwarded-For 优先） | ✅ |
+| LLM 调用可观测性 | 每次 chat 调用写入 llm_call_logs，Admin Tab 展示三种 provider 算力对比 | ✅ |
+| 准确率责任边界 | 每条风险：原文引用 + 法规依据 + 置信度 + 人工复核状态 + 免责声明 | ✅ |
+| 私有化模型可切换 | LLM Adapter 支持 Qwen/DeepSeek/OpenClaw，当前 DeepSeek（开发用） | ✅ |
 
-### 端点清单（前端契约，字段名须精确对齐，返回体形态别改）
-**Rectify**（新建 `endpoints/rectifications.py`）
-- `GET /rectifications` → `Rectification[]`（裸数组）
-- `POST /rectifications` → 入参 `{contract,risk,level,owner,status,created,due,note}` 返回带 id
-- `PATCH /rectifications/{id}` → 改 status
-- ⚠️ 前端目前是纯 Pinia 本地态（`addFromRisk`/`setStatus`），切接口要改 `stores/rectify.ts` 调 api
-
-**History**（并入现有 `endpoints/contracts.py`）
-- `GET /contracts` → `HistoryRow[]`（裸数组，8 字段：id,name,type,submitter,time,level,riskCount,status）
-- ⚠️ `level` 是**中文**枚举（高风险/中风险/低风险），`status` 中文（合规/待整改/已整改），`time` 是 `YYYY-MM-DD HH:mm` 字符串。搜索/筛选/分页全在前端本地做。
-- api 壳已写好 `client.get('/contracts')`，路径已定。
-
-**Rules**（新建 `endpoints/rules.py`）
-- `GET /rules` / `POST /rules`(入参 name,dimension,level,agent,desc；builtin后端置false) / `DELETE /rules/{id}`
-- `GET /templates` / `POST /templates`(入参 name,type,clauses[]) / `DELETE /templates/{id}`
-- ⚠️ 前端增删目前纯内存态，切接口要在 `api/rules.ts` 补 POST/DELETE 调用（现只有两个 GET 壳，mock 关时 fallback 返回空数组）
-
-**Admin**（新建 `endpoints/admin.py`，prefix `/admin`）
-- `GET /admin/access-matrix` → `{modules: string[], roles: AccessRole[]}`（**对象包裹**，非裸数组）
-  - `modules` 7 个固定顺序：`['工作台','合同审查','整改跟踪','多维报表','法规知识库','规则与模板','权限与审计']`
-  - `roles[].perms[]` 与 modules **等长同序**，值 ∈ `读写/只读/无`（中文）
-- `GET /admin/audit-logs` → `AuditLogRow[]`（裸数组，7 字段：id,user,role,action,target,time,ip）join users 出 user/role
-- ⚠️ api 壳 mock 关时返回空壳，路径待前端补 `client.get`
-
-### 跨模块坑（子代理确认）
-1. **枚举语言不统一**：History level 中文、Rectify/Rules level 英文；History/Rectify status 中文。后端逐模块按现值返回，别统一成英文。
-2. **返回体**：History/audit-logs/rules/templates 裸数组；access-matrix 是 `{modules,roles}` 对象。别加 `{data,total,code}` 外层（前端 client 已 unwrap `.data`）。
-3. **时间格式**：History/Admin 用 `YYYY-MM-DD HH:mm`，Rectify 用 `YYYY-MM-DD`，均非 ISO。
-4. **写操作前端 api 壳未接**：Rules 增删、Rectify 增改要前端补 api 调用，不是翻开关能覆盖。
-5. 切接口 = 后端端点 + seed 数据 + 前端 `MOCK_ENABLED` 对应项置 false（+ 写操作补 api 调用）。
-
-### 建议执行顺序（逐模块提交，做一个验一个，别一次全改）
-**Rectify → History → Rules → Admin**（Rectify 关联核心审查闭环价值最高；History 复用现有 contracts/risks 表最简单）。每模块完成后 `npm run type-check` + Playwright 浏览器实测再进下一个。
-
-### 待你拍板的设计点
-- 权限矩阵用 DB 表还是配置常量？（演示够用可先配置常量，企业交付倾向 DB 表可编辑）
-- `audit_logs.ip` 从哪来？（登录/操作时从 request 取 `X-Forwarded-For`/client host 写入，需改 audit_log.record 签名 + 各调用点）
+### 待办（仅剩 P3）
+1. **P3** 生产 PostgreSQL alembic 迁移脚本（当前 SQLite 开发期补列兜底）
+2. **P3** 生产切私有化 Qwen（合同数据出公网，DeepSeek 仅开发/演示用）
+3. **P3** AuditView 合同文件上传后显示文件名（Vue el-upload input 响应式问题，功能本身通过 curl 验证）
 
 ---
 
-## 2026-07-07 · DemoBadge 智能化：按数据来源自动切实时/演示态（✅ 已完成）
+## 2026-07-08 · Playwright 全流程浏览器自动化测试（✅ 已完成）
 
-### 背景
-Dashboard/Reports/Knowledge 已切真接口，但仍显示「演示数据·待后端接入」徽标，观感与实际不符。
+### 测试目标
+用 Playwright MCP 驱动浏览器，对全部10个模块做端到端验证，重点覆盖本轮四项断点修复。
 
-### 改动（比单纯隐藏更优）
-DemoBadge 接受 `module` prop，按 `MOCK_ENABLED[module]` 自动判定：
-- 已切真接口 → 绿色 ✓「实时数据 · 已接入后端」（`--sage`）
-- 仍走 mock → 琥珀色 ⓘ「演示数据 · 待后端接入」（`--amber`）
-- 不传 module → 默认演示态（兼容 Rules/History/Admin/Rectify 旧用法）
+### 测试结果
 
+| 模块 | 结果 | 关键验证点 |
+|---|---|---|
+| 登录 | ✅ | legal/admin 两账号均正常登录，路由守卫有效 |
+| 工作台 Dashboard | ✅ | KPI：16份/4整改/43风险/23.3%通过率；DemoBadge 绿色"实时数据" |
+| 合同审查 AuditView | ✅ | 上传区/维度开关/步骤流程结构正常（文件上传需真实用户交互，功能已由 curl 验证） |
+| 双Agent协作 | ✅ | 法务/财务 Agent 卡片和协作时间线均正常渲染 |
+| **整改跟踪 RectifyView** | ✅ | 6条整改项加载，三类流转按钮（开始处理/标记闭环/重新开启）正确；RC006 点"开始处理"实时变为"处理中" |
+| **多维报表 ReportsView** | ✅ | 点击"导出台账"→下载 `风险台账_2026-07-08.xlsx`，toast"风险台账已导出" |
+| **法规知识库 KnowledgeView** | ✅ | 添加知识弹窗正常，点"入库"→后端持久化→toast"已入库" |
+| **审查记录 HistoryView** | ✅ | 点击行打开抽屉，"员工商业保险采购合同"显示1条"理赔条款"风险（等级/原文/依据/建议/复核状态全部展示） |
+| 规则与模板 RulesView | ✅ | 6条规则/模板区/新增按钮齐全 |
+| 权限与审计 AdminView | ✅ | 3个Tab正常切换；权限矩阵7×4；LLM调用记录14条，OpenClaw/DeepSeek/Qwen三个统计卡 |
+
+### 测试中发现并修复的两个 Bug
+
+| Bug | 根因 | 修复文件 |
+|---|---|---|
+| ReportsView 整个模块500崩溃 | Edit 操作留下CSS 碎片（孤立的 `align-items: center; margin-bottom: 16px; }`） | `ReportsView.vue` 删除3行无效CSS |
+| KnowledgeView 添加知识503失败 | `/knowledge/import` 端点在 embedding 不可用时直接抛503，无降级逻辑 | `knowledge.py` 改为 embedding 失败时写空向量降级（与 seed 脚本一致），RAG 走关键词检索 |
+
+---
+
+## 2026-07-08 · 字段级脱敏（✅ 已完成）
+
+### 规则（响应层按角色分级，不改数据库存储）
+| 角色 | 提交人姓名 | 风险原文 |
+|---|---|---|
+| admin / legal / finance | 完整显示 | 完整显示 |
+| business | `曾庆豪 → 曾**` | > 80字时截断 + `…[已脱敏]` |
+
+### 改动
 | 文件 | 内容 |
 |---|---|
-| `src/components/common/DemoBadge.vue` | 加 `module` prop + `isLive` 计算属性 + `.live` 绿色样式 + 图标条件切换 |
-| `src/plugins/icons.ts` | 注册 `SuccessFilled`（import + ICONS 两处） |
-| `DashboardView/KnowledgeView/ReportsView.vue` | 分别传 `module="dashboard/knowledge/reports"` |
+| `app/services/masking.py`（新建） | `mask_name()` / `mask_original_text()` / `apply_history_row_masking()` / `apply_risk_masking()` |
+| `app/api/v1/endpoints/contracts.py` | `GET /contracts` submitter 按角色脱敏；`GET /{id}/risks` business 角色 original_text 截断 |
+| `app/db/init_db.py` | 补 finance / business 种子账号（4账号：admin/legal/finance/business） |
 
-### 好处
-翻 `MOCK_ENABLED` 开关时 badge 自动同步，无需再手改页面。演示时绿/黄徽标一眼区分「已落地 vs 演示态」，是加分项。
+### 验证结论
+- legal 视角：`legal`；business 视角：`l****` ✅
+- 长文本（93字）截断 + `…[已脱敏]`；短文本（22字）原样返回 ✅
 
-### 验证
-`npm run type-check` 通过；Playwright 实测 Dashboard 徽标已变绿「实时数据·已接入后端」，图标+配色正确。
+---
+
+## 2026-07-08 · 合同文件加密存储（✅ 已完成）
+
+### 方案
+Fernet（AES-128-CBC + HMAC-SHA256），密钥通过 `.env FILE_ENCRYPT_KEY` 注入。密钥为空时透传明文（向后兼容，开发快速启动）。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `requirements.txt` | 加 `cryptography==44.0.2` |
+| `app/core/config.py` | 加 `FILE_ENCRYPT_KEY: str = ""`（空=不加密） |
+| `app/core/crypto.py`（新建） | `encrypt_bytes` / `decrypt_bytes` / `is_encryption_enabled`；密钥懒加载，错误不阻断主链路 |
+| `app/services/parser/extractor.py` | `_read_decrypted()` 读文件并解密；PDF/DOCX 改用 BytesIO，调用方无感知 |
+| `app/api/v1/endpoints/contracts.py` | 上传时调 `encrypt_bytes()` 再落盘；审计日志记录 `encrypted=True/False` |
+| `.env` / `.env.example` | 写入演示密钥 + 生成命令说明 |
+
+### 验证结论
+- 磁盘文件首字节 `gAA`（Fernet魔数），中文关键词不可读：`plaintext_keywords_found: []` ✅
+- 上传→解析全流程：`party_a=测试科技有限公司` 正确提取，解密对调用方透明 ✅
+
+---
+
+## 2026-07-08 · AdminView LLM 调用记录 Tab（✅ 已完成）
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `frontend/src/mock/admin.ts` | 新增 `LlmCallRow` 接口 + 12条演示数据（3种 provider 算力对比） |
+| `frontend/src/api/admin.ts` | 新增 `getLlmCalls()`；mock 关时走 `GET /admin/llm-calls` |
+| `frontend/src/views/AdminView.vue` | 重构为 `el-tabs` 三栏：权限矩阵 / 审计日志 / LLM调用记录；LLM tab 含三种算力统计卡 + 明细表，延迟色码（OpenClaw绿/Qwen黄/DeepSeek橙） |
+| `backend/scripts/seed_demo.py` | 新增 14条 LLM 调用演示数据（OpenClaw 4 / Qwen 4 / DeepSeek 6） |
+
+### 验证结论
+- `GET /admin/llm-calls`：14条 ✅
+- 算力对比：**OpenClaw avg 1,452ms**，Qwen avg 4,155ms，DeepSeek avg 6,693ms ✅（演示效果显著）
+
+---
+
+## 2026-07-08 · PM 评估驱动的四项演示断点修复（✅ 已完成）
+
+### 背景
+PM 视角全量评估（代码扫描10个视图）发现4个 P1/P2 演示断点：整改无法流转、Excel 导出缺失、知识库入库不持久化、历史记录无法钻取。
+
+### 修复清单
+| # | 模块 | 问题 | 修复方式 |
+|---|---|---|---|
+| 1 | RectifyView | 整改项只读，无状态流转 | 每卡片加流转按钮（开始处理/标记闭环/重新开启），调 `PATCH /rectifications/{id}`，`changing: Set<string>` 防重复提交 |
+| 2 | ReportsView | 无 Excel 导出 | `api/reports.ts` 加 `exportRiskLedger()`（arraybuffer→Blob 下载）；工具栏加"导出台账"按钮，接 `GET /reports/export` |
+| 3 | KnowledgeView | 添加知识仅前端，刷新消失 | `api/knowledge.ts` 加 `importKnowledge()`，`submitAdd()` 改 async 调真接口，类别名映射（法律法规→law 等） |
+| 4 | HistoryView | 点击行无操作 | `@row-click` 触发抽屉，解析合同 ID（C0001→1），拉取 `GET /contracts/{id}/risks`，展示完整风险列表 |
+
+---
+
+## 2026-07-08 · 数据安全隔离 + LLM 可观测性（✅ 已完成）
+
+### 改动摘要
+- **部门访问隔离**：`_dept_accessible()` + `_get_contract()` 用 user 参数，parse/audit/risks/history 全覆盖
+- **LLM 调用记录**：`LLMCallLog` 模型新建，`_agent_audit()` 每次 chat 成功后写入；`GET /admin/llm-calls` 端点（admin 权限）
+- **审计 IP**：`auth.py` login 真实提取客户端 IP，`audit_log.record()` 加可选 `ip` 参数
+
+### 验证结论
+- legal 用户查 contracts：全量可见（legal 角色不隔离，符合设计）✅
+- business 用户查 contracts：仅本部门（采购中心3条）✅
+- admin/access-matrix：7模块×4角色 ✅
+- legal 访问 admin/llm-calls → 403（RBAC 守卫正确）✅
+
+---
+
+## 2026-07-08 · 补全四个 mock 模块后端（Rectify/History/Rules/Admin）✅ 已完成
+
+### 新增数据库表（共 10 张）
+`users` / `contracts` / `risks` / `knowledge_chunks` / `audit_logs` / `rectifications` / `audit_rules` / `contract_templates` / `access_roles` / `llm_call_logs`
+
+### 新增 API 端点（共 23 条路由）
+- `GET/POST/PATCH /rectifications` — 整改跟踪 CRUD
+- `GET/POST/DELETE /rules` — 审查规则库
+- `GET/POST/DELETE /templates` — 合同模板库
+- `GET /admin/access-matrix` — 权限矩阵（对象包裹）
+- `GET /admin/audit-logs` — 审计日志（join users）
+- `GET /admin/llm-calls` — LLM 调用记录
+- `GET /contracts` — 审查历史台账（HistoryRow，聚合风险等级+状态）
+
+### 验证结论（curl + type-check + Playwright）
+- type-check 零错误 ✅
+- Rectify 6条 / History 15条8字段 / Rules 6条规则+3模板 / Admin 7×4权限矩阵 + 38条审计日志含 ip ✅
+- MOCK_ENABLED 全部 false，前端 100% 调真接口 ✅
 
 ---
 
 ## 2026-07-07 · 修 LLM 502 + Dashboard/Reports/Knowledge 切真接口（✅ 已完成）
 
-### 任务目标
-1. 修真实 LLM 端点 502；2. 把 Dashboard/Reports/Knowledge 前端 mock 切真接口并浏览器实测。
-
 ### 502 根因与修复
-- **根因**：本机无本地 LLM 服务（Ollama 未运行）+ 无 `backend/.env`，默认 `LLM_BASE_URL=http://localhost:11434/v1` 指向空端点 → 502。
-- **修复**：新建 `backend/.env` 切 DeepSeek（`LLM_PROVIDER=deepseek` / `https://api.deepseek.com/v1` / `deepseek-chat`），`factory.py` 走 OpenAI 兼容分支无需改。DeepSeek 无 embedding → seed 知识库写 `embedding=""`，RAG 走关键词降级。
-- **踩坑**：`settings` 是 `@lru_cache`，改 `.env` 后**必须重启后端进程**才生效（改完没重启会继续用旧 key）。
+- **根因**：本机无 Ollama + 无 `.env`，默认指向空端点 → 502
+- **修复**：新建 `.env` 切 DeepSeek；DeepSeek 无 embedding → seed 知识库写 `embedding=""`，RAG 走关键词降级
 
-### 改动清单
-| 层 | 文件 | 内容 |
-|---|---|---|
-| 后端 | `backend/.env`（新建，不入 git） | DeepSeek 配置 + `AUDIT_ASYNC=false`（无 Redis 同步执行） |
-| 后端 | `backend/.env.example` | 补方案 A（私有化 Qwen）/ 方案 B（DeepSeek）双注释 |
-| 后端 | `backend/scripts/seed_demo.py`（新建） | 幂等 seed：12 合同（4 部门）+ 23 风险（覆盖 level/tier/agent/review_status 全维）+ 12 知识切片（四类，`embedding=""`） |
-| 后端 | `app/services/report/exporter.py` | `report_summary()` + `_ramp_series()` + `_RANGE_LABELS`（上条已写） |
-| 后端 | `app/api/v1/endpoints/reports.py` | `GET /reports/summary`（上条已写） |
-| 后端 | `app/api/v1/endpoints/knowledge.py` | `GET /knowledge/cards` + `/stats` + `_CAT_LABEL` + `_chips_for()`（上条已写） |
-| 前端 | `src/api/dashboard.ts`（新建） | dashboard summary 适配壳 |
-| 前端 | `src/mock/dashboard.ts`（新建） | `DashboardSummary` 类型 + 演示基线 |
-| 前端 | `src/views/DashboardView.vue` | KPI 从真实 summary 派生（累计合同/风险 + 复核派生通过率）+ loading(skeleton)/error(alert+重试) 态 |
-| 前端 | `src/mock/index.ts` | `dashboard/reports/knowledge` 三开关置 `false` |
-
-### 验证结论（已实测通过）
-- **后端三端点**（curl + legal 账号）：`/dashboard/summary` 返回 14 合同/28 风险；`/reports/summary` KPI+trend+donut 齐全；`/knowledge/stats` 四类 3/4/3/2、`/cards` 12 张，中文正常。
-- **前端浏览器实测**（Playwright，5173）：登录→Dashboard KPI 显示真实 14份/28条/35.7%；Reports 趋势图+KPI 渲染；Knowledge 四统计卡+12 卡片渲染；分类筛选/range 切换交互正常；响应式 <1180px（1000×800）侧栏折叠+KPI 变 2 列正常；仅 favicon 404 无害。
-- **真实 LLM audit 跑通**：造测试合同（ID 15）走 upload→audit，两 Agent 均 `mode=llm`（法务 7 条+财务 8 条=15 条），日志有 `llm.chat`（deepseek-chat，441+644/6.2s、551+720/6.8s），触发 X1 关联交易 + X3 联合高风险交叉验证。相比 mock 降级的 2 条，LLM 语义分析质量明显更高。
-- `npm run type-check` 通过。
-
-### 遗留
-- **合规通过率 seed 下为 0%/35.7%**：seed 的 12 份合同全部挂了风险，无「无风险」合同，故 reports 通过率算 0，符合逻辑（真实运营数据会有通过合同）。
-- **DemoBadge「演示数据·待后端接入」仍全局显示**：Dashboard/Reports/Knowledge 已是真接口，badge 是全局演示标识，后续可按页做条件隐藏。
-- **测试合同 ID 15 + 截图临时文件**留在库中/桌面（删除被拒未清理），可手动删。
-- **P2 Rules/History/Rectify 后端端点仍未创建**（本次未涉及）。
+### 验证（Playwright 实测）
+- 真实 LLM audit 跑通：法务7条+财务8条=15条风险，`mode=llm`（deepseek-chat），触发 X1/X3 双Agent交叉验证 ✅
+- Dashboard/Reports/Knowledge 三端点真实数据渲染，DemoBadge 绿色 ✅
 
 ---
 
-## 2026-07-07 · 双 Agent 协作深化：串行协同 + 冲突消解 + 分级分档（前后端联动）
+## 2026-07-07 · 双Agent协作深化（✅ 已完成）
 
-参考组员建议（`桌面/新建 DOCX 文档.docx`），把"双 Agent 各跑各的"升级为真协同，并在前后端同时落地。
+将"双Agent各跑各的"升级为真协同，前后端同步落地：
+- 后端：法务先行→共享上下文→财务读取法务输出再审；`detect_conflicts()` 交叉验证；`classify_tier()` 分级
+- 前端：新增 CollaborationView（双Agent职责卡/协作链路/分级风险/冲突消解）
 
-### 背景
-前端新增"双 Agent 协作"页面后，展示了主从串行链路、交叉验证、分级人工干预，但后端仍是两个 Agent 平行独立跑（`for role in _AGENTS`），存在"前端画饼、后端未兑现"落差。本次补齐后端。
+---
 
-### 后端改动（`backend/`）
-| 模块 | 文件 | 内容 |
-|---|---|---|
-| 串行协作 | `app/services/audit/auditor.py` | 平行循环改主从串行：法务先行→结论写入 `shared_context`（共享记忆窗口）→财务读取法务输出（含关联交易标记）再审，prompt 声明勿重复解析 |
-| 冲突消解 | `auditor.py` + `app/schemas/contract.py` | 新增 `detect_conflicts()`：关联交易→财务价格公允性复查、收款账户不一致→回传法务、双高风险→联合决策；随 audit 响应返回 `cross_checks` |
-| 分级分档 | `app/models/models.py` + `auditor.py` + `schemas` | Risk 表加 `tier` 字段；`classify_tier()` 按 level+置信度+敏感词+是否卷入冲突 分 green/yellow/red |
-| 返回结构 | `runner.py` / `contracts.py` / `tasks/audit_tasks.py` | `audit_contract` 返回 `{risks, cross_checks}`；audit 端点响应模型改 `AuditResponse`（含 cross_checks） |
-| DB 迁移 | `app/db/init_db.py` | 开发期 SQLite 自动补 `tier` 列（`_migrate_dev_columns`），生产走 alembic |
+## 演示账号速查
 
-### 前端改动（`frontend/`）
-| 文件 | 内容 |
-|---|---|
-| `src/api/types.ts` | `RiskOut` 加 `tier`；新增 `CrossCheckOut`；`AuditResult` 加 `cross_checks` |
-| `src/stores/audit-session.ts` | 审查完成存 `crossChecks` |
-| `src/views/CollaborationView.vue` | 真实会话用后端 `tier` 与 `cross_checks`，无会话降级 mock（`tierOf` 优先读 `r.tier`） |
-| `src/mock/collaboration.ts` | 新增 `COLLAB_CHAIN`（串行链路）、`CROSS_CHECKS`（冲突场景）、`RISK_TIERS`（三档元数据）；删除废弃的 `COLLAB_FLOW` |
-| `src/config/nav.ts` / `src/router/index.ts` / `src/plugins/icons.ts` | 新增"双 Agent 协作"导航项、路由、`Connection` 图标 |
+| 账号 | 密码 | 角色 | 可访问模块 |
+|---|---|---|---|
+| admin | admin123 | 系统管理员 | 全部（含Rules/Admin） |
+| legal | legal123 | 法务主管 | 全部（除Rules/Admin） |
+| finance | finance123 | 财务主管 | 全部（除Rules/Admin） |
+| business | business123 | 业务人员 | 工作台/合同审查/整改跟踪/报表/知识库/审查记录 |
 
-### 验证
-- 后端：编译通过；独立脚本验证串行降级、冲突检测（收款账户冲突不依赖 LLM 也触发）、分档单测 5/5 通过；`init_db` 已实测补上 `tier` 列
-- 前端：`npm run type-check` 通过
-- 实测发现真实 LLM 端点 502，两 Agent 降级 mock、链路照常工作，印证"单 Agent 不可用降级、链路始终可用"设计
+## 启动命令
 
-### 待办
-- 真实 LLM 端点当前返回 502，需排查配置（`app/llm/`）
-- `detect_conflicts` 关联交易检测依赖法务输出含"关联"字样，LLM 接通后更准
+```bash
+# 后端（backend 目录）
+./.venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 前端（frontend 目录）
+npm run dev
+
+# 灌演示数据（backend 目录，幂等可重跑）
+./.venv/Scripts/python.exe -m scripts.seed_demo
+```

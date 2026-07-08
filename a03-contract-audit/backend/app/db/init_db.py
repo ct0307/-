@@ -19,8 +19,10 @@ log = get_logger("db")
 
 # 开发期种子账号（生产环境应通过管理后台创建，密码从 env 或首启向导设置）
 _SEED_USERS = [
-    {"username": "admin", "password": "admin123", "role": "admin", "department": "管理"},
-    {"username": "legal", "password": "legal123", "role": "legal", "department": "法务部"},
+    {"username": "admin",    "password": "admin123",    "role": "admin",    "department": "管理"},
+    {"username": "legal",    "password": "legal123",    "role": "legal",    "department": "法务部"},
+    {"username": "finance",  "password": "finance123",  "role": "finance",  "department": "财务部"},
+    {"username": "business", "password": "business123", "role": "business", "department": "采购中心"},
 ]
 
 
@@ -37,6 +39,7 @@ def init_db() -> None:
 # 检测到 risks 缺少新增列则 ADD COLUMN，避免删库。生产（PostgreSQL）走 alembic 迁移。
 _DEV_COLUMNS = {
     "risks": [("tier", "VARCHAR(8) DEFAULT 'yellow'")],
+    "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
 }
 
 

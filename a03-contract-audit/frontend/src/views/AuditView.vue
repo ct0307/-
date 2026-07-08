@@ -3,6 +3,9 @@
 // 闭环逻辑迁移自 WorkbenchView，数据落 audit-session store。
 import { ref } from 'vue'
 import { ElMessage, type UploadRawFile } from 'element-plus'
+
+// 用户选文件后立即显示名称（不等后端返回），上传完成后由 session.filename 接管
+const pendingFilename = ref('')
 import type { RiskOut } from '@/api/types'
 import { useAuditSessionStore } from '@/stores/audit-session'
 import { useRectifyStore } from '@/stores/rectify'
@@ -33,10 +36,13 @@ const dimensions = ref([
 
 // —— 上传 + 解析（真接口）——
 async function onFile(file: UploadRawFile) {
+  pendingFilename.value = file.name // 立即显示文件名，不等后端返回
   try {
     await session.uploadAndParse(file, contractType.value)
+    pendingFilename.value = '' // 后端已返回 session.filename，清除 pending 态
     ElMessage.success('上传并解析完成')
   } catch {
+    pendingFilename.value = '' // 失败时清除，避免残留
     ElMessage.error('上传或解析失败')
   }
   return false // 阻止 el-upload 默认上传
@@ -73,7 +79,7 @@ async function confirmRisk(risk: RiskOut) {
   try {
     await session.setRiskStatus(risk, 'confirmed')
     // 跨模块联动：生成整改项 + 推通知
-    rectify.addFromRisk(risk, session.filename || '当前合同', demo.profile.name)
+    await rectify.addFromRisk(risk, session.filename || '当前合同', demo.profile.name)
     notify.push('rectify', '生成整改项', `已就"${risk.category}"生成整改项，进入整改跟踪。`)
     ElMessage.success('已确认并生成整改项')
     drawerOpen.value = false
@@ -136,8 +142,14 @@ const collabSteps = {
             <p class="upload-hint">支持 PDF / Word / TXT</p>
           </div>
         </el-upload>
+        <!-- 上传中：立即显示文件名 + loading；上传完成：切换为 session.filename -->
         <div v-if="session.filename" class="filename mono">
-          当前：{{ session.filename }}（合同 #{{ session.contractId }}）
+          <el-icon class="icon-ok"><CircleCheck /></el-icon>
+          {{ session.filename }}（合同 #{{ session.contractId }}）
+        </div>
+        <div v-else-if="pendingFilename" class="filename mono pending">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          正在上传 {{ pendingFilename }}…
         </div>
       </el-card>
 
@@ -284,9 +296,18 @@ const collabSteps = {
   color: var(--muted);
 }
 .filename {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-top: 12px;
   font-size: 12px;
   color: var(--ivory-dim);
+}
+.filename .icon-ok {
+  color: var(--sage);
+}
+.filename.pending {
+  color: var(--muted);
 }
 .form-grid {
   display: grid;

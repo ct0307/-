@@ -1,9 +1,11 @@
 <script setup lang="ts">
-// 审查历史记录：el-table + 分页 + 搜索 + 风险等级筛选。
+// 审查历史记录：el-table + 分页 + 搜索 + 风险等级筛选 + 点击行查看风险详情。
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getHistory } from '@/api/history'
+import { getRisks } from '@/api/contract'
 import type { HistoryRow } from '@/mock/history'
+import type { RiskOut } from '@/api/types'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
 const rows = ref<HistoryRow[]>([])
@@ -45,6 +47,40 @@ const statusType: Record<string, 'success' | 'warning' | 'info'> = {
   待整改: 'warning',
   已整改: 'info',
 }
+
+// ── 点击行查看风险详情 ──
+const drawerOpen = ref(false)
+const drawerTitle = ref('')
+const drawerRisks = ref<RiskOut[]>([])
+const drawerLoading = ref(false)
+
+const riskLevelType: Record<string, 'danger' | 'warning' | 'info'> = {
+  high: 'danger', medium: 'warning', low: 'info',
+}
+const riskLevelLabel: Record<string, string> = {
+  high: '高风险', medium: '中风险', low: '低风险',
+}
+const reviewStatusLabel: Record<string, string> = {
+  pending: '待复核', confirmed: '已确认', ignored: '已忽略', to_modify: '待修改',
+}
+
+async function onRowClick(row: HistoryRow) {
+  // id 格式 C0001 → 数字 1
+  const cid = parseInt(row.id.replace(/\D/g, ''))
+  if (!cid) return
+  drawerTitle.value = row.name
+  drawerRisks.value = []
+  drawerOpen.value = true
+  drawerLoading.value = true
+  try {
+    drawerRisks.value = await getRisks(cid)
+  } catch {
+    ElMessage.error('风险数据加载失败')
+    drawerOpen.value = false
+  } finally {
+    drawerLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -63,7 +99,12 @@ const statusType: Record<string, 'success' | 'warning' | 'info'> = {
     </div>
 
     <el-card shadow="never">
-      <el-table :data="paged" style="width: 100%" empty-text="无匹配记录">
+      <el-table
+        :data="paged"
+        style="width: 100%; cursor: pointer"
+        empty-text="无匹配记录"
+        @row-click="onRowClick"
+      >
         <el-table-column prop="id" label="编号" width="120">
           <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
         </el-table-column>
@@ -95,6 +136,36 @@ const statusType: Record<string, 'success' | 'warning' | 'info'> = {
         />
       </div>
     </el-card>
+
+    <!-- 风险详情抽屉 -->
+    <el-drawer
+      v-model="drawerOpen"
+      :title="`风险详情 · ${drawerTitle}`"
+      size="480px"
+      direction="rtl"
+    >
+      <div v-loading="drawerLoading" style="min-height: 120px">
+        <el-empty v-if="!drawerLoading && !drawerRisks.length" description="该合同暂无风险记录" />
+        <article v-for="r in drawerRisks" :key="r.id" class="risk-item">
+          <div class="risk-head">
+            <el-tag :type="riskLevelType[r.level]" size="small">{{ riskLevelLabel[r.level] }}</el-tag>
+            <el-tag size="small" effect="plain" type="info">{{ r.agent === 'legal' ? '法务' : '财务' }}</el-tag>
+            <b class="risk-cat">{{ r.category }}</b>
+            <span class="conf mono">{{ r.confidence }}%</span>
+          </div>
+          <p class="risk-text">{{ r.original_text }}</p>
+          <p class="risk-basis">依据：{{ r.basis }}</p>
+          <p class="risk-suggest">建议：{{ r.suggestion }}</p>
+          <div class="risk-footer">
+            <el-tag
+              size="small"
+              :type="r.review_status === 'confirmed' ? 'success' : r.review_status === 'ignored' ? 'info' : 'warning'"
+              effect="plain"
+            >{{ reviewStatusLabel[r.review_status] ?? r.review_status }}</el-tag>
+          </div>
+        </article>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -119,4 +190,43 @@ const statusType: Record<string, 'success' | 'warning' | 'info'> = {
   font-size: 12px;
   color: var(--muted);
 }
-</style>
+/* 风险详情抽屉 */
+.risk-item {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.risk-item:last-child { border-bottom: none; }
+.risk-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.risk-cat {
+  font-size: 14px;
+  color: var(--ivory);
+}
+.conf {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: auto;
+}
+.risk-text {
+  font-size: 12px;
+  color: var(--ivory-dim);
+  margin: 4px 0;
+  line-height: 1.6;
+  padding: 6px 8px;
+  background: var(--ink-3);
+  border-radius: 4px;
+}
+.risk-basis,
+.risk-suggest {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 4px 0;
+  line-height: 1.5;
+}
+.risk-footer {
+  margin-top: 8px;
+}</style>

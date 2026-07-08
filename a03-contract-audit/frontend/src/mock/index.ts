@@ -5,11 +5,12 @@
 // ============================================================
 export const MOCK_ENABLED = {
   dashboard: false, // 后端 /dashboard/summary 已就绪 + seed 数据
-  reports: false, // 后端 /reports/summary 已就绪
+  reports: false,   // 后端 /reports/summary 已就绪
   knowledge: false, // 后端 /knowledge/cards + /stats 已就绪
-  rules: true,
-  history: true,
-  admin: true,
+  rectify: false,   // 后端 /rectifications 已就绪 + seed 数据
+  history: false,   // 后端 /contracts 已就绪（HistoryRow 格式）
+  rules: false,     // 后端 /rules + /templates 已就绪 + seed 数据
+  admin: false,     // 后端 /admin/access-matrix + /audit-logs 已就绪 + seed 数据
 }
 
 // 模拟网络延迟，让页面能真实体现 loading 态

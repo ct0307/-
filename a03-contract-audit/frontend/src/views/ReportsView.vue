@@ -2,7 +2,7 @@
 // 多维报表：时间分段(月/季/年) + 多维钻取 + 4 KPI + 4 ECharts。
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getReportData } from '@/api/reports'
+import { getReportData, exportRiskLedger } from '@/api/reports'
 import type { ReportData, RangeKey } from '@/mock/reports'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 import TrendLine from '@/components/charts/TrendLine.vue'
@@ -69,6 +69,19 @@ const data = computed<ReportData | null>(() => {
   }
 })
 
+const exporting = ref(false)
+async function doExport() {
+  exporting.value = true
+  try {
+    await exportRiskLedger()
+    ElMessage.success('风险台账已导出')
+  } catch {
+    ElMessage.error('导出失败，请重试')
+  } finally {
+    exporting.value = false
+  }
+}
+
 function resetDrill() {
   drillType.value = '全部'
   drillAmount.value = '全部'
@@ -101,7 +114,10 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
           {{ s.label }}
         </button>
       </div>
-      <DemoBadge module="reports" />
+      <div class="toolbar-right">
+        <el-button :icon="'Download'" :loading="exporting" @click="doExport">导出台账</el-button>
+        <DemoBadge module="reports" />
+      </div>
     </div>
 
     <!-- 多维钻取 -->
@@ -172,6 +188,11 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
   justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
+}
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .seg {
   display: inline-flex;

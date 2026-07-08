@@ -27,7 +27,7 @@ def run_audit(db: Session, contract: Contract) -> dict:
 
     text = extract_text(contract.storage_path)
     elements = extract_elements(text)
-    result = audit_contract(elements, text)
+    result = audit_contract(elements, text, db=db, contract_id=contract.id)
     risks = result["risks"]
     cross_checks = result["cross_checks"]
 

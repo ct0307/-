@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     STORAGE_DIR: str = "storage"
     MAX_UPLOAD_MB: int = 50
 
+    # 合同文件加密存储（企业数据安全硬约束）。
+    # 留空则不加密（开发/演示期快速启动）；生产部署必须通过 .env 设置32字节Fernet密钥。
+    # 生成命令：python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    FILE_ENCRYPT_KEY: str = ""
+
     # 数据库后端：postgres（生产/交付）| sqlite（本地无 Docker 时快速开发）
     DB_BACKEND: str = "sqlite"
     SQLITE_PATH: str = "storage/a03_dev.db"

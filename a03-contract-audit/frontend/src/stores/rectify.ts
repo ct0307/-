@@ -1,53 +1,20 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { RiskOut } from '@/api/types'
+import {
+  getRectifications,
+  createRectification,
+  updateRectificationStatus,
+} from '@/api/rectify'
+import type { Rectification, RectifyStatus } from '@/mock/rectify'
 
-export type RectifyStatus = '待处理' | '处理中' | '已闭环'
-
-export interface Rectification {
-  id: string
-  contract: string
-  risk: string
-  level: RiskOut['level']
-  owner: string
-  status: RectifyStatus
-  created: string
-  due: string
-  note: string
-}
-
-let seq = 0
-function nextId() {
-  seq += 1
-  return `RC${String(seq).padStart(3, '0')}`
-}
+export type { Rectification, RectifyStatus } from '@/mock/rectify'
 
 export const useRectifyStore = defineStore('rectify', () => {
-  // 预置几条演示整改项（含"演示数据"语义，页面会标注）
-  const items = ref<Rectification[]>([
-    {
-      id: nextId(),
-      contract: '软件开发外包合同（示例）',
-      risk: '缺失违约责任条款',
-      level: 'high',
-      owner: '曾庆豪',
-      status: '处理中',
-      created: '2026-07-02',
-      due: '2026-07-10',
-      note: '已联系业务部门补充违约责任条款草案。',
-    },
-    {
-      id: nextId(),
-      contract: '采购合同（示例）',
-      risk: '合同金额未标注币种',
-      level: 'medium',
-      owner: '陈嘉禾',
-      status: '待处理',
-      created: '2026-07-04',
-      due: '2026-07-12',
-      note: '',
-    },
-  ])
+  const items = ref<Rectification[]>([])
+  const loading = ref(false)
+  const error = ref('')
+  let loaded = false
 
   const total = computed(() => items.value.length)
   const countByStatus = computed(() => ({
@@ -57,27 +24,40 @@ export const useRectifyStore = defineStore('rectify', () => {
   }))
   const openCount = computed(() => items.value.filter((r) => r.status !== '已闭环').length)
 
+  // 拉取整改项列表（首次进入或强制刷新）
+  async function load(force = false) {
+    if (loaded && !force) return
+    loading.value = true
+    error.value = ''
+    try {
+      items.value = await getRectifications()
+      loaded = true
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '整改项加载失败'
+    } finally {
+      loading.value = false
+    }
+  }
+
   // 从一条确认的风险生成整改项（AuditView 复核闭环调用）
-  function addFromRisk(risk: RiskOut, contract: string, owner: string) {
-    const today = new Date().toISOString().slice(0, 10)
-    const due = new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)
-    items.value.unshift({
-      id: nextId(),
+  async function addFromRisk(risk: RiskOut, contract: string, owner: string) {
+    const item = await createRectification({
       contract,
       risk: risk.category,
       level: risk.level,
       owner,
       status: '待处理',
-      created: today,
-      due,
       note: risk.suggestion,
+      risk_id: risk.id,
     })
+    items.value = [item, ...items.value]
   }
 
-  function setStatus(id: string, status: RectifyStatus) {
+  async function setStatus(id: string, status: RectifyStatus) {
+    const updated = await updateRectificationStatus(id, status)
     const it = items.value.find((r) => r.id === id)
-    if (it) it.status = status
+    if (it) it.status = updated.status
   }
 
-  return { items, total, countByStatus, openCount, addFromRisk, setStatus }
+  return { items, loading, error, total, countByStatus, openCount, load, addFromRisk, setStatus }
 })
