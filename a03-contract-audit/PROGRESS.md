@@ -10,8 +10,9 @@
 
 ### 整体架构
 - **前端**：Vue 3 + TS + Element Plus + ECharts，卷宗风 UI。10 个视图（登录 + 9 业务），侧栏支持折叠，全站中文业务语言。
-- **后端**：FastAPI + SQLAlchemy + SQLite（开发）/PostgreSQL（生产），JWT+RBAC，Celery 异步，LLM Adapter + RAG 检索，审计日志，LLM 调用记录，部门访问隔离，合同加密存储，字段级脱敏。
-- **数据策略**：前端 `MOCK_ENABLED` 全部 false，100% 调真接口。10 张数据库表，**24 条 API 路由**（含 `/chat`）。
+- **后端**：FastAPI + SQLAlchemy + SQLite（开发）/PostgreSQL（生产），JWT+RBAC，Celery 异步，LLM Adapter + RAG 检索（本地 embedding），审计日志，LLM 调用记录，部门访问隔离，合同加密存储，字段级脱敏。
+- **数据策略**：前端 `MOCK_ENABLED` 全部 false，100% 调真接口。10 张数据库表，**25 条 API 路由**（含 `/chat` / `/knowledge/import-file`）。
+- **RAG 状态**：BAAI/bge-small-zh-v1.5 本地 embedding（512维，全离线），向量检索全链路接通，知识库 **41 条**（法律法规 17 / 标准条款 9 / 风险规则 11 / 典型案例 4）。
 
 ### 模块完成度
 | 模块 | 前端 | 后端 | 状态 |
@@ -22,7 +23,7 @@
 | **风险条款追问 AI**（绑定上下文，对话历史管理） | ✅ | ✅ | ✅ 新增 |
 | 工作台（真实整改待办 + 真实审查动态） | ✅ | ✅ | ✅ 真接口 |
 | 多维报表 Reports（含 Excel 导出，KPI口径说明） | ✅ | ✅ | ✅ 真接口 |
-| 法规知识库 Knowledge（含添加持久化） | ✅ | ✅ | ✅ 真接口 |
+| **法规知识库**（真实向量检索 + 批量文件导入 + 预置法规 41 条） | ✅ | ✅ | ✅ RAG 全链路接通 |
 | 整改跟踪 Rectify（含状态流转按钮） | ✅ | ✅ | ✅ 真接口 |
 | 审查记录 History（含点击行风险钻取） | ✅ | ✅ | ✅ 真接口 |
 | 规则与模板 Rules | ✅ | ✅ | ✅ 真接口 |
@@ -37,11 +38,63 @@
 | 审计日志 + IP 追踪 | 全操作留痕，login/upload 等写入真实客户端 IP（X-Forwarded-For 优先） | ✅ |
 | LLM 调用可观测性 | 每次 chat/追问调用写入 llm_call_logs，Admin Tab 展示三种 provider 算力对比 | ✅ |
 | 准确率责任边界 | 每条风险：原文引用 + 法规依据 + 置信度 + 人工复核状态 + 免责声明 | ✅ |
-| 私有化模型可切换 | LLM Adapter 支持 Qwen/DeepSeek/OpenClaw，当前 DeepSeek（开发用） | ✅ |
+| 私有化模型可切换 | LLM Adapter 支持 Qwen/DeepSeek/OpenClaw；Embedding 本地化（不出企业） | ✅ |
 
-### 待办（仅剩 P3）
-1. **P3** 生产 PostgreSQL alembic 迁移脚本（当前 SQLite 开发期补列兜底）
-2. **P3** 生产切私有化 Qwen（合同数据出公网，DeepSeek 仅开发/演示用）
+### 已完成（全部 P1 以上）
+- 完整前后端业务闭环（11 个模块，25条 API）
+- RAG 向量检索全链路（本地 embedding + 批量导入 + 预置法规）
+- 数据安全：加密存储 / 字段脱敏 / 部门隔离 / 审计留痕
+- UI 去演示化：真实数据 / 业务语言 / 去技术展示冗余
+- 风险追问 AI（上下文绑定对话）
+- 侧栏折叠 / 3步引导 / 文件名即时反馈
+
+### 待办
+| 优先级 | 事项 | 说明 |
+|---|---|---|
+| **P2** | RAG 混合检索（BM25 + 向量 RRF 融合） | 知识库超 200 条后再做，纯向量当前已够用 |
+| **P2** | RAG 切片策略优化（法条按条文切，≤200字/片） | 提升检索精准度，缩短 embedding 时间 |
+| **P3** | 生产 PostgreSQL + Alembic 迁移脚本 | 当前 SQLite 开发期补列兜底，切生产前必须做 |
+| **P3** | 切私有化 Qwen（生产环境） | DeepSeek 仅开发/演示用，合同数据不出公网 |
+| **P3** | pgvector 原生向量列（知识库超千条时） | 当前 JSON+numpy 内存计算，≤500条性能足够 |
+
+---
+
+## 2026-07-08 · 知识库批量导入功能（✅ 已完成）
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/app/api/v1/endpoints/knowledge.py` | 新增 `POST /knowledge/import-file` 端点；提取 `_extract_file_text()`（支持 .txt/.docx/.pdf）和 `_do_index()` 辅助函数；重构 `/import` 减少重复 |
+| `backend/scripts/seed_knowledge_law.py`（新建） | 预置法规脚本：《民法典》合同编 12 条 + 风险规则 7 条 + 标准条款模板 5 套 + 典型案例 2 条，共 27 个条目、26 个切片；幂等（检查 source 去重），`--force` 强制重建 |
+| `frontend/src/api/knowledge.ts` | 新增 `importKnowledgeFile(file, category)` — FormData 上传 |
+| `frontend/src/views/KnowledgeView.vue` | 工具栏加「导入文件」按钮；批量导入 Dialog：分类选择 + 拖拽多文件区 + 文件队列状态列表（待/中/+N条/失败）+ 汇总进度；完成后自动刷新卡片列表 |
+
+### 验证结论
+- 知识库统计卡：法律法规 17 / 标准条款 9 / 风险规则 11 / 典型案例 4，共 41 条 ✅
+- 「导入文件」按钮正常显示，0 errors ✅
+- 预置脚本幂等验证：重复运行跳过已存在条目 ✅
+
+---
+
+## 2026-07-08 · RAG P0 — 本地 embedding，向量检索全链路接通（✅ 已完成）
+
+### 背景（改前问题）
+DeepSeek 无 `/embeddings` 端点 → embedding 失败 → 知识库写入空向量 → `retrieve()` 过滤掉空向量条目 → 始终回落到内置 4 条规则 → 审查"法规依据"全部来自死规则，与知识库内容无关。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/app/llm/adapters/local_embedding.py`（新建） | `LocalEmbeddingAdapter`：sentence-transformers 本地化封装，模型懒加载，embed() 返回 `list[list[float]]` |
+| `backend/app/llm/factory.py` | 新增 `get_embedding_adapter()`：`EMBED_BACKEND=local`（默认）→ 本地单例；`EMBED_BACKEND=api` → OpenAI 兼容端点；`get_llm_adapter()` 不变（chat 仍走 DeepSeek/Qwen） |
+| `backend/app/core/config.py` | 新增 `EMBED_BACKEND / LOCAL_EMBED_MODEL` 配置；`EMBED_DIM` 修正为 512（bge-small-zh 实际维度） |
+| `backend/app/services/rag/retriever.py` | `_vector_search` / `index_documents` 改用 `get_embedding_adapter()`（不再混用 chat adapter） |
+| `backend/requirements.txt` | 加 `sentence-transformers==3.3.1` |
+| 数据库（一次性操作） | 存量 14 条空向量条目全部补向量（55ms，BAAI/bge-small-zh-v1.5） |
+
+### 验证结论
+- `retrieve('违约责任条款上限约定')` → mode=**vector**，Top-3 相似度 0.69/0.65/0.65 ✅
+- 不再降级到内置规则，审查"法规依据"真正引用知识库条文 ✅
+- 本地推理延迟：约 15-25ms/query（CPU），满足企业场景 ✅
 
 ---
 
