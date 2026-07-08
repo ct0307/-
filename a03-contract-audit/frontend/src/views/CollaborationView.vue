@@ -7,13 +7,11 @@ import { useRouter } from 'vue-router'
 import { useAuditSessionStore } from '@/stores/audit-session'
 import {
   AGENTS,
-  COLLAB_CHAIN,
   CROSS_CHECKS,
   DEMO_CONTRACT,
   DEMO_RISKS,
   RISK_TIERS,
   type AgentKey,
-  type ChainStage,
   type CrossCheck,
   type DemoRisk,
   type TierKey,
@@ -72,14 +70,6 @@ const statusLabel: Record<string, string> = {
   to_modify: '需修改',
 }
 
-// 协作链路阶段归属方的视觉映射
-const ownerMeta: Record<ChainStage['owner'], { label: string; accent: string; icon: string }> = {
-  router: { label: '中央调度', accent: 'var(--ivory-dim)', icon: 'Connection' },
-  legal: { label: '法务 Agent', accent: 'var(--brass)', icon: 'Stamp' },
-  finance: { label: '财务 Agent', accent: 'var(--sage)', icon: 'Coin' },
-  both: { label: '双 Agent 协同', accent: 'var(--seal)', icon: 'Connection' },
-}
-
 // 冲突消解裁定的视觉映射
 const verdictMeta: Record<CrossCheck['verdict'], { label: string; type: 'danger' | 'warning' | 'success' }> = {
   conflict: { label: '冲突·高风险', type: 'danger' },
@@ -87,7 +77,6 @@ const verdictMeta: Record<CrossCheck['verdict'], { label: string; type: 'danger'
   confirmed: { label: '已确认', type: 'success' },
 }
 
-const chain = COLLAB_CHAIN
 // 冲突项：真实会话用后端返回（store.crossChecks），无会话降级到 mock 剧本。
 // 后端字段 from_agent/to_agent 映射到 mock 的 from/to，模板统一消费。
 const crossChecks = computed(() =>
@@ -155,7 +144,7 @@ function goAudit() {
       </div>
     </div>
 
-    <!-- Agent 名片：两个 Agent 的职责 / RAG 主题 / prompt 侧重 -->
+    <!-- Agent 名片：职责 / 关注维度 / 统计（去掉 RAG 主题和 Prompt 技术细节） -->
     <div class="agent-cards">
       <el-card
         v-for="a in agentList"
@@ -185,18 +174,6 @@ function goAudit() {
           </div>
         </div>
 
-        <div class="agent-section">
-          <h4>定向 RAG 检索主题</h4>
-          <ul class="topic-list mono">
-            <li v-for="t in a.ragTopics" :key="t">{{ t }}</li>
-          </ul>
-        </div>
-
-        <div class="agent-section">
-          <h4>Prompt 侧重</h4>
-          <p class="bias">{{ a.promptBias }}</p>
-        </div>
-
         <div class="agent-mini-kpis">
           <div><span>高风险</span><strong class="seal-num">{{ statsOf(a.key).high }}</strong></div>
           <div><span>平均置信度</span><strong>{{ statsOf(a.key).avg }}%</strong></div>
@@ -204,36 +181,15 @@ function goAudit() {
       </el-card>
     </div>
 
-    <!-- 协作链路：主从串行 SOP（法务先行 → 共享上下文 → 财务二次加工 → 交叉验证 → 统一决策）-->
-    <el-card shadow="never" class="chain-card">
-      <template #header>
-        <div class="card-head">
-          <span>协作链路 · 主从协同工作流</span>
-          <span class="mono status-note">{{ isLive ? '协同完成' : '流程示意' }}</span>
-        </div>
-      </template>
-      <div class="chain">
-        <template v-for="(s, i) in chain" :key="s.key">
-          <div class="chain-stage" :style="{ '--accent': ownerMeta[s.owner].accent }">
-            <div class="stage-badge">
-              <el-icon :size="15"><component :is="ownerMeta[s.owner].icon" /></el-icon>
-              {{ ownerMeta[s.owner].label }}
-            </div>
-            <h4>{{ s.title }}</h4>
-            <p class="stage-desc">{{ s.desc }}</p>
-            <div v-if="s.output" class="stage-output mono">
-              <span class="output-label">↳ 传递</span>{{ s.output }}
-            </div>
-          </div>
-          <div v-if="i < chain.length - 1" class="chain-arrow" aria-hidden="true">→</div>
-        </template>
-      </div>
-      <p class="disclaimer">
-        与"各跑各的"不同：法务 Agent 先行给出合规结论并写入<b>共享记忆窗口</b>，财务 Agent
-        直接读取而不重复解析；两者冲突时进入联合思维链推理，最终由中央节点统一决策。
-        结论仅供参考，以人工复核为准。
-      </p>
-    </el-card>
+    <!-- 无真实会话：引导用户先完成合同审查 -->
+    <div v-if="!isLive" class="no-data-guide">
+      <el-icon :size="36"><DocumentChecked /></el-icon>
+      <p>完成合同审查后，此处将显示冲突消解结果与分级风险策略</p>
+      <el-button type="primary" size="small" @click="goAudit">去上传合同并审查</el-button>
+    </div>
+
+    <!-- 以下仅在有真实审查会话时展示 -->
+    <template v-if="isLive">
 
     <!-- 交叉验证 / 冲突消解：协同核心，展示跨 Agent 触发 -->
     <el-card shadow="never" class="cross-card">
@@ -379,6 +335,8 @@ function goAudit() {
         </div>
       </section>
     </div>
+
+    </template><!-- end v-if="isLive" -->
   </div>
 </template>
 
@@ -490,29 +448,6 @@ function goAudit() {
   background: var(--ink-3);
   color: var(--ivory-dim);
 }
-.topic-list {
-  margin: 0;
-  padding-left: 16px;
-  list-style: none;
-}
-.topic-list li {
-  position: relative;
-  font-size: 11px;
-  color: var(--muted);
-  padding: 2px 0;
-}
-.topic-list li::before {
-  content: '›';
-  position: absolute;
-  left: -14px;
-  color: var(--accent);
-}
-.bias {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--ivory-dim);
-}
 .agent-mini-kpis {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -538,75 +473,22 @@ function goAudit() {
   color: var(--seal);
 }
 
-/* —— 协作链路（主从串行）—— */
-.card-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.status-note {
-  font-size: 12px;
-  color: var(--sage);
-}
-.chain {
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-}
-.chain-stage {
-  flex: 1 1 0;
-  min-width: 168px;
-  border: 1px solid var(--line);
-  border-top: 3px solid var(--accent);
-  border-radius: var(--r-md);
-  padding: 12px 12px 14px;
-  background: var(--ink-3);
+/* —— 无数据引导 —— */
+.no-data-guide {
   display: flex;
   flex-direction: column;
-}
-.stage-badge {
-  display: inline-flex;
   align-items: center;
-  gap: 5px;
-  align-self: flex-start;
-  font-size: 11px;
-  color: var(--accent);
-  font-weight: 600;
-  margin-bottom: 6px;
-}
-.chain-stage h4 {
-  margin: 0 0 6px;
-  font-size: 13px;
-  color: var(--ivory);
-}
-.stage-desc {
-  margin: 0 0 10px;
-  font-size: 11.5px;
-  line-height: 1.55;
+  gap: 12px;
+  padding: 40px 20px;
+  border: 1px dashed var(--line);
+  border-radius: var(--r-md);
+  background: var(--ink-2);
   color: var(--ivory-dim);
-  flex: 1;
 }
-.stage-output {
-  font-size: 10.5px;
-  line-height: 1.5;
-  color: var(--muted);
-  background: var(--brass-soft);
-  border-radius: var(--r-sm);
-  padding: 6px 8px;
-}
-.output-label {
-  color: var(--brass);
-  margin-right: 4px;
-  font-weight: 600;
-}
-.chain-arrow {
-  display: flex;
-  align-items: center;
-  color: var(--muted);
-  font-size: 18px;
-  flex: none;
+.no-data-guide p {
+  margin: 0;
+  font-size: 13px;
+  text-align: center;
 }
 
 /* —— 交叉验证 / 冲突消解 —— */
@@ -908,14 +790,6 @@ function goAudit() {
   }
   .overview-kpis {
     grid-template-columns: 1fr 1fr;
-  }
-  /* 链路在窄屏纵向堆叠，箭头转向下 */
-  .chain {
-    flex-direction: column;
-  }
-  .chain-arrow {
-    justify-content: center;
-    transform: rotate(90deg);
   }
 }
 </style>

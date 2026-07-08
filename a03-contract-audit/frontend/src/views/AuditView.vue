@@ -124,11 +124,7 @@ const onboardSteps = [
   { num: '3', title: '人工复核 / 生成整改', desc: '确认风险条款，自动生成整改跟踪项' },
 ]
 
-// 多智能体协同（展示态：预设步骤，审查完成后点亮）
-const collabSteps = {
-  legal: ['解析合同结构与条款', '比对法规知识库', '标注合规风险', '交接财务复核 →'],
-  finance: ['← 接收法务标注', '核对金额与付款节点', '识别财务风险', '汇总协同结论'],
-}
+
 </script>
 
 <template>
@@ -234,23 +230,6 @@ const collabSteps = {
             </div>
             <div class="kpi-mini">
               <span>高风险</span><strong class="mono seal-num">{{ session.levelCounts.high }}</strong>
-            </div>
-          </div>
-
-          <!-- 多智能体协同双泳道 -->
-          <div class="collab">
-            <div class="collab-head"><h3>多智能体协同</h3><span class="mono">协同完成</span></div>
-            <div class="collab-lanes">
-              <div class="lane">
-                <div class="lane-head"><el-icon><Stamp /></el-icon><b>法务专家 Agent</b><small>查合规</small></div>
-                <div v-for="(s, i) in collabSteps.legal" :key="i" class="collab-step" :class="{ handoff: i === 3 }">
-                  <i /><span>{{ s }}</span>
-                </div>
-              </div>
-              <div class="lane">
-                <div class="lane-head"><el-icon><Coin /></el-icon><b>财务会计 Agent</b><small>对账目</small></div>
-                <div v-for="(s, i) in collabSteps.finance" :key="i" class="collab-step"><i /><span>{{ s }}</span></div>
-              </div>
             </div>
           </div>
 
@@ -390,69 +369,6 @@ const collabSteps = {
 }
 .seal-num {
   color: var(--seal);
-}
-.collab {
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  padding: 14px;
-  margin-bottom: 18px;
-  background: var(--ink-3);
-}
-.collab-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-.collab-head h3 {
-  margin: 0;
-  font-size: 15px;
-}
-.collab-head span {
-  font-size: 12px;
-  color: var(--sage);
-}
-.collab-lanes {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
-.lane-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding-bottom: 8px;
-  margin-bottom: 8px;
-  border-bottom: 2px solid var(--brass);
-  font-size: 13px;
-}
-.lane:nth-child(2) .lane-head {
-  border-bottom-color: var(--sage);
-}
-.lane-head b {
-  color: var(--ivory);
-}
-.lane-head small {
-  color: var(--muted);
-}
-.collab-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--ivory-dim);
-  padding: 4px 0;
-}
-.collab-step i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--brass);
-  flex: none;
-}
-.collab-step.handoff {
-  color: var(--brass);
-  font-weight: 600;
 }
 .result-two-col {
   display: grid;
@@ -611,8 +527,7 @@ const collabSteps = {
   .audit-grid {
     grid-template-columns: 1fr;
   }
-  .result-two-col,
-  .collab-lanes {
+  .result-two-col {
     grid-template-columns: 1fr;
   }
 }
