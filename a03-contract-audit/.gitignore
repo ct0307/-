@@ -18,6 +18,7 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 *.local
+*.tsbuildinfo
 
 # 合同文件私有化存储（严禁入库，含敏感数据）
 storage/
