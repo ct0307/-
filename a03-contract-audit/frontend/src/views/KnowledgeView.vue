@@ -241,8 +241,8 @@ async function submitAdd() {
   border-radius: var(--r-lg);
   padding: 16px;
   cursor: pointer;
-  transition: all 0.2s var(--ease);
   box-shadow: var(--shadow-sm);
+  transition: border-color 0.2s var(--ease), transform 0.2s var(--ease);
 }
 .k-card:hover {
   border-color: var(--brass);

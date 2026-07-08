@@ -7,9 +7,12 @@ import { useAuthStore } from '@/stores/auth'
 const router = useRouter()
 const auth = useAuthStore()
 
-const username = ref('legal')
-const password = ref('legal123')
+// 不预填演示凭证（生产去除演示痕迹）
+const username = ref('')
+const password = ref('')
 const loading = ref(false)
+
+const isDev = import.meta.env.DEV
 
 async function onSubmit() {
   if (!username.value || !password.value) {
@@ -36,13 +39,20 @@ async function onSubmit() {
         <span class="brand-mark seal-badge">审</span>
         <div class="brand-txt">
           <h2 class="title">合同智审</h2>
-          <p class="eyebrow">CONTRACT COMPLIANCE SYSTEM</p>
+          <p class="eyebrow">企业合同合规审查系统</p>
         </div>
       </div>
-      <p class="subtitle">企业级合同合规审查工作台 · 私有化部署</p>
+      <p class="subtitle">私有化部署 · 数据不出企业</p>
       <el-form @submit.prevent="onSubmit">
         <el-form-item>
-          <el-input v-model="username" placeholder="用户名" size="large" :prefix-icon="'User'" />
+          <el-input
+            v-model="username"
+            placeholder="用户名"
+            size="large"
+            name="username"
+            autocomplete="username"
+            :prefix-icon="'User'"
+          />
         </el-form-item>
         <el-form-item>
           <el-input
@@ -51,15 +61,24 @@ async function onSubmit() {
             placeholder="密码"
             size="large"
             show-password
+            name="password"
+            autocomplete="current-password"
             :prefix-icon="'Lock'"
             @keyup.enter="onSubmit"
           />
         </el-form-item>
-        <el-button type="primary" size="large" style="width: 100%" :loading="loading" @click="onSubmit">
+        <el-button
+          type="primary"
+          size="large"
+          style="width: 100%"
+          :loading="loading"
+          @click="onSubmit"
+        >
           登 录
         </el-button>
       </el-form>
-      <p class="hint">演示账号：legal / legal123 · admin / admin123</p>
+      <!-- 演示账号：仅 dev 模式可见，生产构建自动隐藏 -->
+      <p v-if="isDev" class="hint">演示账号：legal / legal123 · admin / admin123</p>
     </div>
   </div>
 </template>
@@ -98,8 +117,8 @@ async function onSubmit() {
 }
 .eyebrow {
   margin: 2px 0 0;
-  font-size: 10px;
-  letter-spacing: 0.12em;
+  font-size: 11px;
+  letter-spacing: 0.04em;
   color: var(--brass);
   font-family: var(--mono);
 }

@@ -61,7 +61,7 @@ function onItem(type: NotifyType) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s var(--ease);
+  transition: border-color 0.2s var(--ease), color 0.2s var(--ease);
 }
 .bell:hover {
   border-color: var(--brass);

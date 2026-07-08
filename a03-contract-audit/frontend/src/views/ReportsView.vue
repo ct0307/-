@@ -92,10 +92,12 @@ const kpiCards = computed(() => {
   if (!data.value) return []
   const d = data.value
   return [
-    { label: '审查合同总数', value: d.kpi.total.toLocaleString(), trend: d.kpiTrend.total, up: true },
-    { label: '合规通过率', value: `${d.kpi.pass}%`, trend: d.kpiTrend.pass, up: true },
-    { label: '高风险条款', value: String(d.kpi.risk), trend: d.kpiTrend.risk, up: false },
-    { label: '平均审查耗时', value: d.kpi.time, trend: d.kpiTrend.time, up: true },
+    { label: '审查合同总数', value: d.kpi.total.toLocaleString(), trend: d.kpiTrend.total, up: true, tip: '' },
+    { label: '合规通过率',   value: `${d.kpi.pass}%`,            trend: d.kpiTrend.pass,  up: true,
+      tip: '已确认 + 已忽略风险条款 ÷ 总复核数，反映本期合规水平' },
+    { label: '高风险条款',   value: String(d.kpi.risk),           trend: d.kpiTrend.risk,  up: false, tip: '' },
+    { label: '平均审查耗时', value: d.kpi.time,                   trend: d.kpiTrend.time,  up: true,
+      tip: '从合同上传到审查结果返回的平均时长（不含人工复核等待时间）' },
   ]
 })
 
@@ -153,7 +155,12 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
       <template v-else-if="data">
         <section class="kpi-row">
           <article v-for="k in kpiCards" :key="k.label" class="kpi-card">
-            <span>{{ k.label }}</span>
+            <span class="kpi-label">
+              {{ k.label }}
+              <el-tooltip v-if="k.tip" :content="k.tip" placement="top" effect="dark">
+                <el-icon class="tip-icon"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </span>
             <strong class="mono">{{ k.value }}</strong>
             <em class="mono" :class="{ up: k.up, down: !k.up }">{{ k.trend }}</em>
           </article>
@@ -255,6 +262,18 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
 .kpi-card span {
   font-size: 13px;
   color: var(--ivory-dim);
+}
+.kpi-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--ivory-dim);
+}
+.tip-icon {
+  font-size: 13px;
+  color: var(--muted);
+  cursor: help;
 }
 .kpi-card strong {
   display: block;

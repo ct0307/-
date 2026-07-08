@@ -138,7 +138,7 @@ async function scrollToAnn(i: number) {
   margin-bottom: 10px;
   cursor: pointer;
   position: relative;
-  transition: all 0.2s var(--ease);
+  transition: border-color 0.2s var(--ease), background-color 0.2s var(--ease);
 }
 .ann-item::before {
   content: '';

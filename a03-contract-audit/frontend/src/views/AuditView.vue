@@ -117,6 +117,13 @@ const elementLabels: Record<string, string> = {
   duration: '履约期限',
 }
 
+// 3 步引导数据
+const onboardSteps = [
+  { num: '1', title: '上传合同', desc: '支持 PDF / Word / TXT，文件即刻加密存储' },
+  { num: '2', title: '智能审查', desc: '法务 + 财务双Agent 协同，比对法规知识库' },
+  { num: '3', title: '人工复核 / 生成整改', desc: '确认风险条款，自动生成整改跟踪项' },
+]
+
 // 多智能体协同（展示态：预设步骤，审查完成后点亮）
 const collabSteps = {
   legal: ['解析合同结构与条款', '比对法规知识库', '标注合规风险', '交接财务复核 →'],
@@ -189,7 +196,22 @@ const collabSteps = {
     <!-- 右栏：结果 -->
     <div class="right-stack">
       <el-card shadow="never" class="result-panel">
-        <el-empty v-if="session.step < 2" description="上传合同并启动智能审查，法务 Agent 查合规、财务 Agent 对账目" />
+        <!-- 3 步引导：未上传 / 已上传未审查时显示，代替纯文字空状态 -->
+        <div v-if="session.step < 2" class="onboard">
+          <div
+            v-for="(step, i) in onboardSteps"
+            :key="step.num"
+            class="onboard-step"
+            :class="{ done: session.step > i, active: session.step === i }"
+          >
+            <div class="step-num">{{ step.num }}</div>
+            <div class="step-body">
+              <b>{{ step.title }}</b>
+              <p>{{ step.desc }}</p>
+            </div>
+            <div v-if="i < onboardSteps.length - 1" class="step-arrow">→</div>
+          </div>
+        </div>
 
         <template v-else>
           <div class="result-head">
@@ -452,12 +474,72 @@ const collabSteps = {
   flex-direction: column;
   gap: 10px;
 }
+/* 3 步引导 */
+.onboard {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  padding: 32px 20px;
+  justify-content: center;
+}
+.onboard-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1;
+  max-width: 200px;
+  opacity: 0.45;
+  transition: opacity 0.2s ease;
+  position: relative;
+}
+.onboard-step.active { opacity: 1; }
+.onboard-step.done   { opacity: 0.7; }
+.step-num {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid var(--brass);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--brass);
+  font-family: var(--mono);
+}
+.onboard-step.done .step-num {
+  background: var(--brass);
+  color: var(--ink);
+}
+.step-body { flex: 1; padding-top: 4px; }
+.step-body b {
+  display: block;
+  font-size: 13px;
+  color: var(--ivory);
+  margin-bottom: 4px;
+}
+.step-body p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ivory-dim);
+  line-height: 1.5;
+}
+.step-arrow {
+  position: absolute;
+  right: -18px;
+  top: 8px;
+  color: var(--brass);
+  font-size: 16px;
+  opacity: 0.5;
+}
 .risk-card {
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   padding: 12px 14px;
   cursor: pointer;
-  transition: all 0.2s var(--ease);
+  /* 仅过渡必要属性，避免 GPU 处理所有 CSS 变化 */
+  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
   position: relative;
 }
 .risk-card::before {

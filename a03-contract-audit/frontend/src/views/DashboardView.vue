@@ -261,7 +261,7 @@ const activity = [
   background: var(--ink-3);
   color: var(--ivory);
   cursor: pointer;
-  transition: all 0.2s var(--ease);
+  transition: border-color 0.2s var(--ease), color 0.2s var(--ease);
 }
 .quick-item:hover {
   border-color: var(--brass);
