@@ -54,9 +54,18 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "qwen2.5:14b"
     LLM_TIMEOUT: int = 120
-    # Embedding 模型与维度（RAG 向量化用）。维度须与所选 embedding 模型一致。
-    EMBED_MODEL: str = "quentinz/bge-large-zh-v1.5"  # 常用中文 embedding，Ollama 可拉
-    EMBED_DIM: int = 1024
+
+    # Embedding 配置（RAG 向量化用）
+    # EMBED_BACKEND=local（默认）：sentence-transformers 本地模型，合同数据不出企业
+    # EMBED_BACKEND=api：走 LLM_BASE_URL + /embeddings 端点（需服务端支持 embedding）
+    EMBED_BACKEND: str = "local"
+    # 本地模型名（HuggingFace hub 或本地路径）。首次运行自动下载到 ~/.cache/huggingface
+    # 推荐：BAAI/bge-small-zh-v1.5（中文检索专用，384维，~100MB）
+    LOCAL_EMBED_MODEL: str = "BAAI/bge-small-zh-v1.5"
+    # API 模式下的 embedding 模型名（EMBED_BACKEND=api 时生效）
+    EMBED_MODEL: str = "quentinz/bge-large-zh-v1.5"
+    # 向量维度（需与所用 embedding 模型一致）
+    EMBED_DIM: int = 512  # bge-small-zh=512，bge-base-zh=768，bge-large-zh=1024
 
     def _abs(self, p: str) -> str:
         """相对路径按 BASE_DIR 解析为绝对路径；已是绝对路径则原样返回。"""

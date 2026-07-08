@@ -34,6 +34,10 @@ openpyxl==3.1.5
 # LLM 客户端（统一 Adapter 内部使用，可对接私有化模型）
 httpx==0.28.1
 
+# 本地 Embedding（RAG 向量化，合同数据不出企业）
+# 模型默认：BAAI/bge-small-zh-v1.5（中文检索专用，384维，~100MB）
+sentence-transformers==3.3.1
+
 # 日志
 structlog==24.4.0
 

@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from app.llm.base import LLMError
-from app.llm.factory import get_llm_adapter
+from app.llm.factory import get_embedding_adapter
 from app.models.models import KnowledgeChunk
 
 log = get_logger("rag")
@@ -75,7 +75,7 @@ def retrieve(query: str, *, top_k: int = 3) -> list[dict]:
 
 def _vector_search(query: str, chunks: list[KnowledgeChunk], top_k: int) -> list[dict]:
     """向量检索：query embed 后与切片向量算余弦相似度，取 Top-K。"""
-    adapter = get_llm_adapter()
+    adapter = get_embedding_adapter()
     query_vec = np.asarray(adapter.embed([query])[0], dtype=np.float32)
 
     mat = np.asarray([json.loads(c.embedding) for c in chunks], dtype=np.float32)
@@ -113,7 +113,7 @@ def index_documents(chunks: list[dict], db: Session | None = None) -> int:
     own_db = db is None
     db = db or SessionLocal()
     try:
-        adapter = get_llm_adapter()
+        adapter = get_embedding_adapter()
         vectors = adapter.embed([c["content"] for c in chunks])
         for chunk, vec in zip(chunks, vectors):
             db.add(KnowledgeChunk(
