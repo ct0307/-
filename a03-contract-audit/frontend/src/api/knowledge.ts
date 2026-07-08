@@ -32,3 +32,14 @@ export async function importKnowledge(payload: {
   }
   await client.post('/knowledge/import', payload)
 }
+
+/** 上传文件批量导入知识库（txt/docx/pdf → 自动切片向量化）。*/
+export async function importKnowledgeFile(
+  file: File,
+  category: string,
+): Promise<{ source: string; category: string; imported_chunks: number }> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('category', category)
+  return client.post('/knowledge/import-file', form)
+}

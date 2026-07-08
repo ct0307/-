@@ -1,7 +1,8 @@
 """知识库端点：导入法规/行业规则/合同模板，切片向量化供 RAG 检索；查询卡片/统计。"""
+import io
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -29,6 +30,8 @@ _CAT_LABEL = {
 _DESC_MAX = 120
 
 
+# —— 工具函数 ——
+
 def _split_chunks(text: str) -> list[str]:
     """按空行分段，过长段落再按中文句号切，去空白。"""
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
@@ -46,6 +49,56 @@ def _split_chunks(text: str) -> list[str]:
         if buf.strip():
             chunks.append(buf.strip())
     return chunks
+
+
+async def _extract_file_text(file: UploadFile) -> str:
+    """从上传文件提取纯文本。支持 txt / docx / pdf。"""
+    raw = await file.read()
+    fname = (file.filename or "").lower()
+
+    if fname.endswith(".txt"):
+        for enc in ("utf-8", "gbk", "utf-8-sig"):
+            try:
+                return raw.decode(enc)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return raw.decode("utf-8", errors="replace")
+
+    if fname.endswith(".docx"):
+        try:
+            from docx import Document  # python-docx
+            doc = Document(io.BytesIO(raw))
+            return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except Exception as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"docx 解析失败：{exc}") from exc
+
+    if fname.endswith(".pdf"):
+        try:
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                pages = [p.extract_text() or "" for p in pdf.pages]
+            return "\n\n".join(t for t in pages if t.strip())
+        except Exception as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"pdf 解析失败：{exc}") from exc
+
+    raise HTTPException(
+        status.HTTP_400_BAD_REQUEST,
+        "不支持的文件类型，仅支持 .txt / .docx / .pdf",
+    )
+
+
+def _do_index(chunks: list[dict], db: Session) -> int:
+    """切片向量化入库，embedding 不可用时降级写空向量。"""
+    try:
+        return index_documents(chunks, db=db)
+    except LLMError:
+        for c in chunks:
+            db.add(KnowledgeChunk(
+                category=c["category"], source=c["source"],
+                content=c["content"], embedding="",
+            ))
+        db.commit()
+        return len(chunks)
 
 
 @router.post("/import")
@@ -75,6 +128,36 @@ def import_knowledge(
 
     audit_log.record(db, user_id=user.id, action="import_knowledge", target=payload.category, detail=f"chunks={count}")
     return {"category": payload.category, "source": payload.source, "imported_chunks": count}
+
+
+@router.post("/import-file")
+async def import_knowledge_file(
+    file: UploadFile = File(...),
+    category: str = Form("law"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("legal", "admin")),
+) -> dict:
+    """上传文件批量导入知识库。支持 .txt / .docx / .pdf。
+
+    文件内容按段落自动切片（每片 ≤500字），逐片向量化入库。
+    同一文件名可重复导入（用于内容更新），不做去重（由调用方控制）。
+    """
+    content = await _extract_file_text(file)
+    pieces = _split_chunks(content)
+    if not pieces:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件内容为空或无法提取文本")
+
+    source = file.filename or "未命名文件"
+    chunks = [{"category": category, "source": source, "content": p} for p in pieces]
+    count = _do_index(chunks, db)
+
+    audit_log.record(
+        db, user_id=user.id,
+        action="import_knowledge_file",
+        target=source,
+        detail=f"category={category} chunks={count}",
+    )
+    return {"source": source, "category": category, "imported_chunks": count}
 
 
 def _chips_for(cat_label: str, source: str) -> list[str]:
