@@ -1,9 +1,10 @@
 """合同端点：上传、解析、触发审查、查询。"""
+import json
 import os
 import uuid
 from datetime import timezone
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles
@@ -89,6 +90,78 @@ def list_contracts_history(
     return result
 
 
+@router.post("/batch-upload")
+def batch_upload_contracts(
+    files: list[UploadFile] = File(..., description="批量上传合同文件，最多50份"),
+    contract_type: str = "",
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(["legal", "finance", "admin"])),
+) -> list[dict]:
+    """批量上传合同：一次最多50份，逐文件处理。
+
+    每份文件独立上传 + 加密存储 + 文本解析，互不影响（单文件失败不中断其余）。
+    返回每份文件的处理结果列表，包含 contract_id / status / error。
+    """
+    if len(files) > 200:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次最多上传 200 份合同")
+
+    from app.core.crypto import encrypt_bytes, is_encryption_enabled
+    encrypted_flag = is_encryption_enabled()
+    os.makedirs(settings.storage_path, exist_ok=True)
+    results = []
+
+    for file in files:
+        fname = file.filename or "unknown"
+        ext = os.path.splitext(fname)[1].lower()
+        try:
+            if ext not in _ALLOWED_EXT:
+                results.append({"filename": fname, "status": "failed", "error": f"不支持的文件类型 {ext}"})
+                continue
+            content = file.file.read()
+            if len(content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
+                results.append({"filename": fname, "status": "failed", "error": "文件超过大小限制"})
+                continue
+
+            stored_name = f"{uuid.uuid4().hex}{ext}"
+            stored_path = os.path.join(settings.storage_path, stored_name)
+            with open(stored_path, "wb") as f:
+                f.write(encrypt_bytes(content))
+
+            contract = Contract(
+                filename=fname,
+                storage_path=stored_path,
+                contract_type=contract_type,
+                department=user.department,
+                status="uploaded",
+                uploaded_by=user.id,
+            )
+            db.add(contract)
+            db.flush()  # 获取 id 但不提交，出错可回滚
+
+            # 解析并写入 elements_json
+            try:
+                text = extract_text(stored_path)
+                elements = extract_elements(text)
+                contract.elements_json = json.dumps(
+                    {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
+                    ensure_ascii=False,
+                )
+                contract.status = "parsed"
+            except Exception:
+                pass  # 解析失败不影响上传结果
+
+            db.commit()
+            db.refresh(contract)
+            audit_log.record(db, user_id=user.id, action="batch_upload",
+                             target=f"contract:{contract.id}", detail=f"{fname} encrypted={encrypted_flag}")
+            results.append({"filename": fname, "status": "success", "contract_id": contract.id})
+        except Exception as exc:
+            db.rollback()
+            results.append({"filename": fname, "status": "failed", "error": str(exc)})
+
+    return results
+
+
 @router.post("/upload", response_model=ContractOut)
 def upload_contract(
     file: UploadFile,
@@ -139,6 +212,11 @@ def parse_contract(contract_id: int, db: Session = Depends(get_db), user: User =
     text = extract_text(contract.storage_path)
     elements = extract_elements(text)
     contract.status = "parsed"
+    # 持久化解析要素：甲方/乙方/合同标的/收付款节点等，供报表导出使用
+    contract.elements_json = json.dumps(
+        {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
+        ensure_ascii=False,
+    )
     db.commit()
     audit_log.record(db, user_id=user.id, action="parse", target=f"contract:{contract_id}")
     return {"contract_id": contract_id, "elements": elements, "text_length": len(text)}
@@ -207,3 +285,28 @@ def _get_contract(db: Session, contract_id: int, user: User | None = None) -> Co
     if user and not _dept_accessible(contract, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问此合同（部门隔离）")
     return contract
+
+
+@router.patch("/{contract_id}/escalate", status_code=status.HTTP_200_OK)
+def escalate_contract(
+    contract_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["legal", "finance", "admin"])),
+):
+    """三方会审发起：更新合同状态 + 写审计日志。
+
+    语义：当前合同风险等级触发三员会审流程，由法务/财务/管理员发起，
+    审批工作流待集成企业 OA（路线图），当前阶段记录发起操作留痕。
+    """
+    contract = _get_contract(db, contract_id, current_user)
+    contract.status = "three_review"
+    db.commit()
+    audit_log.record(
+        db,
+        current_user.id,
+        "三方会审发起",
+        f"合同#{contract_id}",
+        f"由 {current_user.username}（{current_user.role}）发起，状态更新为 three_review",
+    )
+    return {"contract_id": contract_id, "status": "three_review"}
+

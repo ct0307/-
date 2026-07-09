@@ -10,7 +10,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.models import User
 from app.services import audit_log
-from app.services.report.exporter import export_risk_ledger, report_summary
+from app.services.report.exporter import contracts_metadata, export_risk_ledger, report_summary
 
 router = APIRouter()
 
@@ -25,6 +25,15 @@ def reports_summary(
 ) -> dict:
     """多维报表聚合数据（KPI/趋势/风险分布/部门/Top5），供前端 ReportsView。"""
     return report_summary(db, range)
+
+
+@router.get("/contracts-metadata")
+def get_contracts_metadata(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list:
+    """合同要素汇总：甲方 / 合同标的 / 收付款节点 + 风险统计，供多维报表「合同要素」区展示。"""
+    return contracts_metadata(db)
 
 
 @router.get("/export")

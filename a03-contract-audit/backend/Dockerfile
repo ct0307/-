@@ -1,17 +1,14 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-
-# 系统依赖（pdfplumber 等文档解析可能需要）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    libpoppler-dev libxml2-dev libxslt-dev gcc \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
 COPY . .
+RUN mkdir -p storage
 
 EXPOSE 8000
-
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

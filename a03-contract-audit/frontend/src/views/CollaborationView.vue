@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // 双 Agent 协作全景：展示法务/财务两个 Agent 的职责、协作流程与结果分析。
 // 数据源：有真实审查会话（audit-session 有风险）→ 用真实数据；否则降级到 collaboration mock 演示数据。
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { useAuditSessionStore } from '@/stores/audit-session'
+import client from '@/api/client'
 import {
   AGENTS,
   CROSS_CHECKS,
@@ -114,12 +115,34 @@ const tierList = computed(() =>
   }),
 )
 
-function onTierAction(key: TierKey) {
-  const label = RISK_TIERS[key].actionLabel
+const escalating = ref(false)
+
+async function onTierAction(key: TierKey) {
+  if (key === 'yellow') {
+    // 逐条核实 → 跳转合同审查页，真实复核抽屉已在那里
+    router.push('/audit')
+    return
+  }
+  if (key === 'green') {
+    ElMessage.success('绿档已自动过审，无需人工介入')
+    return
+  }
   if (key === 'red') {
-    ElMessage.warning(`已${label}：需法务、财务、合规总监三员共同进入协同界面`)
-  } else {
-    ElMessage.success(`演示：已执行「${label}」`)
+    // 三方会审 → 有真实会话才调接口，否则降级提示
+    if (!isLive.value || !session.contractId) {
+      ElMessage.warning('请先完成合同审查，再发起三方会审')
+      return
+    }
+    if (escalating.value) return
+    escalating.value = true
+    try {
+      await client.patch(`/contracts/${session.contractId}/escalate`)
+      ElMessage.success('已发起三方会审，操作已记录审计日志')
+    } catch {
+      ElMessage.error('发起失败，请检查网络或权限')
+    } finally {
+      escalating.value = false
+    }
   }
 }
 
@@ -685,6 +708,7 @@ function goAudit() {
 .kpi span {
   font-size: 12px;
   color: var(--muted);
+  font-family: var(--serif);
 }
 .kpi strong {
   font-size: 24px;

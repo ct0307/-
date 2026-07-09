@@ -1,9 +1,10 @@
 <script setup lang="ts">
 // 权限与审计（仅 admin）：角色权限矩阵 + 操作审计日志 + LLM 调用记录。
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { getAccessMatrix, getAuditLogs, getLlmCalls } from '@/api/admin'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { getAccessMatrix, getAuditLogs, getLlmCalls, getLookups, createLookup, deleteLookup } from '@/api/admin'
 import type { AccessRole, AuditLogRow, LlmCallRow, Perm } from '@/mock/admin'
+import type { LookupItem } from '@/api/admin'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
 const modules = ref<string[]>([])
@@ -32,7 +33,7 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(load)
+onMounted(() => { load(); loadLookups() })
 
 const filteredLogs = computed(() => {
   const kw = keyword.value.trim()
@@ -84,6 +85,52 @@ const llmStats = computed(() => {
     avgTokens: Math.round(v.totalTokens / v.count),
   }))
 })
+
+// ── 基础配置：部门 & 合同类型增删 ──
+const depts = ref<LookupItem[]>([])
+const ctypes = ref<LookupItem[]>([])
+const newDept = ref('')
+const newCtype = ref('')
+const lookupLoading = ref(false)
+
+async function loadLookups() {
+  lookupLoading.value = true
+  try {
+    const [d, c] = await Promise.all([getLookups('department'), getLookups('contract_type')])
+    depts.value = d
+    ctypes.value = c
+  } finally {
+    lookupLoading.value = false
+  }
+}
+
+async function addLookup(category: 'department' | 'contract_type') {
+  const val = category === 'department' ? newDept.value.trim() : newCtype.value.trim()
+  if (!val) return
+  try {
+    const item = await createLookup(category, val)
+    if (category === 'department') { depts.value.push(item); newDept.value = '' }
+    else { ctypes.value.push(item); newCtype.value = '' }
+    ElMessage.success('已添加')
+  } catch (e: unknown) {
+    const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    ElMessage.error(msg ?? '添加失败')
+  }
+}
+
+async function removeLookup(category: 'department' | 'contract_type', id: number, value: string) {
+  await ElMessageBox.confirm(`确认删除「${value}」？`, '删除确认', {
+    type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
+  })
+  try {
+    await deleteLookup(id)
+    if (category === 'department') depts.value = depts.value.filter((i) => i.id !== id)
+    else ctypes.value = ctypes.value.filter((i) => i.id !== id)
+    ElMessage.success('已删除')
+  } catch {
+    ElMessage.error('删除失败')
+  }
+}
 
 // 导出审计日志 CSV
 function exportCsv() {
@@ -263,6 +310,58 @@ function exportCsv() {
           </el-table>
         </el-card>
       </el-tab-pane>
+      <!-- ── Tab 4：基础配置 ── -->
+      <el-tab-pane label="基础配置" name="config">
+        <div class="config-grid" v-loading="lookupLoading">
+          <!-- 业务部门 -->
+          <el-card shadow="never">
+            <template #header>
+              <div class="panel-head">
+                <span>业务部门</span>
+                <el-tag size="small" type="info">{{ depts.length }} 项</el-tag>
+              </div>
+            </template>
+            <div class="lookup-add">
+              <el-input v-model="newDept" placeholder="输入部门名称" clearable @keyup.enter="addLookup('department')" />
+              <el-button type="primary" :icon="'Plus'" @click="addLookup('department')">添加</el-button>
+            </div>
+            <el-empty v-if="!depts.length" description="暂无部门，点击添加" />
+            <ul v-else class="lookup-list">
+              <li v-for="item in depts" :key="item.id" class="lookup-item">
+                <span>{{ item.value }}</span>
+                <el-button
+                  type="danger" size="small" :icon="'Delete'" circle plain
+                  @click="removeLookup('department', item.id, item.value)"
+                />
+              </li>
+            </ul>
+          </el-card>
+
+          <!-- 合同类型 -->
+          <el-card shadow="never">
+            <template #header>
+              <div class="panel-head">
+                <span>合同类型</span>
+                <el-tag size="small" type="info">{{ ctypes.length }} 项</el-tag>
+              </div>
+            </template>
+            <div class="lookup-add">
+              <el-input v-model="newCtype" placeholder="输入合同类型" clearable @keyup.enter="addLookup('contract_type')" />
+              <el-button type="primary" :icon="'Plus'" @click="addLookup('contract_type')">添加</el-button>
+            </div>
+            <el-empty v-if="!ctypes.length" description="暂无类型，点击添加" />
+            <ul v-else class="lookup-list">
+              <li v-for="item in ctypes" :key="item.id" class="lookup-item">
+                <span>{{ item.value }}</span>
+                <el-button
+                  type="danger" size="small" :icon="'Delete'" circle plain
+                  @click="removeLookup('contract_type', item.id, item.value)"
+                />
+              </li>
+            </ul>
+          </el-card>
+        </div>
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -364,7 +463,38 @@ function exportCsv() {
   color: var(--muted);
 }
 .dim { color: var(--muted); font-size: 11px; }
+/* 基础配置 */
+.config-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.lookup-add {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.lookup-add .el-input { flex: 1; }
+.lookup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lookup-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  background: var(--ink-3);
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  color: var(--ivory);
+}
 @media (max-width: 1180px) {
   .llm-stats { grid-template-columns: 1fr 1fr; }
+  .config-grid { grid-template-columns: 1fr; }
 }
 </style>

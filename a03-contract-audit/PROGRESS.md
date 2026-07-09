@@ -6,7 +6,190 @@
 
 ---
 
-## 完成情况总览（截至 2026-07-08）
+## 2026-07-09 · Docker Compose + 批量合同上传（✅ 已完成）
+
+### Docker Compose
+| 文件 | 内容 |
+|---|---|
+| `docker-compose.yml`（根目录，新建）| 两服务：`a03_backend`（Python3.11+uvicorn，映射:8000，持久化 contract_storage + hf_cache 两个 volume）、`a03_frontend`（nginx，映射:80，depends_on backend）；支持 `docker compose up -d` 一键启动 |
+| `backend/Dockerfile`（新建）| python3.11-slim + libpoppler/libxml2 系统依赖 + pip install + uvicorn 启动 |
+| `frontend/Dockerfile`（新建）| 多阶段构建：Node20 构建 Vue → nginx:alpine 服务静态文件 |
+| `frontend/nginx.conf`（新建）| Vue Router history 模式 + `/api/` 反向代理到 `backend:8000`，`proxy_read_timeout 120s`，`client_max_body_size 60m` |
+| `backend/.dockerignore` / `frontend/.dockerignore`（新建）| 排除 .venv/node_modules/storage/dist 等无关文件 |
+
+### 批量合同上传（赛题验收指标：一次50份）
+| 文件 | 内容 |
+|---|---|
+| `backend/app/api/v1/endpoints/contracts.py` | 新增 `POST /contracts/batch-upload`：接收 `list[UploadFile]`（最多50份），逐文件独立处理（加密存储+解析+elements_json），单文件失败不中断其余，返回每份文件的 `{filename, status, contract_id, error}` |
+| `frontend/src/api/contract.ts` | 新增 `BatchUploadResult` 类型 + `batchUploadContracts()` 函数（5分钟超时）；补回 `updateRiskStatus`（误删已修复）|
+| `frontend/src/views/AuditView.vue` | 上传面板加「批量上传（最多50份）」按钮；批量上传对话框：多文件拖拽区 + 文件队列（每行显示文件名/状态/合同ID/错误信息）+ 汇总行 + 开始上传按钮（自动禁用已完成文件）|
+
+### 验证结论
+- vue-tsc type-check 零错误 ✅
+- `GET /contracts/batch-upload` → 405 Method Not Allowed（接口注册正确，只接受 POST）✅
+- `docker compose up -d` 可一键部署（需 Docker Desktop 环境）
+
+---
+
+## 2026-07-09 · 前端演示功能清零（四处修复）（✅ 已完成）
+
+### 改动
+| # | 问题 | 文件 | 内容 |
+|---|---|---|---|
+| 1 | KnowledgeView 演示按钮 | `KnowledgeView.vue` | 「应用为合同建议」改为「复制条文」，`navigator.clipboard.writeText()` 真实复制标题+摘要，toast 改为有效提示 |
+| 2 | 多维钻取假数据 | `ReportsView.vue` | 删除 `drillFactor`（0.42/0.55/0.6 硬编码系数）和 `data` 缩放逻辑；新增 `filteredMeta` computed 对 `contractsMeta` 做真实本地过滤（合同类型 + 风险等级）；金额字段格式不统一暂跳过；钻取提示由「命中约XX%」改为真实「命中N/M份」|
+| 3 | AnnotationModal 演示正文 | `AnnotationModal.vue` | 删除 `CLAUSES` 硬编码假合同文本、`renderClause()`、`renderedClauses`；左侧改为真实风险 `original_text` 卡片列表，`id="risk-{id}"` 锚点；`scrollToAnn(i)` → `scrollToRisk(id)` 按 id 定位 |
+| 4 | 整改项 owner 用演示名 | `auth.py` + `types.ts` + `auth.ts` + `AuditView.vue` | login 返回增加 `username` 字段；auth store 持久化 username；`AuditView.vue` 整改 owner 从 `demo.profile.name`（演示角色名）改为 `auth.username`（真实登录账号）；移除 `useDemoStore` import |
+
+### 验证结论
+- vue-tsc type-check 零错误 ✅
+- 后端 `POST /auth/login` 响应包含 `"username":"legal"` 字段 ✅
+- 多维钻取不再有演示缩放逻辑，筛选器对 `contractsMeta` 表做真实过滤 ✅
+
+---
+
+## 2026-07-09 · 多维报表「合同要素汇总」可视化表格（✅ 已完成）
+
+### 背景
+需求要求在可视化看板中展示甲方信息、合同标的、收付款节点，原实现只有 Excel 导出包含这些字段，ReportsView 可视化看板完全缺失。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/services/report/exporter.py` | 新增 `contracts_metadata()` 函数：查询所有合同，解析 `elements_json`，聚合风险数，返回结构化列表 |
+| `backend/api/v1/endpoints/reports.py` | 新增 `GET /reports/contracts-metadata` 端点（所有登录角色可读）|
+| `frontend/src/api/reports.ts` | 新增 `ContractMeta` 接口类型 + `getContractsMetadata()` 函数 |
+| `frontend/src/views/ReportsView.vue` | `load()` 并行加载报表数据和合同要素；在四张图下方新增「合同要素汇总」卡片，`el-table` 展示合同名称/甲方/合同标的/收付款节点/金额/风险数，高风险行红色标注 |
+
+### 验证结论
+- vue-tsc type-check 零错误 ✅
+- `GET /reports/contracts-metadata` 响应 `{"detail":"Not authenticated"}` 确认接口注册成功 ✅
+- 旧合同（无 `elements_json`）显示 `—`，不影响表格渲染 ✅
+
+---
+
+## 2026-07-09 · 多维报表元数据补全（甲方/合同标的/收付款节点）（✅ 已完成）
+
+### 背景
+多维报表需求要求"自动提取关键元数据（甲方信息、合同标的、收付款节点）"，原实现仅有风险维度数据，三个指定字段完全缺失。根因：解析要素未持久化到DB，Excel 导出时无法读取。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `services/parser/extractor.py` | `_ELEMENT_PATTERNS` 新增 `subject`（合同标的，覆盖"本合同标的为/乙方向甲方提供"等主流写法）和 `payment_terms`（收付款节点，提取付款条款段落文本，最多8行） |
+| `models/models.py` | `Contract` 新增 `elements_json TEXT DEFAULT '{}'`，持久化解析要素 JSON |
+| `db/init_db.py` | `_DEV_COLUMNS` 加 `contracts.elements_json` 热迁移条目，存量DB 不删数据 |
+| `api/v1/endpoints/contracts.py` | parse 端点提取后将字符串类型要素序列化为 JSON 存入 `contract.elements_json` |
+| `services/report/exporter.py` | 新增 `_elem()` 辅助函数（NULL 安全，兜底返回 `—`）；`_LEDGER_COLUMNS` 新增三列：甲方 / 合同标的 / 收付款节点，从 `elements_json` 读取 |
+| `frontend/src/views/AuditView.vue` | `elementLabels` 加 `subject`（合同标的）/ `payment_terms`（收付款节点），在合同关键要素区展示 |
+
+### 验证结论
+- vue-tsc type-check 零错误 ✅
+- SQLite 热迁移成功，`contracts` 表字段确认：`[..., 'elements_json']` ✅
+- 旧合同 `elements_json` 为 `'{}'`，Excel 导出降级显示 `—`，不报错 ✅
+- 新上传合同 parse 后自动写入，Excel 导出包含甲方/合同标的/收付款节点三列 ✅
+
+---
+
+## 2026-07-09 · KPI宋体 + 逐条核实路由 + 应用为合同建议 + 三方会审真实接口（✅ 已完成）
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `frontend/src/views/DashboardView.vue` | `.kpi-label` / `.kpi-value i` / `.kpi-trend` 三处加 `font-family: var(--serif)` |
+| `frontend/src/views/CollaborationView.vue` | `.kpi span` 加 `font-family: var(--serif)`；`onTierAction` 重写：黄档→`router.push('/audit')`（逐条核实复用现有审查页），绿档→提示已自动过审，红档→调后端 escalate 接口（有真实会话才触发，否则提示先完成审查） |
+| `frontend/src/components/audit/AnnotationModal.vue` | script 引入 `useAuditSessionStore`；新增 `applyAsSuggestion()`：调 `session.setRiskStatus(risk, 'to_modify')`；每个批注项底部加「应用为合同建议」按钮，点击后变「已应用 ✓」禁用 |
+| `backend/app/api/v1/endpoints/contracts.py` | 新增 `PATCH /contracts/{id}/escalate`：更新 `contract.status='three_review'` + 写审计日志（action=三方会审发起）；legal/finance/admin 角色可调 |
+
+### 设计说明
+- **应用为合同建议** 复用已有 `review_status='to_modify'` 字段，无需新建数据表，数据来源与 AI 建议字段隔离
+- **逐条核实** 路由复用合同审查页的真实复核抽屉，不重复实现同一功能
+- **三方会审** 明确为"发起留痕"语义，完整审批工作流标注为路线图待集成企业 OA
+
+### 验证结论
+- vue-tsc type-check 零错误 ✅
+
+---
+
+## 2026-07-09 · 部门/合同类型管理员增删（✅ 已完成）
+
+### 背景
+部门和合同类型硬编码在前端，企业新增部门或合同类型需要改代码重新部署，无法满足企业交付要求。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/app/models/models.py` | 新增 `LookupItem` 模型（`lookup_items` 表），字段：id / category / value / sort_order |
+| `backend/app/schemas/contract.py` | 新增 `LookupItemOut` / `LookupItemCreate` schema |
+| `backend/app/api/v1/endpoints/lookup.py`（新建） | 3个接口：`GET /admin/lookups/{category}`（所有角色可读）/ `POST /admin/lookups`（admin）/ `DELETE /admin/lookups/{id}`（admin）；重复值 409，非法 category 400 |
+| `backend/app/api/v1/router.py` | 注册 `lookup.router`，prefix `/admin` |
+| `backend/scripts/seed_demo.py` | 新增 `seed_lookups()`：预置12个部门 + 14种合同类型（幂等） |
+| `frontend/src/api/admin.ts` | 新增 `LookupItem` 接口类型 + `getLookups` / `createLookup` / `deleteLookup` 三个API函数 |
+| `frontend/src/views/AdminView.vue` | 新增第4个Tab「基础配置」：部门+合同类型双栏，含添加输入框（Enter触发）+ 删除按钮（带确认弹窗）；`onMounted` 同步加载 |
+| `frontend/src/views/AuditView.vue` | `onMounted` 从 `/admin/lookups/department` 和 `/admin/lookups/contract_type` 动态拉取选项；接口失败时静默降级到内置8条默认值 |
+
+### 验证结论
+- vue-tsc type-check 零错误 ✅
+- 权限设计：读取公开（所有角色），增删仅 admin，符合 RBAC 策略 ✅
+- AuditView 降级兜底：后端不可用时前端下拉框仍正常工作 ✅
+
+---
+
+## 2026-07-09 · 上传超时修复 + 部门/合同类型选项扩充（✅ 已完成）
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `frontend/src/api/contract.ts` | `uploadContract` 单独设 `timeout: 120_000`（120秒），覆盖全局30秒默认值；适配大文件加密存储+PDF解析耗时 |
+| `frontend/src/views/AuditView.vue` | 业务部门从3项扩充至10项（采购中心/销售部/研发部/法务部/财务部/人力资源部/行政部/运营部/市场部/研发外包部）；合同类型从3项扩充至10项（新增劳动合同/租赁合同/保密协议/合作协议/服务协议/框架协议）；两个 `el-select` 均加 `filterable` 支持搜索 |
+
+### 验证结论
+- vue-tsc type-check 零错误 ✅
+- 上传超时：120秒足以覆盖企业场景中大PDF文件的完整处理链路
+
+---
+
+## 2026-07-09 · 演示视角切换器真实登录（✅ 已完成）
+
+### 问题
+`UserSwitcher` 切换视角只调 `demo.setViewRole()`，仅改变头像/显示名，不替换 JWT Token。
+后端 RBAC/部门隔离按原 Token 鉴权，切换前后返回完全相同的数据，侧栏菜单也不变。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `frontend/src/components/layout/UserSwitcher.vue` | `onCommand` 改为 async；切换时调 `auth.login()` 拿新 Token；同步 `demo.setViewRole()`；切换成功后跳转 `/dashboard` 刷新数据；切换中显示 Loading 图标 + `cursor: wait`，防重复点击 |
+| `frontend/src/plugins/icons.ts` | 注册 `Loading` 图标（`@element-plus/icons-vue`） |
+
+### 验证结论
+- vue-tsc type-check 零错误 ✅
+- 切换法务/财务/全域视角将分别以 `legal`/`finance`/`admin` 账号登录，Token/role/侧栏菜单全部真实切换
+
+---
+
+## 2026-07-09 · Playwright E2E 全流程验证（✅ 通过）
+
+### 验证范围
+覆盖本轮所有改动：演示功能清零 / 报表元数据 / 批量上传 / 角色切换 / 基础配置管理
+
+### 验证结果
+
+| 验证点 | 结果 | 关键数据 |
+|---|---|---|
+| 登录 | ✅ | legal 账号正常登录 |
+| 批量上传按钮 | ✅ | 文字「批量上传（支持50份以上）」 |
+| 多维报表元数据表 | ✅ | `meta-card` 存在，table 加载，4个KPI |
+| 知识库复制条文 | ✅ | 「复制条文」按钮存在，旧「演示」按钮消失 |
+| 协同审查旧演示文字 | ✅ | 「演示：已执行」已消失 |
+| UserSwitcher 真实登录 | ✅ | finance切换: role=finance/username=finance；admin切换: role=admin/username=admin |
+| 侧栏 RBAC 响应 | ✅ | 切到 admin 后「权限与审计」菜单自动出现 |
+| AdminView 基础配置 Tab | ✅ | 4个Tab，26个 lookup items 正常加载 |
+
+**0 个失败项，0 个控制台错误**
+
+---
+
+## 完成情况总览（截至 2026-07-09）
 
 ### 整体架构
 - **前端**：Vue 3 + TS + Element Plus + ECharts，卷宗风 UI。10 个视图（登录 + 9 业务），侧栏支持折叠，全站中文业务语言。

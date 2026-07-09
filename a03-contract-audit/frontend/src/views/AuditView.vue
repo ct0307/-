@@ -1,8 +1,10 @@
 <script setup lang="ts">
 // 合同合规审查（真实接口核心闭环）：上传→解析→审查→复核→生成整改。
 // 闭环逻辑迁移自 WorkbenchView，数据落 audit-session store。
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { ElMessage, type UploadRawFile } from 'element-plus'
+import { getLookups } from '@/api/admin'
+import { batchUploadContracts, type BatchUploadResult } from '@/api/contract'
 
 // 用户选文件后立即显示名称（不等后端返回），上传完成后由 session.filename 接管
 const pendingFilename = ref('')
@@ -10,17 +12,38 @@ import type { RiskOut } from '@/api/types'
 import { useAuditSessionStore } from '@/stores/audit-session'
 import { useRectifyStore } from '@/stores/rectify'
 import { useNotifyStore } from '@/stores/notify'
-import { useDemoStore } from '@/stores/demo'
+import { useAuthStore } from '@/stores/auth'
 import RiskReviewDrawer from '@/components/audit/RiskReviewDrawer.vue'
 import AnnotationModal from '@/components/audit/AnnotationModal.vue'
 
 const session = useAuditSessionStore()
 const rectify = useRectifyStore()
 const notify = useNotifyStore()
-const demo = useDemoStore()
+const auth = useAuthStore()
 
 const department = ref('采购中心')
 const contractType = ref('软件开发外包合同')
+
+// 降级默认值（接口失败时兜底）
+const _DEFAULT_DEPTS = ['采购中心', '销售部', '研发部', '法务部', '财务部', '人力资源部', '行政部', '运营部']
+const _DEFAULT_CTYPES = ['软件开发外包合同', '技术服务合同', '采购合同', '销售合同', '劳动合同', '租赁合同', '保密协议', '合作协议']
+
+const departmentOptions = ref<string[]>(_DEFAULT_DEPTS)
+const contractTypeOptions = ref<string[]>(_DEFAULT_CTYPES)
+
+// mount 时从后端拉取管理员维护的选项列表；失败时静默降级到内置默认值
+onMounted(async () => {
+  try {
+    const [depts, ctypes] = await Promise.all([
+      getLookups('department'),
+      getLookups('contract_type'),
+    ])
+    if (depts.length) departmentOptions.value = depts.map((d) => d.value)
+    if (ctypes.length) contractTypeOptions.value = ctypes.map((c) => c.value)
+  } catch {
+    // 静默降级：保持内置默认值，不打断用户流程
+  }
+})
 
 // 审查维度（对齐 demo，仅前端展示，不改后端契约）
 const dimensions = ref([
@@ -79,7 +102,7 @@ async function confirmRisk(risk: RiskOut) {
   try {
     await session.setRiskStatus(risk, 'confirmed')
     // 跨模块联动：生成整改项 + 推通知
-    await rectify.addFromRisk(risk, session.filename || '当前合同', demo.profile.name)
+    await rectify.addFromRisk(risk, session.filename || '当前合同', auth.username)
     notify.push('rectify', '生成整改项', `已就"${risk.category}"生成整改项，进入整改跟踪。`)
     ElMessage.success('已确认并生成整改项')
     drawerOpen.value = false
@@ -115,6 +138,8 @@ const elementLabels: Record<string, string> = {
   amount: '合同金额',
   sign_date: '签订日期',
   duration: '履约期限',
+  subject: '合同标的',
+  payment_terms: '收付款节点',
 }
 
 // 3 步引导数据
@@ -123,6 +148,65 @@ const onboardSteps = [
   { num: '2', title: '智能审查', desc: '法务 + 财务双Agent 协同，比对法规知识库' },
   { num: '3', title: '人工复核 / 生成整改', desc: '确认风险条款，自动生成整改跟踪项' },
 ]
+
+// —— 批量上传 ——
+const batchOpen = ref(false)
+
+interface BatchItem {
+  file: File
+  status: 'pending' | 'uploading' | 'success' | 'failed'
+  contractId?: number
+  error?: string
+}
+
+const batchItems = ref<BatchItem[]>([])
+const batchUploading = ref(false)
+
+function onBatchFileChange(uploadFile: { raw: File }) {
+  if (batchItems.value.length >= 200) {
+    ElMessage.warning('单次最多选择 200 份')
+    return
+  }
+  if (!batchItems.value.find((i) => i.file.name === uploadFile.raw.name)) {
+    batchItems.value.push({ file: uploadFile.raw, status: 'pending' })
+  }
+}
+
+function removeBatchItem(idx: number) {
+  batchItems.value.splice(idx, 1)
+}
+
+async function startBatchUpload() {
+  const pending = batchItems.value.filter((i) => i.status === 'pending')
+  if (!pending.length) return
+  batchUploading.value = true
+  pending.forEach((i) => (i.status = 'uploading'))
+  try {
+    const results: BatchUploadResult[] = await batchUploadContracts(
+      pending.map((i) => i.file),
+      contractType.value,
+    )
+    results.forEach((r, idx) => {
+      const item = pending[idx]
+      if (!item) return
+      item.status = r.status
+      item.contractId = r.contract_id
+      item.error = r.error
+    })
+    const ok = results.filter((r) => r.status === 'success').length
+    ElMessage.success(`批量上传完成：${ok}/${results.length} 份成功`)
+  } catch {
+    pending.forEach((i) => (i.status = 'failed'))
+    ElMessage.error('批量上传失败，请检查后端连接')
+  } finally {
+    batchUploading.value = false
+  }
+}
+
+function closeBatch() {
+  batchOpen.value = false
+  batchItems.value = []
+}
 
 
 </script>
@@ -154,23 +238,23 @@ const onboardSteps = [
           <el-icon class="is-loading"><Loading /></el-icon>
           正在上传 {{ pendingFilename }}…
         </div>
+        <!-- 批量上传入口 -->
+        <el-button class="batch-btn" size="small" :icon="'Files'" @click="batchOpen = true">
+          批量上传（支持50份以上）
+        </el-button>
       </el-card>
 
       <el-card shadow="never" class="config-panel">
         <template #header>审查维度配置</template>
         <div class="form-grid">
           <label>业务部门
-            <el-select v-model="department" size="default">
-              <el-option label="采购中心" value="采购中心" />
-              <el-option label="研发外包部" value="研发外包部" />
-              <el-option label="市场运营部" value="市场运营部" />
+            <el-select v-model="department" size="default" filterable>
+              <el-option v-for="d in departmentOptions" :key="d" :label="d" :value="d" />
             </el-select>
           </label>
           <label>合同类型
-            <el-select v-model="contractType" size="default">
-              <el-option label="软件开发外包合同" value="软件开发外包合同" />
-              <el-option label="采购合同" value="采购合同" />
-              <el-option label="技术服务合同" value="技术服务合同" />
+            <el-select v-model="contractType" size="default" filterable>
+              <el-option v-for="t in contractTypeOptions" :key="t" :label="t" :value="t" />
             </el-select>
           </label>
         </div>
@@ -276,6 +360,52 @@ const onboardSteps = [
       @ignore="ignoreRisk"
     />
     <AnnotationModal v-model="annotationOpen" :risks="session.risks" :filename="session.filename" />
+
+    <!-- 批量上传对话框 -->
+    <el-dialog v-model="batchOpen" title="批量合同上传" width="600px" :before-close="closeBatch">
+      <el-upload
+        multiple
+        :auto-upload="false"
+        :show-file-list="false"
+        accept=".pdf,.docx,.txt"
+        drag
+        :on-change="onBatchFileChange"
+      >
+        <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+        <div class="el-upload__text">拖拽合同文件到此，或<em>点击选择</em><p class="upload-hint">支持50份以上批量处理 · PDF / Word / TXT</p></div>
+      </el-upload>
+
+      <div v-if="batchItems.length" class="batch-list">
+        <div v-for="(item, i) in batchItems" :key="i" class="batch-item">
+          <span class="batch-name mono">{{ item.file.name }}</span>
+          <span class="batch-status" :class="item.status">
+            <template v-if="item.status === 'pending'">待上传</template>
+            <template v-else-if="item.status === 'uploading'">上传中…</template>
+            <template v-else-if="item.status === 'success'">✓ #{{ item.contractId }}</template>
+            <template v-else>✗ {{ item.error || '失败' }}</template>
+          </span>
+          <el-button v-if="item.status === 'pending'" size="small" :icon="'Delete'" circle plain
+            @click="removeBatchItem(i)" />
+        </div>
+        <div class="batch-summary mono">
+          共 {{ batchItems.length }} 份 ·
+          成功 {{ batchItems.filter(i => i.status === 'success').length }} ·
+          失败 {{ batchItems.filter(i => i.status === 'failed').length }}
+        </div>
+      </div>
+
+      <template #footer>
+        <el-button @click="closeBatch">关闭</el-button>
+        <el-button
+          type="primary"
+          :loading="batchUploading"
+          :disabled="!batchItems.filter(i => i.status === 'pending').length"
+          @click="startBatchUpload"
+        >
+          开始上传（{{ batchItems.filter(i => i.status === 'pending').length }} 份）
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -530,5 +660,44 @@ const onboardSteps = [
   .result-two-col {
     grid-template-columns: 1fr;
   }
+}
+.batch-btn {
+  width: 100%;
+  margin-top: 10px;
+}
+.batch-list {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.batch-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--ink-3);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+}
+.batch-name {
+  flex: 1;
+  color: var(--ivory-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-status { flex: none; font-size: 12px; }
+.batch-status.pending  { color: var(--muted); }
+.batch-status.uploading { color: var(--amber); }
+.batch-status.success  { color: var(--sage); }
+.batch-status.failed   { color: var(--seal); }
+.batch-summary {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+  padding-top: 4px;
 }
 </style>

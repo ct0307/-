@@ -29,6 +29,7 @@ class Contract(Base):
     department: Mapped[str] = mapped_column(String(64), default="")  # 访问隔离维度
     status: Mapped[str] = mapped_column(String(32), default="uploaded")  # uploaded/parsed/auditing/done
     uploaded_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    elements_json: Mapped[str] = mapped_column(Text, default="{}")  # JSON：解析要素（甲方/标的/收付款节点等）
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     risks: Mapped[list["Risk"]] = relationship(back_populates="contract")
@@ -136,6 +137,19 @@ class LLMCallLog(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     mode: Mapped[str] = mapped_column(String(8), default="llm")       # llm/mock（降级时不记录）
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class LookupItem(Base):
+    """可配置下拉选项：业务部门（department）/ 合同类型（contract_type）由管理员维护。
+
+    前端合同审查页的两个下拉框从此表动态拉取，管理员可在「基础配置」Tab 增删条目。
+    """
+    __tablename__ = "lookup_items"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    category: Mapped[str] = mapped_column(String(32), index=True)   # department / contract_type
+    value: Mapped[str] = mapped_column(String(128))
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

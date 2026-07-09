@@ -1,28 +1,38 @@
 <script setup lang="ts">
-// 合同全文批注：左侧正文（信笺纹理，风险句红笔波浪线锚点），右侧批注列表。
-// 点批注 → 左侧对应锚点平滑滚动到中央并 flash 高亮。
-// 正文为演示范本，风险锚点按 store 中真实 risks 顺序挂靠。
+// 合同全文批注：左侧风险原文列表（真实 original_text），右侧批注。
+// 点击右侧批注项 → 左侧对应原文平滑滚动到中央并 flash 高亮。
 import { computed, nextTick, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import type { RiskOut } from '@/api/types'
+import { useAuditSessionStore } from '@/stores/audit-session'
 
 const props = defineProps<{ modelValue: boolean; risks: RiskOut[]; filename: string }>()
 const emit = defineEmits<{ 'update:modelValue': [v: boolean] }>()
+
+const session = useAuditSessionStore()
 
 const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit('update:modelValue', v),
 })
 
-// 演示合同正文条款（{{n}} 为风险锚点占位，对应 risks[n]）
-const CLAUSES = [
-  { h: '第一条 合同主体', p: '甲方：某科技有限公司；乙方：{{4}}。双方本着平等自愿的原则签订本合同。' },
-  { h: '第二条 合同标的与金额', p: '乙方为甲方提供软件开发外包服务，合同金额 {{2}}。' },
-  { h: '第三条 履约期限', p: '本合同服务期限自双方签署之日起 12 个月。{{3}}' },
-  { h: '第四条 付款方式', p: '甲方按项目里程碑分三期支付合同款项，每期验收合格后 15 个工作日内支付。' },
-  { h: '第五条 违约责任', p: '{{0}}' },
-  { h: '第六条 争议解决', p: '{{1}}' },
-  { h: '第七条 其他', p: '本合同一式两份，甲乙双方各执一份，具有同等法律效力。' },
-]
+// 已应用为合同建议的 risk id 集合（当次打开内有效）
+const appliedIds = ref(new Set<number>())
+const applyingId = ref<number | null>(null)
+
+async function applyAsSuggestion(risk: RiskOut) {
+  if (appliedIds.value.has(risk.id) || applyingId.value === risk.id) return
+  applyingId.value = risk.id
+  try {
+    await session.setRiskStatus(risk, 'to_modify')
+    appliedIds.value.add(risk.id)
+    ElMessage.success('已应用为合同修改建议，可在整改跟踪中查看')
+  } catch {
+    ElMessage.error('操作失败')
+  } finally {
+    applyingId.value = null
+  }
+}
 
 const levelMeta: Record<string, { label: string; type: 'danger' | 'warning' | 'info' }> = {
   high: { label: '高', type: 'danger' },
@@ -30,29 +40,14 @@ const levelMeta: Record<string, { label: string; type: 'danger' | 'warning' | 'i
   low: { label: '低', type: 'info' },
 }
 
-// 把 {{n}} 替换为带锚点的批注句；命中 risk 则包红笔波浪线，否则用建议兜底
-function renderClause(text: string): string {
-  return text.replace(/\{\{(\d+)\}\}/g, (_, idx) => {
-    const i = Number(idx)
-    const r = props.risks[i]
-    if (!r) return '（相关条款）'
-    const sentence = r.original_text?.startsWith('（')
-      ? `此处应包含${r.category}相关约定`
-      : r.original_text || `${r.category}相关条款`
-    return `<mark id="ann-${i}" class="ann-sentence">${sentence}</mark>`
-  })
-}
-
-const renderedClauses = computed(() => CLAUSES.map((c) => ({ h: c.h, html: renderClause(c.p) })))
-
 const docRef = ref<HTMLElement>()
-async function scrollToAnn(i: number) {
+async function scrollToRisk(id: number) {
   await nextTick()
-  const mark = docRef.value?.querySelector(`#ann-${i}`) as HTMLElement | null
-  if (!mark) return
-  mark.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  mark.classList.add('flash')
-  setTimeout(() => mark.classList.remove('flash'), 1400)
+  const el = docRef.value?.querySelector(`#risk-${id}`) as HTMLElement | null
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  el.classList.add('flash')
+  setTimeout(() => el.classList.remove('flash'), 1400)
 }
 </script>
 
@@ -60,10 +55,21 @@ async function scrollToAnn(i: number) {
   <el-dialog v-model="visible" :title="`合同全文批注 · ${filename}`" width="1000px" top="6vh">
     <div class="fulltext">
       <article ref="docRef" class="doc">
-        <section v-for="(c, i) in renderedClauses" :key="i" class="clause">
-          <h4>{{ c.h }}</h4>
-          <p v-html="c.html" />
+        <div class="doc-hint">以下为 AI 提取的风险原文，点击右侧批注项可定位</div>
+        <section
+          v-for="r in risks"
+          :id="`risk-${r.id}`"
+          :key="r.id"
+          class="clause"
+          :class="`lvl-${r.level}`"
+        >
+          <div class="clause-head">
+            <el-tag :type="levelMeta[r.level].type" size="small">{{ levelMeta[r.level].label }}风险</el-tag>
+            <b>{{ r.category }}</b>
+          </div>
+          <mark class="ann-sentence">{{ r.original_text || `（${r.category}相关条款未提取到原文）` }}</mark>
         </section>
+        <div v-if="!risks.length" class="doc-empty">暂无风险原文，完成合同审查后批注自动生成</div>
       </article>
 
       <aside class="ann-list">
@@ -73,13 +79,24 @@ async function scrollToAnn(i: number) {
           :key="r.id"
           class="ann-item"
           :class="`lvl-${r.level}`"
-          @click="scrollToAnn(i)"
+          @click="scrollToRisk(r.id)"
         >
           <div class="ann-item-head">
             <el-tag :type="levelMeta[r.level].type" size="small">{{ levelMeta[r.level].label }}</el-tag>
             <b>{{ r.category }}</b>
           </div>
           <p>{{ r.suggestion }}</p>
+          <el-button
+            size="small"
+            :type="appliedIds.has(r.id) ? 'success' : 'primary'"
+            :loading="applyingId === r.id"
+            :disabled="appliedIds.has(r.id)"
+            plain
+            class="apply-btn"
+            @click.stop="applyAsSuggestion(r)"
+          >
+            {{ appliedIds.has(r.id) ? '已应用 ✓' : '应用为合同建议' }}
+          </el-button>
         </div>
       </aside>
     </div>
@@ -177,6 +194,10 @@ async function scrollToAnn(i: number) {
   color: var(--ivory-dim);
   line-height: 1.5;
 }
+.apply-btn {
+  margin-top: 8px;
+  width: 100%;
+}
 :deep(.ann-sentence) {
   text-decoration: underline wavy var(--seal);
   text-underline-offset: 3px;
@@ -199,4 +220,29 @@ async function scrollToAnn(i: number) {
     background: rgba(176, 116, 26, 0.4);
   }
 }
+.doc-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 12px;
+  font-family: var(--serif);
+}
+.doc-empty {
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+  padding: 40px 0;
+}
+.clause-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.clause-head b {
+  font-size: 13px;
+  color: var(--ivory);
+}
+.clause.lvl-high { border-left-color: var(--seal); }
+.clause.lvl-medium { border-left-color: var(--amber); }
+.clause.lvl-low { border-left-color: var(--sage); }
 </style>

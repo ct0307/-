@@ -4,6 +4,7 @@ export interface LoginResult {
   access_token: string
   token_type: string
   role: string
+  username: string
 }
 
 export interface ContractOut {

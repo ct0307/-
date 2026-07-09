@@ -57,6 +57,13 @@ function openDetail(c: KnowledgeCard) {
   detailOpen.value = true
 }
 
+function copyClause() {
+  const text = [active.value?.title, active.value?.desc].filter(Boolean).join('\n')
+  navigator.clipboard.writeText(text)
+    .then(() => ElMessage.success('已复制，可粘贴至合同修改建议'))
+    .catch(() => ElMessage.error('复制失败，请手动选中文本'))
+}
+
 // 前端分类名 → 后端 category 英文键
 const catKeyMap: Record<KnowledgeCat, string> = {
   法律法规: 'law',
@@ -211,7 +218,7 @@ function closeBatch() {
       </template>
       <template #footer>
         <el-button @click="detailOpen = false">关闭</el-button>
-        <el-button type="primary" @click="ElMessage.success('已复制为合同建议（演示）')">应用为合同建议</el-button>
+        <el-button type="primary" @click="copyClause">复制条文</el-button>
       </template>
     </el-dialog>
 

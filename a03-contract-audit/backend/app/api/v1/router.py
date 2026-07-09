@@ -3,7 +3,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     admin, auth, chat, contracts, dashboard, knowledge,
-    rectifications, risks, reports, rules,
+    lookup, rectifications, risks, reports, rules,
 )
 
 api_router = APIRouter()
@@ -16,4 +16,5 @@ api_router.include_router(knowledge.router, prefix="/knowledge", tags=["知识�
 api_router.include_router(rectifications.router, prefix="/rectifications", tags=["整改跟踪"])
 api_router.include_router(rules.router, prefix="", tags=["规则与模板"])
 api_router.include_router(admin.router, prefix="/admin", tags=["权限与审计"])
+api_router.include_router(lookup.router, prefix="/admin", tags=["基础配置"])
 api_router.include_router(chat.router, prefix="/chat", tags=["追问"])

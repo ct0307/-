@@ -2,7 +2,7 @@
 // 多维报表：时间分段(月/季/年) + 多维钻取 + 4 KPI + 4 ECharts。
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getReportData, exportRiskLedger } from '@/api/reports'
+import { getReportData, exportRiskLedger, getContractsMetadata, type ContractMeta } from '@/api/reports'
 import type { ReportData, RangeKey } from '@/mock/reports'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 import TrendLine from '@/components/charts/TrendLine.vue'
@@ -20,11 +20,18 @@ const drillType = ref('全部')
 const drillAmount = ref('全部')
 const drillLevel = ref('全部')
 
+const contractsMeta = ref<ContractMeta[]>([])
+
 async function load() {
   loading.value = true
   errored.value = false
   try {
-    raw.value = await getReportData(range.value)
+    const [reportData, meta] = await Promise.all([
+      getReportData(range.value),
+      getContractsMetadata(),
+    ])
+    raw.value = reportData
+    contractsMeta.value = meta
   } catch {
     errored.value = true
     ElMessage.error('报表数据加载失败')
@@ -35,39 +42,28 @@ async function load() {
 onMounted(load)
 watch(range, load)
 
-// 钻取缩放系数（演示：非全选时按确定性比例缩小）
-const drillFactor = computed(() => {
-  let f = 1
-  if (drillType.value !== '全部') f *= 0.42
-  if (drillAmount.value !== '全部') f *= 0.55
-  if (drillLevel.value !== '全部') f *= 0.6
-  return f
+// 多维钻取：对 contractsMeta 做真实本地过滤（charts/KPI 反映全局，不参与钻取）
+const filteredMeta = computed(() => {
+  let list = contractsMeta.value
+  if (drillType.value !== '全部')
+    list = list.filter((c) => c.contract_type === drillType.value)
+  if (drillLevel.value === '高风险')
+    list = list.filter((c) => c.risk_high > 0)
+  else if (drillLevel.value === '中风险')
+    list = list.filter((c) => c.risk_high === 0 && c.risk_total > 0)
+  else if (drillLevel.value === '低风险')
+    list = list.filter((c) => c.risk_total === 0)
+  // 金额范围：amount 字段为自然语言字符串，格式不统一，暂不做过滤
+  return list
 })
-const drilling = computed(() => drillFactor.value < 1)
+const drilling = computed(() =>
+  drillType.value !== '全部' || drillLevel.value !== '全部',
+)
+const drillHint = computed(() =>
+  `已按条件筛选 · 命中 ${filteredMeta.value.length} / ${contractsMeta.value.length} 份`,
+)
 
-const data = computed<ReportData | null>(() => {
-  if (!raw.value) return null
-  if (!drilling.value) return raw.value
-  const f = drillFactor.value
-  const scale = (n: number) => Math.round(n * f)
-  return {
-    ...raw.value,
-    kpi: {
-      ...raw.value.kpi,
-      total: scale(raw.value.kpi.total),
-      risk: scale(raw.value.kpi.risk),
-    },
-    trend: {
-      labels: raw.value.trend.labels,
-      total: raw.value.trend.total.map(scale),
-      pass: raw.value.trend.pass.map(scale),
-      risk: raw.value.trend.risk.map(scale),
-    },
-    donut: raw.value.donut.map((d) => ({ ...d, value: scale(d.value) })),
-    depts: raw.value.depts.map((d) => ({ ...d, risk: scale(d.risk) })),
-    tops: raw.value.tops.map((d) => ({ ...d, value: scale(d.value) })),
-  }
-})
+const data = computed<ReportData | null>(() => raw.value)
 
 const exporting = ref(false)
 async function doExport() {
@@ -144,7 +140,7 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
         <el-option label="低风险" value="低风险" />
       </el-select>
       <el-button v-if="drilling" link type="primary" @click="resetDrill">重置钻取</el-button>
-      <span v-if="drilling" class="drill-hint mono">已按条件钻取 · 命中约 {{ Math.round(drillFactor * 100) }}%</span>
+      <span v-if="drilling" class="drill-hint mono">{{ drillHint }}</span>
     </section>
 
     <div v-loading="loading" class="report-body">
@@ -184,6 +180,31 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
             <TopRiskBar :data="data.tops" />
           </el-card>
         </section>
+
+        <!-- 合同要素汇总：甲方 / 合同标的 / 收付款节点 -->
+        <el-card shadow="never" class="meta-card">
+          <template #header>
+            <div class="panel-head">
+              <span>合同要素汇总</span>
+              <el-tag size="small" type="info">{{ contractsMeta.length }} 份</el-tag>
+            </div>
+          </template>
+          <el-empty v-if="!filteredMeta.length" description="暂无合同要素数据，上传并解析合同后自动提取" />
+          <el-table v-else :data="filteredMeta" style="width: 100%" size="small" :max-height="360">
+            <el-table-column prop="filename" label="合同名称" min-width="160" show-overflow-tooltip />
+            <el-table-column prop="party_a" label="甲方" width="140" show-overflow-tooltip />
+            <el-table-column prop="subject" label="合同标的" min-width="160" show-overflow-tooltip />
+            <el-table-column prop="payment_terms" label="收付款节点" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="amount" label="合同金额" width="110" show-overflow-tooltip />
+            <el-table-column label="风险" width="80" align="center">
+              <template #default="{ row }">
+                <span :class="row.risk_high > 0 ? 'risk-high' : 'risk-ok'">
+                  {{ row.risk_high > 0 ? `⚠ ${row.risk_high}高` : `${row.risk_total}条` }}
+                </span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
       </template>
     </div>
   </div>
@@ -306,5 +327,22 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
   .chart-grid {
     grid-template-columns: 1fr;
   }
+}
+.meta-card {
+  margin-top: 20px;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.risk-high {
+  color: var(--seal);
+  font-weight: 600;
+  font-size: 12px;
+}
+.risk-ok {
+  color: var(--ivory-dim);
+  font-size: 12px;
 }
 </style>

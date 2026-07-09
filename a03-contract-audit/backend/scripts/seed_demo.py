@@ -23,8 +23,9 @@ from app.db.init_db import init_db
 from app.db.session import SessionLocal
 from app.models.models import (
     AccessRole, AuditRule, Contract, ContractTemplate,
-    KnowledgeChunk, LLMCallLog, Rectification, Risk, User,
+    KnowledgeChunk, LLMCallLog, LookupItem, Rectification, Risk, User,
 )
+from sqlalchemy.orm import Session
 
 
 log = get_logger("seed")
@@ -430,13 +431,39 @@ def seed_knowledge(db) -> int:
     return added
 
 
+def seed_lookups(db: Session) -> int:
+    """预置部门和合同类型选项（幂等：按 category+value 去重）。"""
+    _DEPARTMENTS = [
+        "采购中心", "销售部", "研发部", "法务部",
+        "财务部", "人力资源部", "行政部", "运营部",
+        "市场部", "研发外包部", "市场运营部", "行政人事部",
+    ]
+    _CONTRACT_TYPES = [
+        "软件开发外包合同", "技术服务合同", "采购合同",
+        "销售合同", "劳动合同", "租赁合同",
+        "保密协议", "合作协议", "服务协议", "框架协议",
+        "技术开发合同", "合作合同", "服务合同", "劳务合同",
+    ]
+    existing = {(i.category, i.value) for i in db.query(LookupItem).all()}
+    added = 0
+    for idx, val in enumerate(_DEPARTMENTS):
+        if ("department", val) not in existing:
+            db.add(LookupItem(category="department", value=val, sort_order=idx))
+            added += 1
+    for idx, val in enumerate(_CONTRACT_TYPES):
+        if ("contract_type", val) not in existing:
+            db.add(LookupItem(category="contract_type", value=val, sort_order=idx))
+            added += 1
+    db.commit()
+    return added
+
+
 def main() -> None:
     init_db()  # 确保建表 + 补列 + 种子账号
     db = SessionLocal()
     try:
         uploader = _ensure_uploader(db)
         added_c, added_r = seed_contracts_and_risks(db, uploader)
-        # 合同 id 列表（按 _CONTRACTS 顺序），供 LLM 调用 seed 映射 contract_id
         contract_ids = [
             c.id for c in db.query(Contract).order_by(Contract.id).all()
             if c.filename in {fn for fn, *_ in _CONTRACTS}
@@ -446,6 +473,7 @@ def main() -> None:
         added_rule, added_tpl = seed_rules_and_templates(db)
         added_role = seed_access_roles(db)
         added_llm = seed_llm_calls(db, contract_ids)
+        added_lookup = seed_lookups(db)
         total_c = db.query(Contract).count()
         total_r = db.query(Risk).count()
         total_k = db.query(KnowledgeChunk).count()
@@ -454,17 +482,20 @@ def main() -> None:
         total_tpl = db.query(ContractTemplate).count()
         total_role = db.query(AccessRole).count()
         total_llm = db.query(LLMCallLog).count()
+        total_lookup = db.query(LookupItem).count()
     finally:
         db.close()
 
     log.info("seed.done", added_contracts=added_c, added_risks=added_r,
              added_knowledge=added_k, added_rectifications=added_rt,
              added_rules=added_rule, added_templates=added_tpl,
-             added_roles=added_role, added_llm_calls=added_llm)
+             added_roles=added_role, added_llm_calls=added_llm, added_lookups=added_lookup)
     print(f"[seed] 新增：合同 {added_c} / 风险 {added_r} / 知识库 {added_k} / "
-          f"整改 {added_rt} / 规则 {added_rule} / 模板 {added_tpl} / 权限角色 {added_role} / LLM调用 {added_llm}")
+          f"整改 {added_rt} / 规则 {added_rule} / 模板 {added_tpl} / 权限角色 {added_role} / "
+          f"LLM调用 {added_llm} / 下拉配置 {added_lookup}")
     print(f"[seed] 当前总量：合同 {total_c} / 风险 {total_r} / 知识库 {total_k} / "
-          f"整改 {total_rt} / 规则 {total_rule} / 模板 {total_tpl} / 权限角色 {total_role} / LLM调用 {total_llm}")
+          f"整改 {total_rt} / 规则 {total_rule} / 模板 {total_tpl} / 权限角色 {total_role} / "
+          f"LLM调用 {total_llm} / 下拉配置 {total_lookup}")
 
 
 if __name__ == "__main__":

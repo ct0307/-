@@ -35,4 +35,4 @@ def login(
         db, user_id=user.id, action="login",
         target=user.username, ip=_client_ip(request),
     )
-    return {"access_token": token, "token_type": "bearer", "role": user.role}
+    return {"access_token": token, "token_type": "bearer", "role": user.role, "username": user.username}

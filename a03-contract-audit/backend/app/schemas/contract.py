@@ -224,3 +224,16 @@ class HistoryRow(BaseModel):
     level: str         # 高风险/中风险/低风险
     riskCount: int
     status: str        # 合规/待整改/已整改
+
+
+class LookupItemOut(BaseModel):
+    id: int
+    category: str
+    value: str
+    sort_order: int
+
+
+class LookupItemCreate(BaseModel):
+    category: str   # department / contract_type
+    value: str
+    sort_order: int = 0

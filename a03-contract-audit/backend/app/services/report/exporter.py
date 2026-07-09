@@ -1,5 +1,6 @@
 """报表导出：Excel 风险台账 + 看板聚合数据。"""
 import io
+import json
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -17,10 +18,21 @@ _RANGE_LABELS = {
     "year": ["Q1", "Q2", "Q3", "Q4", "上年Q3", "上年Q4", "本季"],
 }
 
+def _elem(contract, key: str) -> str:
+    """从 elements_json 安全取值，NULL或解析失败返回 '—'。"""
+    try:
+        return json.loads(contract.elements_json or "{}").get(key) or "—"
+    except (ValueError, AttributeError):
+        return "—"
+
+
 # 台账列定义：(表头, Risk/Contract 取值函数, 列宽)
 _LEDGER_COLUMNS = [
     ("合同", lambda r, c: c.filename, 28),
-    ("合同类型", lambda r, c: c.contract_type or "-", 14),
+    ("甲方", lambda r, c: _elem(c, "party_a"), 22),
+    ("合同标的", lambda r, c: _elem(c, "subject"), 32),
+    ("收付款节点", lambda r, c: _elem(c, "payment_terms"), 36),
+    ("合同类型", lambda r, c: c.contract_type or "—", 14),
     ("负责 Agent", lambda r, c: _AGENT_LABEL.get(r.agent, r.agent), 16),
     ("风险类别", lambda r, c: r.category, 14),
     ("风险等级", lambda r, c: {"high": "高", "medium": "中", "low": "低"}.get(r.level, r.level), 10),
@@ -69,6 +81,36 @@ def export_risk_ledger(db: Session, contract_ids: list[int] | None = None) -> by
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def contracts_metadata(db: Session) -> list[dict]:
+    """合同要素汇总：每份合同的甲方/标的/收付款节点 + 风险统计，供多维报表展示。"""
+    contracts = db.query(Contract).order_by(Contract.id.desc()).all()
+    result = []
+    for c in contracts:
+        elems = {}
+        try:
+            elems = json.loads(c.elements_json or "{}")
+        except (ValueError, AttributeError):
+            pass
+        risk_rows = db.query(Risk.level, func.count(Risk.id)).filter(
+            Risk.contract_id == c.id
+        ).group_by(Risk.level).all()
+        risk_counts = {lv: cnt for lv, cnt in risk_rows}
+        result.append({
+            "id": c.id,
+            "filename": c.filename,
+            "contract_type": c.contract_type or "—",
+            "department": c.department or "—",
+            "party_a": elems.get("party_a") or "—",
+            "subject": elems.get("subject") or "—",
+            "payment_terms": (elems.get("payment_terms") or "—")[:80],  # 截断防超宽
+            "amount": elems.get("amount") or "—",
+            "risk_high": risk_counts.get("high", 0),
+            "risk_total": sum(risk_counts.values()),
+            "status": c.status,
+        })
+    return result
 
 
 def dashboard_summary(db: Session) -> dict:

@@ -13,6 +13,13 @@ import {
 
 export type { LlmCallRow } from '@/mock/admin'
 
+export interface LookupItem {
+  id: number
+  category: string
+  value: string
+  sort_order: number
+}
+
 export async function getAccessMatrix(): Promise<{ modules: string[]; roles: AccessRole[] }> {
   if (MOCK_ENABLED.admin) return mockRespond({ modules: ACCESS_MODULES, roles: ACCESS_MATRIX })
   return client.get('/admin/access-matrix')
@@ -26,4 +33,17 @@ export async function getAuditLogs(): Promise<AuditLogRow[]> {
 export async function getLlmCalls(): Promise<LlmCallRow[]> {
   if (MOCK_ENABLED.admin) return mockRespond(LLM_CALL_ROWS.map((l) => ({ ...l })))
   return client.get('/admin/llm-calls')
+}
+
+// ── 下拉选项配置（department / contract_type）──
+export function getLookups(category: string): Promise<LookupItem[]> {
+  return client.get(`/admin/lookups/${category}`)
+}
+
+export function createLookup(category: string, value: string): Promise<LookupItem> {
+  return client.post('/admin/lookups', { category, value, sort_order: 0 })
+}
+
+export function deleteLookup(id: number): Promise<void> {
+  return client.delete(`/admin/lookups/${id}`)
 }

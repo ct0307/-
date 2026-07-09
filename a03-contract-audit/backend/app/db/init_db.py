@@ -40,6 +40,7 @@ def init_db() -> None:
 _DEV_COLUMNS = {
     "risks": [("tier", "VARCHAR(8) DEFAULT 'yellow'")],
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
+    "contracts": [("elements_json", "TEXT DEFAULT '{}'")],
 }
 
 

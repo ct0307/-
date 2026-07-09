@@ -14,7 +14,8 @@ export function uploadContract(file: File, contractType = ''): Promise<ContractO
   const fd = new FormData()
   fd.append('file', file)
   const params = contractType ? { contract_type: contractType } : {}
-  return client.post('/contracts/upload', fd, { params })
+  // 上传接口单独设 120s 超时：大文件需经过加密存储 + 文本解析，30s 默认值不够
+  return client.post('/contracts/upload', fd, { params, timeout: 120_000 })
 }
 
 export function parseContract(id: number): Promise<ParseResult> {
@@ -29,6 +30,21 @@ export function getRisks(id: number): Promise<RiskOut[]> {
   return client.get(`/contracts/${id}/risks`)
 }
 
-export function updateRiskStatus(riskId: number, status: RiskOut['review_status']): Promise<unknown> {
-  return client.patch(`/risks/${riskId}/status`, { review_status: status })
+export interface BatchUploadResult {
+  filename: string
+  status: 'success' | 'failed'
+  contract_id?: number
+  error?: string
+}
+
+/** 批量上传合同，最多50份，逐文件处理互不影响。*/
+export function batchUploadContracts(files: File[], contractType = ''): Promise<BatchUploadResult[]> {
+  const fd = new FormData()
+  files.forEach((f) => fd.append('files', f))
+  const params = contractType ? { contract_type: contractType } : {}
+  return client.post('/contracts/batch-upload', fd, { params, timeout: 300_000 })
+}
+
+export function updateRiskStatus(riskId: number, riskStatus: RiskOut['review_status']): Promise<unknown> {
+  return client.patch(`/risks/${riskId}/status`, { review_status: riskStatus })
 }

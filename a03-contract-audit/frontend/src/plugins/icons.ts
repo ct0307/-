@@ -4,6 +4,7 @@ import type { App } from 'vue'
 import {
   Bell,
   Clock,
+  Loading,
   Coin,
   Collection,
   Connection,
@@ -31,6 +32,7 @@ import {
 const ICONS = {
   Bell,
   Clock,
+  Loading,
   Coin,
   Collection,
   Connection,

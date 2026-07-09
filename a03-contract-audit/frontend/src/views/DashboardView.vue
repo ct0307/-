@@ -213,6 +213,7 @@ const activity = computed(() =>
 .kpi-label {
   font-size: 13px;
   color: var(--ivory-dim);
+  font-family: var(--serif);
 }
 .kpi-value {
   display: block;
@@ -224,11 +225,13 @@ const activity = computed(() =>
   font-size: 14px;
   color: var(--muted);
   font-style: normal;
+  font-family: var(--serif);
   margin-left: 3px;
 }
 .kpi-trend {
   font-size: 12px;
   color: var(--ivory-dim);
+  font-family: var(--serif);
 }
 .kpi-trend.up {
   color: var(--sage);
