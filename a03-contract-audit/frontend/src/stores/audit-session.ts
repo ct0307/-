@@ -54,15 +54,27 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     }
   }
 
+  let _auditAbort: AbortController | null = null
+
   async function runAudit() {
     if (!contractId.value) return
     busy.value = true
+    _auditAbort = new AbortController()
     try {
-      const res = await auditContract(contractId.value)
+      const res = await auditContract(contractId.value, _auditAbort.signal)
       crossChecks.value = res.cross_checks ?? []
       risks.value = await getRisks(contractId.value)
       step.value = 2
     } finally {
+      busy.value = false
+      _auditAbort = null
+    }
+  }
+
+  function abortAudit() {
+    if (_auditAbort) {
+      _auditAbort.abort()
+      _auditAbort = null
       busy.value = false
     }
   }
@@ -86,6 +98,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     reset,
     uploadAndParse,
     runAudit,
+    abortAudit,
     setRiskStatus,
   }
 })

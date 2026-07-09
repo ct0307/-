@@ -27,10 +27,10 @@ const activeIndex = computed(() => route.path)
   <aside class="sidebar" :class="{ 'is-collapsed': collapsed }">
     <!-- 品牌区 -->
     <div class="brand">
-      <span class="brand-mark seal-badge">审</span>
+      <span class="brand-mark seal-badge">契</span>
       <div v-if="!collapsed" class="brand-txt">
-        <b>合同智审</b>
-        <small>CONTRACT COMPLIANCE</small>
+        <b>契鉴</b>
+        <small>CONTRACT REVIEW</small>
       </div>
     </div>
 

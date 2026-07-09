@@ -3,7 +3,9 @@
 import type { App } from 'vue'
 import {
   Bell,
+  CircleCheck,
   Clock,
+  Close,
   Loading,
   Coin,
   Collection,
@@ -31,7 +33,9 @@ import {
 
 const ICONS = {
   Bell,
+  CircleCheck,
   Clock,
+  Close,
   Loading,
   Coin,
   Collection,

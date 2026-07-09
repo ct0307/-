@@ -96,7 +96,7 @@ const elementLabels: Record<string, string> = {
 <template>
   <el-container style="height: 100vh">
     <el-header class="header">
-      <span class="brand">合同智审 · 合规审查工作台</span>
+      <span class="brand">契鉴 · 合规审查工作台</span>
       <span class="right">
         <el-tag size="small">{{ auth.role }}</el-tag>
         <el-button link type="primary" @click="logout">退出</el-button>

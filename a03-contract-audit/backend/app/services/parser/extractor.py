@@ -1,8 +1,10 @@
 """合同解析：PDF/Word → 纯文本 + 结构化要素。
 
-文本抽取为真实实现（pdfplumber / python-docx / pypdf）。
-要素抽取用正则做启发式抽取，覆盖常见字段；复杂条款后续交给 LLM 抽取增强。
-扫描件 PDF 无文本层时抽取结果为空，后续接 OCR（风险点已记录）。
+文本抽取策略（PDF）：
+  1. pdfplumber 优先（速度快，适合标准文本层 PDF）
+  2. 乱码检测：CJK 字符占比 < 10% 且文本不为空 → 判定为字体编码问题
+  3. PyMuPDF 降级（fitz）：对自定义字体无 ToUnicode 映射的 PDF 有更好兜底
+  4. 仍为空/乱码 → 扫描件，需 OCR（路线图 P2，当前记 warning）
 
 加密存储支持：启用 FILE_ENCRYPT_KEY 后，extract_text 自动解密再解析，调用方无感知。
 """
@@ -35,17 +37,55 @@ def extract_text(file_path: str) -> str:
     raise ValueError(f"不支持的文件类型: {file_path}")
 
 
+def _is_garbled(text: str) -> bool:
+    """检测文本是否乱码：CJK 字符占比低于 10% 且文本非空视为字体编码异常。"""
+    if not text or len(text) < 20:
+        return False  # 空文本交给 empty 逻辑处理，不走此判断
+    cjk = sum(1 for c in text if '一' <= c <= '鿿')
+    return cjk / len(text) < 0.10
+
+
 def _extract_pdf_bytes(data: bytes) -> str:
+    """PDF 文本提取：pdfplumber 优先，乱码时降级到 PyMuPDF。"""
     import pdfplumber
 
+    # 第一步：pdfplumber
     parts: list[str] = []
-    with pdfplumber.open(io.BytesIO(data)) as pdf:
-        for page in pdf.pages:
-            parts.append(page.extract_text() or "")
+    try:
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            for page in pdf.pages:
+                parts.append(page.extract_text() or "")
+    except Exception as e:
+        log.warning("parser.pdfplumber_error", error=str(e))
     text = "\n".join(parts).strip()
+
+    # 第二步：乱码检测 → PyMuPDF 降级
+    if _is_garbled(text):
+        log.info("parser.pdf_garbled", hint="检测到字体编码异常，切换 PyMuPDF 重新提取")
+        text = _extract_pdf_pymupdf(data)
+
     if not text:
-        log.warning("parser.pdf_empty", hint="可能是扫描件，需 OCR")
+        log.warning("parser.pdf_empty", hint="文本层为空，可能是扫描件，需 OCR（路线图 P2）")
     return text
+
+
+def _extract_pdf_pymupdf(data: bytes) -> str:
+    """使用 PyMuPDF(fitz) 提取文本，对自定义字体无 ToUnicode 映射的 PDF 兜底更好。"""
+    try:
+        import fitz  # pymupdf
+
+        doc = fitz.open(stream=data, filetype="pdf")
+        parts: list[str] = []
+        for page in doc:
+            parts.append(page.get_text("text") or "")
+        doc.close()
+        text = "\n".join(parts).strip()
+        if text:
+            log.info("parser.pymupdf_ok", chars=len(text))
+        return text
+    except Exception as e:
+        log.warning("parser.pymupdf_error", error=str(e))
+        return ""
 
 
 def _extract_docx_bytes(data: bytes) -> str:

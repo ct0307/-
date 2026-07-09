@@ -36,9 +36,9 @@ async function onSubmit() {
   <div class="login-wrap">
     <div class="login-card">
       <div class="brand">
-        <span class="brand-mark seal-badge">审</span>
+        <span class="brand-mark seal-badge">契</span>
         <div class="brand-txt">
-          <h2 class="title">合同智审</h2>
+          <h2 class="title">契鉴</h2>
           <p class="eyebrow">企业合同合规审查系统</p>
         </div>
       </div>

@@ -22,8 +22,8 @@ export function parseContract(id: number): Promise<ParseResult> {
   return client.post(`/contracts/${id}/parse`)
 }
 
-export function auditContract(id: number): Promise<AuditResult> {
-  return client.post(`/contracts/${id}/audit`)
+export function auditContract(id: number, signal?: AbortSignal): Promise<AuditResult> {
+  return client.post(`/contracts/${id}/audit`, undefined, { signal, timeout: 180_000 })
 }
 
 export function getRisks(id: number): Promise<RiskOut[]> {

@@ -58,6 +58,10 @@ const dimensions = ref([
 ])
 
 // —— 上传 + 解析（真接口）——
+function onFileChange(uploadFile: { raw?: UploadRawFile }) {
+  if (uploadFile.raw) onFile(uploadFile.raw)
+}
+
 async function onFile(file: UploadRawFile) {
   pendingFilename.value = file.name // 立即显示文件名，不等后端返回
   try {
@@ -68,7 +72,42 @@ async function onFile(file: UploadRawFile) {
     pendingFilename.value = '' // 失败时清除，避免残留
     ElMessage.error('上传或解析失败')
   }
-  return false // 阻止 el-upload 默认上传
+}
+
+// —— 审查进度模拟（方案A：纯前端，无需后端改动）——
+const auditProgress = ref(0)
+const auditProgressLabel = ref('')
+const auditState = ref<'idle' | 'running' | 'done' | 'failed'>('idle')
+
+// 四阶段：目标百分比 + 标签 + 模拟持续时间（ms）
+const _AUDIT_STEPS = [
+  { pct: 15, label: '解析合同文本…',   ms: 800 },
+  { pct: 55, label: '法务 Agent 分析中…', ms: 3000 },
+  { pct: 85, label: '财务 Agent 审查中…', ms: 2500 },
+  { pct: 99, label: '生成风险报告…',   ms: 1500 },
+]
+
+let _progressTimer: ReturnType<typeof setInterval> | null = null
+
+function _startProgress() {
+  auditProgress.value = 0
+  auditState.value = 'running'
+  auditProgressLabel.value = '准备中…'
+  let idx = 0
+  let stepStart = Date.now()
+  _progressTimer = setInterval(() => {
+    if (idx >= _AUDIT_STEPS.length) return
+    const s = _AUDIT_STEPS[idx]
+    const prev = idx === 0 ? 0 : _AUDIT_STEPS[idx - 1].pct
+    const frac = Math.min((Date.now() - stepStart) / s.ms, 1)
+    auditProgress.value = Math.round(prev + (s.pct - prev) * frac)
+    auditProgressLabel.value = s.label
+    if (frac >= 1) { idx++; stepStart = Date.now() }
+  }, 60)
+}
+
+function _clearProgress() {
+  if (_progressTimer) { clearInterval(_progressTimer); _progressTimer = null }
 }
 
 // —— 触发审查（真接口）——
@@ -77,16 +116,34 @@ async function onAudit() {
     ElMessage.warning('请先上传合同')
     return
   }
+  _startProgress()
   try {
     await session.runAudit()
+    _clearProgress()
+    auditProgress.value = 100
+    auditProgressLabel.value = '审查完成'
+    auditState.value = 'done'
     const n = session.riskCount
     ElMessage.success(`审查完成，检出 ${n} 条风险`)
     if (session.levelCounts.high > 0) {
       notify.push('alert', '高风险预警', `${session.filename} 检出 ${session.levelCounts.high} 项高风险条款。`)
     }
   } catch {
+    _clearProgress()
+    auditProgress.value = 0
+    auditProgressLabel.value = '审查失败，请重试'
+    auditState.value = 'failed'
     ElMessage.error('审查失败（需 legal / finance 角色）')
   }
+}
+
+function onAbort() {
+  session.abortAudit()
+  _clearProgress()
+  auditProgress.value = 0
+  auditProgressLabel.value = '已中止'
+  auditState.value = 'idle'
+  ElMessage.info('审查已中止')
 }
 
 // —— 复核抽屉 ——
@@ -220,19 +277,29 @@ function closeBatch() {
           drag
           :auto-upload="false"
           :show-file-list="false"
-          :before-upload="onFile"
+          :on-change="onFileChange"
           accept=".pdf,.docx,.txt"
         >
           <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
           <div class="el-upload__text">
             拖拽合同到此，或<em>点击选择</em>
-            <p class="upload-hint">支持 PDF / Word / TXT</p>
+            <p class="upload-hint">PDF / Word / TXT · 拖拽或点击均可</p>
           </div>
         </el-upload>
         <!-- 上传中：立即显示文件名 + loading；上传完成：切换为 session.filename -->
         <div v-if="session.filename" class="filename mono">
           <el-icon class="icon-ok"><CircleCheck /></el-icon>
-          {{ session.filename }}（合同 #{{ session.contractId }}）
+          <span class="filename-text">{{ session.filename }}（合同 #{{ session.contractId }}）</span>
+          <el-button
+            v-if="!session.busy"
+            class="filename-cancel"
+            size="small"
+            :icon="'Close'"
+            circle
+            plain
+            title="取消，重新上传"
+            @click="() => { session.reset(); auditState = 'idle' }"
+          />
         </div>
         <div v-else-if="pendingFilename" class="filename mono pending">
           <el-icon class="is-loading"><Loading /></el-icon>
@@ -261,15 +328,40 @@ function closeBatch() {
         <div class="check-grid">
           <el-checkbox v-for="d in dimensions" :key="d.key" v-model="d.on" :label="d.label" />
         </div>
+        <!-- 运行中：换成终止按钮；否则：启动按钮 -->
         <el-button
+          v-if="auditState === 'running'"
+          class="run-btn abort-btn"
+          :loading="false"
+          @click="onAbort"
+        >
+          ✕ 终止审查
+        </el-button>
+        <el-button
+          v-else
           type="primary"
           class="run-btn"
           :loading="session.busy"
-          :disabled="session.step < 1"
+          :disabled="session.step < 1 || session.busy"
           @click="onAudit"
         >
           <el-icon><MagicStick /></el-icon>启动合规审查
         </el-button>
+
+        <!-- 审查进度条：运行中/完成/失败三态 -->
+        <div v-if="auditState !== 'idle'" class="audit-progress-wrap">
+          <div class="audit-progress-head">
+            <span class="audit-progress-label">{{ auditProgressLabel }}</span>
+            <span class="audit-progress-pct mono">{{ auditProgress }}%</span>
+          </div>
+          <div class="audit-progress-track">
+            <div
+              class="audit-progress-fill"
+              :class="auditState"
+              :style="{ width: `${auditProgress}%` }"
+            />
+          </div>
+        </div>
       </el-card>
     </div>
 
@@ -434,6 +526,9 @@ function closeBatch() {
   font-size: 12px;
   color: var(--ivory-dim);
 }
+.filename-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filename-cancel { flex: none; opacity: 0.6; }
+.filename-cancel:hover { opacity: 1; }
 .filename .icon-ok {
   color: var(--sage);
 }
@@ -461,6 +556,36 @@ function closeBatch() {
 .run-btn {
   width: 100%;
 }
+.abort-btn {
+  margin-top: 8px;
+  color: var(--seal);
+  border-color: var(--seal);
+}
+.audit-progress-wrap {
+  margin-top: 12px;
+}
+.audit-progress-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.audit-progress-label { color: var(--ivory-dim); font-family: var(--serif); }
+.audit-progress-pct   { color: var(--brass); }
+.audit-progress-track {
+  height: 6px;
+  background: var(--ink-3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.audit-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.06s linear;
+  background: var(--brass);
+}
+.audit-progress-fill.done   { background: var(--sage); }
+.audit-progress-fill.failed { background: var(--seal); }
 .result-head {
   display: flex;
   align-items: center;
