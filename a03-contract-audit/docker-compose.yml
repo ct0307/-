@@ -18,8 +18,9 @@ services:
     volumes:
       # 合同文件存储 + SQLite 数据库持久化
       - contract_storage:/app/storage
-      # HuggingFace 模型缓存（避免每次重启重新下载）
-      - hf_cache:/root/.cache/huggingface
+      # 注：embedding 模型已在镜像构建阶段烤入（见 backend/Dockerfile），
+      # 运行时 HF_HUB_OFFLINE=1 直接读镜像内缓存，不再挂载 hf_cache volume
+      # （空 volume 会遮蔽镜像里的模型，导致离线加载失败）。
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/dashboard/summary"]
@@ -40,6 +41,4 @@ services:
 
 volumes:
   contract_storage:
-    driver: local
-  hf_cache:
     driver: local
