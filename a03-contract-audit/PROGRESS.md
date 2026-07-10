@@ -6,6 +6,84 @@
 
 ---
 
+## 2026-07-09 · RAG 混合检索（BM25 + 向量 RRF 融合）（✅ 已完成）
+
+### 背景
+知识库达 567 条（早过 P2 待办的 200 条阈值）。纯向量检索对法条「精确术语」（违约金/定金/不可抗力）不如 BM25 词频匹配；两者互补。对应待办 P2「RAG 混合检索（BM25 + 向量 RRF 融合）」。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/requirements.txt` | 加 `jieba==0.42.1`（中文分词，MIT）+ `rank-bm25==0.2.2`（BM25，Apache2.0）；装前审计，0 已知漏洞，纯本地无重依赖 |
+| `backend/app/services/rag/retriever.py` | 重写 `retrieve()`：向量路（余弦，仅非空向量）+ BM25 路（jieba 分词，全部切片）→ **RRF 融合**（`score=Σ1/(k+rank)`, k=60，每路 Top-10 进融合）→ Top-K。`retrieve()` 签名/返回结构不变，auditor 零改动。BM25 索引带指纹缓存（切片数+max id），知识库变动自动重建。降级链：embedding 挂→仅 BM25；库空→内置关键词 |
+| `backend/tests/test_rag_hybrid.py`（新建） | 9 个单测：分词/RRF 融合/融合分序/BM25 排名/指纹缓存/无命中/关键词降级 |
+
+### 验证结论
+- 22 个单测全过（9 混合 + 13 切片）✅
+- 真实 567 条库检索：违约金过高→Top-1 第585条、定金上限→Top-1 第586条、承揽交付→Top-3 全承揽分则、不可抗力→Top-1 第590条，命中全部精准 ✅
+- `mode=hybrid` 双路生效，向量 embedding 7-8ms，BM25 索引 567 条一次构建后缓存复用 ✅
+- 后端已带混合检索重启上线 ✅
+
+### 遗留说明
+- jieba 触发 `pkg_resources` 弃用警告（无害，jieba 0.42.1 内部依赖），不影响功能
+- BM25 索引为进程内内存缓存，多 worker 部署时各 worker 独立构建一份（567 条 <100ms，可接受）
+
+---
+
+## 2026-07-09 · 民法典合同编全量导入 + Embedding 离线固化（✅ 已完成）
+
+### 知识库充实：民法典合同编 526 条
+| 事项 | 内容 |
+|---|---|
+| 来源 | 全国人大官方 `中华人民共和国民法典_20200528.docx`（用户提供，保证条文权威准确，不凭记忆生成）|
+| 提取 | python-docx 定位第三编·合同正文段（第463–988条），生成 `民法典-合同编.txt`（根目录，871行/139KB）|
+| 切片 | 走「法条识别」智能切片，精确 526 条 = 526 切片，与官方条数完全一致 |
+| 入库 | 真实 API `POST /knowledge/import-file`（category=law），本地 bge-small-zh 向量化，7.3s |
+| 检索验证 | 定金 query Top-1/2 命中（0.677）；承揽 query Top-3 全命中分则条文（0.78–0.83），分则审查盲区消除 ✅ |
+| 知识库总量 | 41 → 567 条 |
+
+### 切片正则修复（交叉引用误切）
+- **根因**：`_ARTICLE_RE` 无行首锚定，正文里的句中交叉引用（如「依照本法第五百零九条规定」）被误判为条文边界，526 条被切成 568 条，条文从中间断裂。
+- **修复**：`knowledge.py` 正则改 `^[\t 　]*第X条` + `re.MULTILINE`，只认行首条号。
+- **回归测试**：`test_knowledge_split.py` 新增 `test_cross_reference_not_split` / `test_article_with_leading_whitespace`，共 13 个单测全过。
+
+### Embedding 生产离线固化（私有化硬约束）
+- **背景**：后端首次算 embedding 时 sentence-transformers 默认联网校验 huggingface.co，网络不可达时卡在超时重试（10s×5）堵死请求线程，连登录都超时。
+- **改动**：
+  - `backend/Dockerfile`：构建阶段 `ARG EMBED_MODEL` 预下载模型烤入镜像层 → `ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` 运行时永不联网。
+  - `docker-compose.yml`：移除 `hf_cache` volume 挂载（空 volume 会遮蔽镜像内烤好的模型，导致离线加载失败）。
+  - `backend/.env.example`：补 embedding 离线策略说明，明确区分 Docker（ENV 固化）vs 宿主机裸跑（启动命令前置 `HF_HUB_OFFLINE=1`，因 pydantic 不注入 os.environ，.env 写它对 hf 库不生效）。
+- **效果**：构建机联网下载一次 → 镜像固化 → 容器运行零联网，符合「数据与模型均不出企业」。
+
+### 验证结论
+- 13 个切片单测全过 ✅
+- 合同编 526 条精确切片、入库、检索命中全部验证 ✅
+- 联网恢复后复测：首次检索 8.5s（模型加载），承揽 query 命中新条文相似度 0.83 ✅
+- docker-compose YAML 结构完整（本机无 docker daemon，未做 build 实测）
+
+---
+
+## 2026-07-09 · 知识库智能切片升级：法条识别 + 清洗 + 去重（✅ 已完成）
+
+### 背景
+知识库批量导入的切片策略是通用段落切割（`_split_chunks`：空行分段 + 超长按句号切），对法规文本无结构感知——上传整部法规 PDF 时条文被打散或合并，页码/乱码碎片直接入库污染向量空间，同一文件重复导入产生完全重复切片。对应待办 P2「RAG 切片策略优化（法条按条文切）」。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/app/api/v1/endpoints/knowledge.py` | `_split_chunks` → `_smart_split`（返回 `SplitResult` 含模式元信息）：①`_split_by_article` 按 `第X条`（中文/阿拉伯数字）边界切，≥2 条命中才触发，单条超长再二级切；②无条文标记降级 `_split_paragraph`（原逻辑保留）；③`_clean_lines` 去页码行/纯符号行（保留空行维持段落结构），过滤 <8 字碎片。新增 `_dedup_chunks` + `_chunk_key`（source+content MD5）：入库前剔除库中已有及本批内部重复。两个导入端点 `/import` `/import-file` 统一走「智能切片 → 去重 → `_do_index`」，消除原 `/import` 重复的降级代码，返回增加 `skipped_duplicates`/`split_mode`/`article_count` |
+| `frontend/src/api/knowledge.ts` | 新增 `ImportFileResult` 类型（含去重数/切片模式）；`importKnowledgeFile` 返回类型改用之 |
+| `frontend/src/views/KnowledgeView.vue` | `FileItem` 加 `skipped`/`mode` 字段；文件队列 done 行展示「法条识别/段落切分」标签 + `+N 条 · 去重 M` |
+| `backend/tests/test_knowledge_split.py`（新建） | 11 个单元测试：条文切割/多行归属/阿拉伯数字/单条降级/段落切/超长句切/页码清洗/碎片过滤/空文本/去重键 |
+
+### 验证结论
+- 11 个切片单元测试全过（pytest 未装，直连函数跑）✅
+- 前端 vue-tsc type-check 零错误 ✅
+- 端到端：模拟含页码噪音的法规 PDF → 识别 4 条法条、页码清洗、多行内容不拆散；首次导入 4 条入库、重复导入 4 条全跳过 ✅
+- seed 脚本不受影响（走 `index_documents` 直灌手工切好的单条，不过 `_smart_split`）✅
+
+---
+
 ## 2026-07-09 · Docker Compose + 批量合同上传（✅ 已完成）
 
 ### Docker Compose
