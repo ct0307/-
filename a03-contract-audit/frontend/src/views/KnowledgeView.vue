@@ -110,6 +110,8 @@ interface FileItem {
   file: File
   status: 'pending' | 'importing' | 'done' | 'error'
   chunks: number
+  skipped: number
+  mode: 'article' | 'paragraph' | 'empty' | ''
   error: string
 }
 const fileItems = ref<FileItem[]>([])
@@ -119,7 +121,7 @@ const doneCount = computed(() => fileItems.value.filter((f) => f.status === 'don
 function onBatchFileChange(file: { raw: File }) {
   // el-upload 回调：添加到队列（去重）
   if (fileItems.value.some((f) => f.file.name === file.raw.name)) return
-  fileItems.value.push({ file: file.raw, status: 'pending', chunks: 0, error: '' })
+  fileItems.value.push({ file: file.raw, status: 'pending', chunks: 0, skipped: 0, mode: '', error: '' })
 }
 
 function removeFile(idx: number) {
@@ -136,6 +138,8 @@ async function startBatchImport() {
     try {
       const res = await importKnowledgeFile(item.file, cat)
       item.chunks = res.imported_chunks
+      item.skipped = res.skipped_duplicates
+      item.mode = res.split_mode
       item.status = 'done'
     } catch (e: unknown) {
       item.status = 'error'
@@ -286,7 +290,11 @@ function closeBatch() {
             <Document v-else />
           </el-icon>
           <span class="file-name">{{ f.file.name }}</span>
-          <span v-if="f.status === 'done'" class="file-result done">+{{ f.chunks }} 条</span>
+          <span v-if="f.status === 'done'" class="file-result done">
+            <span v-if="f.mode === 'article'" class="mode-tag article">法条识别</span>
+            <span v-else-if="f.mode === 'paragraph'" class="mode-tag para">段落切分</span>
+            +{{ f.chunks }} 条<template v-if="f.skipped"> · 去重 {{ f.skipped }}</template>
+          </span>
           <span v-else-if="f.status === 'error'" class="file-result error" :title="f.error">失败</span>
           <span v-else-if="f.status === 'importing'" class="file-result pending">导入中…</span>
           <span v-else class="file-result pending">待导入</span>
@@ -503,9 +511,17 @@ function closeBatch() {
   font-family: var(--mono);
   white-space: nowrap;
 }
-.file-result.done  { color: var(--sage); }
+.file-result.done  { color: var(--sage); display: inline-flex; align-items: center; gap: 6px; }
 .file-result.error { color: var(--seal); }
 .file-result.pending { color: var(--muted); }
+.mode-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: var(--serif);
+}
+.mode-tag.article { background: var(--brass-soft); color: var(--brass); }
+.mode-tag.para { background: var(--ink-3, rgba(255,255,255,0.06)); color: var(--ivory-dim); }
 .batch-summary {
   font-size: 13px;
   color: var(--sage);
