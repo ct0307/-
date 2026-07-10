@@ -39,6 +39,10 @@ httpx==0.28.1
 # 模型默认：BAAI/bge-small-zh-v1.5（中文检索专用，384维，~100MB）
 sentence-transformers==3.3.1
 
+# RAG 混合检索（BM25 + 向量 RRF 融合）：中文分词 + BM25 打分，纯本地
+jieba==0.42.1
+rank-bm25==0.2.2
+
 # 日志
 structlog==24.4.0
 
