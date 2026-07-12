@@ -58,10 +58,10 @@ const passRate = computed(() => {
 })
 
 const kpis = computed(() => [
-  { label: '累计审查合同', value: String(summary.value?.total_contracts ?? '—'), unit: '份', trend: '累计', up: true },
-  { label: '待整改项', value: String(rectify.openCount), unit: '项', trend: '实时', up: false },
-  { label: '累计检出风险', value: String(summary.value?.total_risks ?? '—'), unit: '条', trend: '累计', up: false },
-  { label: '合规通过率', value: passRate.value, unit: '%', trend: '复核派生', up: true },
+  { label: '累计审查合同', value: String(summary.value?.total_contracts ?? '—'), unit: '份', hint: '系统上线至今累计处理的合同总份数', up: true },
+  { label: '待整改项', value: String(rectify.openCount), unit: '项', hint: '当前"待处理"状态的整改项，需尽快跟进', up: false },
+  { label: '累计检出风险', value: String(summary.value?.total_risks ?? '—'), unit: '条', hint: '所有合同审查中 AI 检出的风险条款总数', up: false },
+  { label: '合规通过率', value: passRate.value, unit: '%', hint: '已确认 + 已忽略的风险数 ÷ 总风险数（复核完成口径）', up: true },
 ])
 
 // —— 待办：取真实"待处理"整改项，最多展示 5 条 ——
@@ -118,9 +118,13 @@ const activity = computed(() =>
     </section>
     <section v-else class="kpi-row">
       <article v-for="k in kpis" :key="k.label" class="kpi-card">
-        <span class="kpi-label">{{ k.label }}</span>
+        <div class="kpi-label-row">
+          <span class="kpi-label">{{ k.label }}</span>
+          <el-tooltip :content="k.hint" placement="bottom">
+            <el-icon class="kpi-hint"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </div>
         <strong class="kpi-value mono">{{ k.value }}<i>{{ k.unit }}</i></strong>
-        <em class="kpi-trend mono" :class="{ up: k.up }">{{ k.trend }}</em>
       </article>
     </section>
 
@@ -130,7 +134,9 @@ const activity = computed(() =>
         <template #header>
           <div class="panel-head">
             <span>待处理整改</span>
-            <span v-if="pendingTodos.length" class="count-badge">{{ pendingTodos.length }} 项</span>
+            <span v-if="rectify.countByStatus.待处理" class="count-badge">
+              {{ rectify.countByStatus.待处理 }} 项<template v-if="rectify.countByStatus.待处理 > 5"> · 仅显示前 5</template>
+            </span>
           </div>
         </template>
 
@@ -210,10 +216,25 @@ const activity = computed(() =>
   padding: 18px 20px;
   box-shadow: var(--shadow-sm);
 }
+.kpi-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
 .kpi-label {
   font-size: 13px;
   color: var(--ivory-dim);
   font-family: var(--serif);
+}
+.kpi-hint {
+  font-size: 13px;
+  color: var(--muted);
+  cursor: help;
+  flex: none;
+}
+.kpi-hint:hover {
+  color: var(--brass);
 }
 .kpi-value {
   display: block;
@@ -227,14 +248,6 @@ const activity = computed(() =>
   font-style: normal;
   font-family: var(--serif);
   margin-left: 3px;
-}
-.kpi-trend {
-  font-size: 12px;
-  color: var(--ivory-dim);
-  font-family: var(--serif);
-}
-.kpi-trend.up {
-  color: var(--sage);
 }
 
 /* 两栏网格 */

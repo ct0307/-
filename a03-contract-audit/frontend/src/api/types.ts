@@ -52,4 +52,5 @@ export interface RiskOut {
   confidence: number
   tier: 'green' | 'yellow' | 'red' // 人工干预档位
   review_status: 'pending' | 'confirmed' | 'ignored' | 'to_modify'
+  rag_sources: Array<{ content: string; source: string; score: number }> // RAG 检索溯源
 }

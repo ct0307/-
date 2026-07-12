@@ -83,7 +83,7 @@ function onEnter(e: KeyboardEvent) {
       <div class="rd-head">
         <el-tag :type="levelMeta[risk.level].type" size="small">{{ levelMeta[risk.level].label }}</el-tag>
         <span class="rd-cat">{{ risk.category }}</span>
-        <el-tag size="small" effect="plain" class="mono">置信度 {{ risk.confidence }}</el-tag>
+        <el-tag size="small" effect="plain" class="mono">置信度 {{ risk.confidence }}%</el-tag>
       </div>
 
       <section class="rd-block">
@@ -94,6 +94,19 @@ function onEnter(e: KeyboardEvent) {
         <h4>法规 / 规则依据</h4>
         <p class="rd-text">{{ risk.basis }}</p>
       </section>
+
+      <!-- RAG 检索溯源：展示 AI 引用的具体法条原文来源 -->
+      <section v-if="risk.rag_sources?.length" class="rd-block">
+        <h4>检索来源</h4>
+        <div v-for="(s, i) in risk.rag_sources" :key="i" class="rag-source-card">
+          <div class="rag-source-head">
+            <span class="rag-tag" :title="s.source">{{ s.source }}</span>
+            <span class="rag-rank mono">#{{ i + 1 }}</span>
+          </div>
+          <p class="rag-content">{{ s.content.slice(0, 150) }}{{ s.content.length > 150 ? '…' : '' }}</p>
+        </div>
+      </section>
+
       <section class="rd-block">
         <h4>修改建议</h4>
         <p class="rd-text">{{ risk.suggestion }}</p>
@@ -190,7 +203,7 @@ function onEnter(e: KeyboardEvent) {
 }
 .rd-block h4 {
   margin: 0 0 6px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--brass);
   font-family: var(--mono);
   letter-spacing: 0.05em;
@@ -306,5 +319,44 @@ function onEnter(e: KeyboardEvent) {
 .send-btn {
   flex: none;
   height: 54px;
+}
+
+/* —— RAG 检索溯源卡片 —— */
+.rag-source-card {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--brass);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--ink-3);
+}
+.rag-source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.rag-tag {
+  font-size: 11px;
+  background: var(--brass-soft);
+  color: var(--brass);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rag-rank {
+  font-size: 11px;
+  color: var(--muted);
+  flex: none;
+}
+.rag-content {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ivory-dim);
+  line-height: 1.6;
 }
 </style>

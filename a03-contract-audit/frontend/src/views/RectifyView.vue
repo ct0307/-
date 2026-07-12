@@ -1,19 +1,30 @@
 <script setup lang="ts">
 // 整改跟踪：源自 rectify store（含 AuditView 复核确认生成的真实整改项）。
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRectifyStore, type RectifyStatus } from '@/stores/rectify'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
 const rectify = useRectifyStore()
 const filter = ref<'全部' | RectifyStatus>('全部')
+const keyword = ref('')
+const page = ref(1)
+const pageSize = 10
 const changing = ref<Set<string>>(new Set()) // 正在流转的整改项 ID 集合
 
 onMounted(() => rectify.load())
 
-const filtered = computed(() =>
-  filter.value === '全部' ? rectify.items : rectify.items.filter((r) => r.status === filter.value),
-)
+// R1：支持合同名/风险描述/责任人关键词搜索
+const filtered = computed(() => {
+  const kw = keyword.value.trim()
+  let list = filter.value === '全部' ? rectify.items : rectify.items.filter((r) => r.status === filter.value)
+  if (kw) list = list.filter((r) =>
+    r.contract.includes(kw) || r.risk.includes(kw) || r.owner.includes(kw),
+  )
+  return list
+})
+// R2：分页
+const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize))
 
 const levelMeta: Record<string, { label: string; type: 'danger' | 'warning' | 'info' }> = {
   high: { label: '高', type: 'danger' },
@@ -36,6 +47,18 @@ const nextStatusMap: Record<RectifyStatus, { next: RectifyStatus; label: string;
 
 async function advance(id: string, current: RectifyStatus) {
   if (changing.value.has(id)) return
+  // R3：重新开启需二次确认（会清除闭环状态）
+  if (current === '已闭环') {
+    try {
+      await ElMessageBox.confirm(
+        '确认重新开启此整改项？该项将回退至"待处理"状态。',
+        '确认重新开启',
+        { type: 'warning', confirmButtonText: '确认', cancelButtonText: '取消' },
+      )
+    } catch {
+      return // 用户取消
+    }
+  }
   const { next } = nextStatusMap[current]
   changing.value = new Set([...changing.value, id])
   try {
@@ -53,15 +76,26 @@ async function advance(id: string, current: RectifyStatus) {
 <template>
   <div>
     <div class="toolbar">
-      <div class="seg">
-        <button
-          v-for="s in segs"
-          :key="s"
-          :class="{ active: filter === s }"
-          @click="filter = s"
-        >
-          {{ s }}
-        </button>
+      <div class="left-bar">
+        <div class="seg">
+          <button
+            v-for="s in segs"
+            :key="s"
+            :class="{ active: filter === s }"
+            @click="filter = s; page = 1"
+          >
+            {{ s }}
+          </button>
+        </div>
+        <!-- R1：关键词搜索 -->
+        <el-input
+          v-model="keyword"
+          placeholder="搜索合同名 / 风险 / 责任人"
+          :prefix-icon="'Search'"
+          style="width: 240px"
+          clearable
+          @input="page = 1"
+        />
       </div>
       <DemoBadge module="rectify" />
     </div>
@@ -78,18 +112,22 @@ async function advance(id: string, current: RectifyStatus) {
     </el-alert>
 
     <section class="rk-row">
-      <article class="rk-card"><span>待处理</span><strong class="mono">{{ rectify.countByStatus.待处理 }}</strong></article>
-      <article class="rk-card"><span>处理中</span><strong class="mono">{{ rectify.countByStatus.处理中 }}</strong></article>
-      <article class="rk-card"><span>已闭环</span><strong class="mono">{{ rectify.countByStatus.已闭环 }}</strong></article>
-      <article class="rk-card"><span>整改项合计</span><strong class="mono">{{ rectify.total }}</strong></article>
+      <article class="rk-card rk-pending"><span>待处理</span><strong class="mono">{{ rectify.countByStatus.待处理 }}</strong></article>
+      <article class="rk-card rk-processing"><span>处理中</span><strong class="mono">{{ rectify.countByStatus.处理中 }}</strong></article>
+      <article class="rk-card rk-done"><span>已闭环</span><strong class="mono">{{ rectify.countByStatus.已闭环 }}</strong></article>
+      <article class="rk-card rk-total"><span>整改项合计</span><strong class="mono">{{ rectify.total }}</strong></article>
     </section>
 
     <el-card v-loading="rectify.loading" shadow="never">
       <template #header>
-        <div class="panel-head"><span>整改项列表</span><span class="count mono">共 {{ filtered.length }} 项</span></div>
+        <div class="panel-head">
+          <span>整改项列表</span>
+          <span class="count mono">共 {{ filtered.length }} 项</span>
+        </div>
       </template>
       <el-empty v-if="!rectify.loading && !filtered.length" description="暂无整改项" />
-      <article v-for="r in filtered" :key="r.id" class="rect-item" :class="`lvl-${r.level}`">
+      <!-- R2：显示 paged 而非 filtered -->
+      <article v-for="r in paged" :key="r.id" class="rect-item" :class="`lvl-${r.level}`">
         <div class="rect-main">
           <div class="rect-head">
             <span class="rect-id mono">{{ r.id }}</span>
@@ -104,7 +142,7 @@ async function advance(id: string, current: RectifyStatus) {
           <div class="rect-meta mono">
             <span>责任人 {{ r.owner }}</span>
             <span>创建 {{ r.created }}</span>
-            <span>截止 {{ r.due }}</span>
+            <span :class="{ overdue: r.status !== '已闭环' && r.due && r.due < new Date().toISOString().slice(0, 10) }">截止 {{ r.due }}</span>
           </div>
           <el-button
             size="small"
@@ -118,6 +156,17 @@ async function advance(id: string, current: RectifyStatus) {
           </el-button>
         </div>
       </article>
+      <!-- R2：分页 -->
+      <div v-if="filtered.length > pageSize" class="pagination-bar">
+        <span class="count mono">{{ filtered.length }} 项</span>
+        <el-pagination
+          v-model:current-page="page"
+          :page-size="pageSize"
+          :total="filtered.length"
+          layout="prev, pager, next, total"
+          background
+        />
+      </div>
     </el-card>
   </div>
 </template>
@@ -128,6 +177,13 @@ async function advance(id: string, current: RectifyStatus) {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
+  gap: 12px;
+}
+.left-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .seg {
   display: inline-flex;
@@ -179,6 +235,13 @@ async function advance(id: string, current: RectifyStatus) {
   font-size: 12px;
   color: var(--muted);
 }
+.pagination-bar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: 16px;
+  gap: 12px;
+}
 .rect-item {
   display: flex;
   justify-content: space-between;
@@ -198,29 +261,17 @@ async function advance(id: string, current: RectifyStatus) {
   width: 3px;
   border-radius: var(--r-sm) 0 0 var(--r-sm);
 }
-.rect-item.lvl-high::before {
-  background: var(--seal);
-}
-.rect-item.lvl-medium::before {
-  background: var(--amber);
-}
-.rect-item.lvl-low::before {
-  background: var(--sage);
-}
+.rect-item.lvl-high::before { background: var(--seal); }
+.rect-item.lvl-medium::before { background: var(--amber); }
+.rect-item.lvl-low::before { background: var(--sage); }
 .rect-head {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
 }
-.rect-id {
-  font-size: 12px;
-  color: var(--brass);
-}
-.rect-contract {
-  color: var(--ivory);
-  font-size: 14px;
-}
+.rect-id { font-size: 12px; color: var(--brass); }
+.rect-contract { color: var(--ivory); font-size: 14px; }
 .rect-risk,
 .rect-note {
   margin: 4px 0 0;
@@ -244,28 +295,16 @@ async function advance(id: string, current: RectifyStatus) {
   text-align: right;
   white-space: nowrap;
 }
-.advance-btn {
-  width: 88px;
-}
+.advance-btn { width: 88px; }
+.rk-pending strong  { color: var(--seal); }
+.rk-processing strong { color: var(--amber); }
+.rk-done strong     { color: var(--sage); }
+.overdue            { color: var(--seal) !important; font-weight: 600; }
 @media (max-width: 1180px) {
-  .rk-row {
-    grid-template-columns: 1fr 1fr;
-  }
-  .rect-item {
-    flex-direction: column;
-  }
-  .rect-right {
-    align-items: flex-start;
-    flex-direction: row;
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-  .rect-meta {
-    text-align: left;
-    flex-direction: row;
-    flex-wrap: wrap;
-    gap: 12px;
-  }
+  .rk-row { grid-template-columns: 1fr 1fr; }
+  .rect-item { flex-direction: column; }
+  .rect-right { align-items: flex-start; flex-direction: row; flex-wrap: wrap; gap: 12px; }
+  .rect-meta { text-align: left; flex-direction: row; flex-wrap: wrap; gap: 12px; }
   .advance-btn { width: auto; }
 }
 </style>

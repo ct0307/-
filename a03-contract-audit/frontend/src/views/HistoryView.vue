@@ -1,12 +1,15 @@
 <script setup lang="ts">
 // 审查历史记录：el-table + 分页 + 搜索 + 风险等级筛选 + 点击行查看风险详情。
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getHistory } from '@/api/history'
 import { getRisks } from '@/api/contract'
 import type { HistoryRow } from '@/mock/history'
 import type { RiskOut } from '@/api/types'
 import DemoBadge from '@/components/common/DemoBadge.vue'
+
+const router = useRouter()
 
 const rows = ref<HistoryRow[]>([])
 const loading = ref(false)
@@ -81,6 +84,8 @@ async function onRowClick(row: HistoryRow) {
     drawerLoading.value = false
   }
 }
+
+function goAudit() { router.push('/audit') }
 </script>
 
 <template>
@@ -122,6 +127,11 @@ async function onRowClick(row: HistoryRow) {
         </el-table-column>
         <el-table-column label="合规状态" width="100">
           <template #default="{ row }"><el-tag :type="statusType[row.status]" size="small" effect="plain">{{ row.status }}</el-tag></template>
+        </el-table-column>
+        <el-table-column width="44" align="center">
+          <template #default>
+            <el-icon class="row-arrow"><ArrowRight /></el-icon>
+          </template>
         </el-table-column>
       </el-table>
 
@@ -165,6 +175,12 @@ async function onRowClick(row: HistoryRow) {
           </div>
         </article>
       </div>
+      <!-- H2：底部跳转到审查页进行复核 -->
+      <template #footer>
+        <el-button type="primary" style="width: 100%" @click="goAudit">
+          前往审查页复核 →
+        </el-button>
+      </template>
     </el-drawer>
   </div>
 </template>
@@ -189,6 +205,14 @@ async function onRowClick(row: HistoryRow) {
 .count {
   font-size: 12px;
   color: var(--muted);
+}
+.row-arrow {
+  color: var(--muted);
+  font-size: 13px;
+  transition: color 0.15s ease;
+}
+:deep(tr:hover) .row-arrow {
+  color: var(--brass);
 }
 /* 风险详情抽屉 */
 .risk-item {
@@ -223,7 +247,7 @@ async function onRowClick(row: HistoryRow) {
 .risk-basis,
 .risk-suggest {
   font-size: 12px;
-  color: var(--muted);
+  color: var(--ivory-dim);
   margin: 4px 0;
   line-height: 1.5;
 }

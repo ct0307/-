@@ -2,11 +2,13 @@
 // 覆盖三类用法：组件形式 <Icon/>、字符串 :icon="'Name'"、nav.ts 的 <component :is>。
 import type { App } from 'vue'
 import {
+  ArrowRight,
   Bell,
   CircleCheck,
   Clock,
   Close,
   Loading,
+  QuestionFilled,
   Coin,
   Collection,
   Connection,
@@ -32,11 +34,13 @@ import {
 } from '@element-plus/icons-vue'
 
 const ICONS = {
+  ArrowRight,
   Bell,
   CircleCheck,
   Clock,
   Close,
   Loading,
+  QuestionFilled,
   Coin,
   Collection,
   Connection,

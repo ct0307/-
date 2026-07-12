@@ -43,7 +43,11 @@ export interface ImportFileResult {
   article_count: number
 }
 
-/** 上传文件批量导入知识库（txt/docx/pdf → 智能切片向量化）。*/
+/** 删除知识库条目（仅 admin，id 为后端数字主键，前端卡片 id 格式为 "K01"）。*/
+export async function deleteKnowledge(numericId: number): Promise<void> {
+  if (MOCK_ENABLED.knowledge) return
+  await client.delete(`/knowledge/${numericId}`)
+}
 export async function importKnowledgeFile(
   file: File,
   category: string,

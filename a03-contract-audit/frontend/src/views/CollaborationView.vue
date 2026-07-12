@@ -289,15 +289,24 @@ function goAudit() {
             </li>
           </ul>
           <p v-else class="tier-empty">本档暂无风险项</p>
-          <el-button
-            class="tier-btn"
-            :disabled="t.count === 0"
-            :type="t.meta.key === 'red' ? 'danger' : 'default'"
-            size="small"
-            @click="onTierAction(t.meta.key)"
+          <!-- C2：红档 disabled 时加 tooltip 说明原因 -->
+          <el-tooltip
+            :disabled="!(t.meta.key === 'red' && t.count === 0)"
+            content="当前无红档风险，无需发起三方会审"
+            placement="top"
           >
-            {{ t.meta.actionLabel }}
-          </el-button>
+            <span style="display: inline-block">
+              <el-button
+                class="tier-btn"
+                :disabled="t.count === 0"
+                :type="t.meta.key === 'red' ? 'danger' : 'default'"
+                size="small"
+                @click="onTierAction(t.meta.key)"
+              >
+                {{ t.meta.actionLabel }}
+              </el-button>
+            </span>
+          </el-tooltip>
         </section>
       </div>
       <p class="disclaimer">
@@ -455,8 +464,8 @@ function goAudit() {
 }
 .agent-section h4 {
   margin: 0 0 8px;
-  font-size: 12px;
-  color: var(--ivory-dim);
+  font-size: 13px;
+  color: var(--ivory);
   font-weight: 600;
 }
 .chip-row {
@@ -465,7 +474,7 @@ function goAudit() {
   gap: 6px;
 }
 .chip {
-  font-size: 11px;
+  font-size: 12px;
   padding: 3px 9px;
   border-radius: 4px;
   background: var(--ink-3);
@@ -485,7 +494,7 @@ function goAudit() {
   gap: 3px;
 }
 .agent-mini-kpis span {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
 }
 .agent-mini-kpis strong {
@@ -562,7 +571,7 @@ function goAudit() {
 .cross-body p {
   margin: 4px 0;
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.7;
   color: var(--ivory-dim);
 }
 .cross-body b {
@@ -627,7 +636,7 @@ function goAudit() {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 6px 10px;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .tier-meta dt {
   color: var(--muted);

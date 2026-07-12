@@ -127,12 +127,13 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
         <el-option label="采购合同" value="采购合同" />
         <el-option label="技术服务合同" value="技术服务合同" />
       </el-select>
-      <el-select v-model="drillAmount" size="default" style="width: 150px">
-        <el-option label="不限金额" value="全部" />
-        <el-option label="50 万以下" value="low" />
-        <el-option label="50 万 - 200 万" value="mid" />
-        <el-option label="200 万以上" value="high" />
-      </el-select>
+      <el-tooltip content="合同金额为自然语言文本，格式不统一，暂不支持数值范围筛选" placement="top">
+        <span style="display: inline-block">
+          <el-select v-model="drillAmount" size="default" style="width: 150px; pointer-events: none; opacity: 0.45" disabled>
+            <el-option label="不限金额" value="全部" />
+          </el-select>
+        </span>
+      </el-tooltip>
       <el-select v-model="drillLevel" size="default" style="width: 130px">
         <el-option label="全部等级" value="全部" />
         <el-option label="高风险" value="高风险" />

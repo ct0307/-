@@ -124,7 +124,10 @@ async function submitTpl() {
             <p class="rule-desc">{{ r.desc }}</p>
             <div class="rule-tags mono"><span>{{ r.dimension }}</span><span>{{ r.agent }}</span></div>
           </div>
-          <el-button link type="danger" :icon="'Delete'" aria-label="删除规则" @click="delRule(r)" />
+          <el-tooltip v-if="r.builtin" content="内置规则不可删除" placement="top">
+            <span><el-button link type="danger" :icon="'Delete'" aria-label="删除规则" disabled /></span>
+          </el-tooltip>
+          <el-button v-else link type="danger" :icon="'Delete'" aria-label="删除规则" @click="delRule(r)" />
         </article>
       </el-card>
 
@@ -136,7 +139,10 @@ async function submitTpl() {
           <div class="tpl-head">
             <b>{{ t.name }}</b>
             <el-tag size="small">{{ t.type }}</el-tag>
-            <el-button link type="danger" :icon="'Delete'" aria-label="删除模板" style="margin-left: auto" @click="delTemplate(t)" />
+            <el-tooltip v-if="t.builtin" content="内置模板不可删除" placement="top">
+              <span><el-button link type="danger" :icon="'Delete'" aria-label="删除模板" style="margin-left: auto" disabled /></span>
+            </el-tooltip>
+            <el-button v-else link type="danger" :icon="'Delete'" aria-label="删除模板" style="margin-left: auto" @click="delTemplate(t)" />
           </div>
           <ul class="clause-list">
             <li v-for="(c, i) in t.clauses" :key="i">§ {{ c }}</li>
@@ -149,7 +155,18 @@ async function submitTpl() {
     <el-dialog v-model="ruleOpen" title="新增审查规则" width="560px">
       <el-form label-width="80px">
         <el-form-item label="规则名称"><el-input v-model="ruleForm.name" /></el-form-item>
-        <el-form-item label="审查维度"><el-input v-model="ruleForm.dimension" /></el-form-item>
+        <el-form-item label="审查维度">
+          <el-select v-model="ruleForm.dimension" style="width: 100%">
+            <el-option label="法律条款合规性" value="法律条款合规性" />
+            <el-option label="风险条款识别" value="风险条款识别" />
+            <el-option label="金额与付款条款" value="金额与付款条款" />
+            <el-option label="违约责任分析" value="违约责任分析" />
+            <el-option label="知识产权条款" value="知识产权条款" />
+            <el-option label="保密条款审查" value="保密条款审查" />
+            <el-option label="终止与解除条款" value="终止与解除条款" />
+            <el-option label="争议解决条款" value="争议解决条款" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="风险等级">
           <el-select v-model="ruleForm.level" style="width: 100%">
             <el-option label="高风险" value="high" />

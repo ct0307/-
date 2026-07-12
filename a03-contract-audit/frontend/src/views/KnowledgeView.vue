@@ -1,10 +1,14 @@
 <script setup lang="ts">
 // 法规知识库(RAG)：搜索 + 分类 chip + 4 统计卡 + 卡片网格 + 关键词高亮 + 详情 + 批量导入。
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { getKnowledgeCards, getKnowledgeStats, importKnowledge, importKnowledgeFile } from '@/api/knowledge'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { getKnowledgeCards, getKnowledgeStats, importKnowledge, importKnowledgeFile, deleteKnowledge } from '@/api/knowledge'
 import type { KnowledgeCard, KnowledgeCat } from '@/mock/knowledge'
 import DemoBadge from '@/components/common/DemoBadge.vue'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
+const isAdmin = computed(() => auth.role === 'admin')
 
 const cards = ref<KnowledgeCard[]>([])
 const stats = ref<{ cat: KnowledgeCat; count: number }[]>([])
@@ -62,6 +66,22 @@ function copyClause() {
   navigator.clipboard.writeText(text)
     .then(() => ElMessage.success('已复制，可粘贴至合同修改建议'))
     .catch(() => ElMessage.error('复制失败，请手动选中文本'))
+}
+
+// K2：知识条目删除（仅 admin）
+async function delCard(c: KnowledgeCard) {
+  const numId = parseInt(c.id.replace(/\D/g, ''))
+  if (!numId) return
+  try {
+    await ElMessageBox.confirm(`确认删除「${c.title}」？`, '删除确认', {
+      type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
+    })
+    await deleteKnowledge(numId)
+    await load()
+    ElMessage.success('已删除')
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败')
+  }
 }
 
 // 前端分类名 → 后端 category 英文键
@@ -202,6 +222,16 @@ function closeBatch() {
         <div class="k-head">
           <el-tag :type="catType[c.cat]" size="small">{{ c.cat }}</el-tag>
           <span class="k-date mono">{{ c.date }}</span>
+          <!-- K2：仅 admin 可见删除按钮，阻止冒泡避免触发详情弹窗 -->
+          <el-button
+            v-if="isAdmin"
+            link
+            type="danger"
+            size="small"
+            :icon="'Delete'"
+            style="margin-left: auto"
+            @click.stop="delCard(c)"
+          />
         </div>
         <h3 v-html="highlight(c.title)" />
         <p class="k-desc" v-html="highlight(c.desc)" />

@@ -14,6 +14,7 @@ const llmCalls = ref<LlmCallRow[]>([])
 const loading = ref(false)
 const activeTab = ref('matrix')
 const keyword = ref('')
+const logDateRange = ref<[Date, Date] | null>(null)
 
 async function load() {
   loading.value = true
@@ -37,8 +38,15 @@ onMounted(() => { load(); loadLookups() })
 
 const filteredLogs = computed(() => {
   const kw = keyword.value.trim()
-  return logs.value.filter((l) => !kw || l.action.includes(kw) || l.user.includes(kw))
+  const [from, to] = logDateRange.value ?? [null, null]
+  return logs.value.filter((l) => {
+    const kwOk = !kw || l.action.includes(kw) || l.user.includes(kw)
+    const dateOk = !from || !to || (l.time >= from.toISOString().slice(0, 10) && l.time <= to.toISOString().slice(0, 10))
+    return kwOk && dateOk
+  })
 })
+const logPage = ref(1)
+const logPageSize = 20
 
 const permMeta: Record<Perm, { color: string; bg: string }> = {
   读写: { color: 'var(--sage)', bg: 'var(--sage-soft)' },
@@ -199,17 +207,32 @@ function exportCsv() {
           <template #header>
             <div class="panel-head">
               <span>操作审计日志</span>
-              <el-input
-                v-model="keyword"
-                placeholder="搜索操作 / 用户"
-                :prefix-icon="'Search'"
-                size="small"
-                style="width: 180px"
-                clearable
-              />
+              <div class="log-filters">
+                <!-- AD1：时间范围筛选 -->
+                <el-date-picker
+                  v-model="logDateRange"
+                  type="daterange"
+                  range-separator="至"
+                  start-placeholder="开始日期"
+                  end-placeholder="结束日期"
+                  size="small"
+                  style="width: 240px"
+                  clearable
+                  @change="logPage = 1"
+                />
+                <el-input
+                  v-model="keyword"
+                  placeholder="搜索操作 / 用户"
+                  :prefix-icon="'Search'"
+                  size="small"
+                  style="width: 180px"
+                  clearable
+                  @input="logPage = 1"
+                />
+              </div>
             </div>
           </template>
-          <el-table :data="filteredLogs" style="width: 100%" empty-text="无匹配日志" size="small">
+          <el-table :data="filteredLogs.slice((logPage - 1) * logPageSize, logPage * logPageSize)" style="width: 100%" empty-text="无匹配日志" size="small">
             <el-table-column prop="time" label="时间" width="150">
               <template #default="{ row }"><span class="mono">{{ row.time }}</span></template>
             </el-table-column>
@@ -226,6 +249,16 @@ function exportCsv() {
               <template #default="{ row }"><span class="mono">{{ row.ip }}</span></template>
             </el-table-column>
           </el-table>
+          <!-- AD2：分页 -->
+          <div v-if="filteredLogs.length > logPageSize" class="log-pagination">
+            <el-pagination
+              v-model:current-page="logPage"
+              :page-size="logPageSize"
+              :total="filteredLogs.length"
+              layout="prev, pager, next, total"
+              background
+            />
+          </div>
         </el-card>
       </el-tab-pane>
 
@@ -463,6 +496,17 @@ function exportCsv() {
   color: var(--muted);
 }
 .dim { color: var(--muted); font-size: 11px; }
+.log-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.log-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
 /* 基础配置 */
 .config-grid {
   display: grid;

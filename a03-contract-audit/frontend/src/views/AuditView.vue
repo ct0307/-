@@ -1,10 +1,10 @@
 <script setup lang="ts">
 // 合同合规审查（真实接口核心闭环）：上传→解析→审查→复核→生成整改。
 // 闭环逻辑迁移自 WorkbenchView，数据落 audit-session store。
-import { onMounted, ref } from 'vue'
-import { ElMessage, type UploadRawFile } from 'element-plus'
+import { computed, onMounted, ref } from 'vue'
+import { ElMessage, ElMessageBox, type UploadRawFile } from 'element-plus'
 import { getLookups } from '@/api/admin'
-import { batchUploadContracts, type BatchUploadResult } from '@/api/contract'
+import { batchUploadContracts, auditContract, type BatchUploadResult } from '@/api/contract'
 
 // 用户选文件后立即显示名称（不等后端返回），上传完成后由 session.filename 接管
 const pendingFilename = ref('')
@@ -137,6 +137,21 @@ async function onAudit() {
   }
 }
 
+// 清除已上传合同（二次确认，防误触）
+async function cancelUpload() {
+  try {
+    await ElMessageBox.confirm(
+      '已上传的合同和审查结果将被清空，确认重新上传？',
+      '确认清除',
+      { type: 'warning', confirmButtonText: '确认清除', cancelButtonText: '取消' },
+    )
+    session.reset()
+    auditState.value = 'idle'
+  } catch {
+    // 用户取消，不操作
+  }
+}
+
 function onAbort() {
   session.abortAudit()
   _clearProgress()
@@ -145,6 +160,18 @@ function onAbort() {
   auditState.value = 'idle'
   ElMessage.info('审查已中止')
 }
+
+// —— 风险排序：待复核在前（high→medium→low），已处理（confirmed/ignored）沉底 ——
+const _LEVEL_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 }
+const _DONE_STATUS = new Set(['confirmed', 'ignored'])
+const sortedRisks = computed(() =>
+  [...session.risks].sort((a, b) => {
+    const doneA = _DONE_STATUS.has(a.review_status) ? 1 : 0
+    const doneB = _DONE_STATUS.has(b.review_status) ? 1 : 0
+    if (doneA !== doneB) return doneA - doneB
+    return (_LEVEL_ORDER[a.level] ?? 9) - (_LEVEL_ORDER[b.level] ?? 9)
+  })
+)
 
 // —— 复核抽屉 ——
 const drawerOpen = ref(false)
@@ -260,6 +287,24 @@ async function startBatchUpload() {
   }
 }
 
+// A6：批量上传成功后一键触发全部审查
+const batchAuditing = ref(false)
+const batchSuccessIds = computed(() =>
+  batchItems.value.filter((i) => i.status === 'success' && i.contractId).map((i) => i.contractId as number),
+)
+
+async function startBatchAudit() {
+  if (!batchSuccessIds.value.length) return
+  batchAuditing.value = true
+  let done = 0
+  for (const cid of batchSuccessIds.value) {
+    try { await auditContract(cid) } catch { /* 单份失败不中断 */ }
+    done++
+  }
+  batchAuditing.value = false
+  ElMessage.success(`已触发 ${done} 份合同审查，可在审查页查看结果`)
+}
+
 function closeBatch() {
   batchOpen.value = false
   batchItems.value = []
@@ -273,6 +318,7 @@ function closeBatch() {
     <!-- 左栏：上传 + 配置 -->
     <div class="left-stack">
       <el-card shadow="never" class="upload-panel">
+        <template #header><span class="panel-title">合同上传</span></template>
         <el-upload
           drag
           :auto-upload="false"
@@ -298,7 +344,7 @@ function closeBatch() {
             circle
             plain
             title="取消，重新上传"
-            @click="() => { session.reset(); auditState = 'idle' }"
+            @click="cancelUpload"
           />
         </div>
         <div v-else-if="pendingFilename" class="filename mono pending">
@@ -312,7 +358,7 @@ function closeBatch() {
       </el-card>
 
       <el-card shadow="never" class="config-panel">
-        <template #header>审查维度配置</template>
+        <template #header><span class="panel-title">审查维度配置</span></template>
         <div class="form-grid">
           <label>业务部门
             <el-select v-model="department" size="default" filterable>
@@ -368,6 +414,7 @@ function closeBatch() {
     <!-- 右栏：结果 -->
     <div class="right-stack">
       <el-card shadow="never" class="result-panel">
+        <template #header><span class="panel-title">智能审查结果</span></template>
         <!-- 3 步引导：未上传 / 已上传未审查时显示，代替纯文字空状态 -->
         <div v-if="session.step < 2" class="onboard">
           <div
@@ -414,10 +461,10 @@ function closeBatch() {
               <div class="col-head"><h2>风险清单</h2><el-tag type="danger" size="small">{{ session.riskCount }} 条</el-tag></div>
               <div class="risk-list">
                 <article
-                  v-for="r in session.risks"
+                  v-for="r in sortedRisks"
                   :key="r.id"
                   class="risk-card"
-                  :class="`lvl-${r.level}`"
+                  :class="[`lvl-${r.level}`, { reviewed: _DONE_STATUS.has(r.review_status) }]"
                   @click="openReview(r)"
                 >
                   <div class="risk-head">
@@ -426,7 +473,9 @@ function closeBatch() {
                     <el-tag size="small" effect="plain" class="status-tag">{{ statusLabel[r.review_status] }}</el-tag>
                   </div>
                   <p class="risk-line">{{ r.suggestion }}</p>
-                  <span class="review-cta">进入复核 →</span>
+                  <span class="review-cta">
+                    {{ _DONE_STATUS.has(r.review_status) ? '查看详情 →' : '进入复核 →' }}
+                  </span>
                 </article>
               </div>
             </section>
@@ -468,14 +517,12 @@ function closeBatch() {
       </el-upload>
 
       <div v-if="batchItems.length" class="batch-list">
-        <div v-for="(item, i) in batchItems" :key="i" class="batch-item">
+        <div v-for="(item, i) in batchItems" :key="i" class="batch-item" :class="{ 'failed-item': item.status === 'failed' }">
           <span class="batch-name mono">{{ item.file.name }}</span>
-          <span class="batch-status" :class="item.status">
-            <template v-if="item.status === 'pending'">待上传</template>
-            <template v-else-if="item.status === 'uploading'">上传中…</template>
-            <template v-else-if="item.status === 'success'">✓ #{{ item.contractId }}</template>
-            <template v-else>✗ {{ item.error || '失败' }}</template>
-          </span>
+          <el-tag v-if="item.status === 'pending'" size="small" effect="plain" class="batch-tag">待上传</el-tag>
+          <el-tag v-else-if="item.status === 'uploading'" type="warning" size="small" effect="light" class="batch-tag">上传中…</el-tag>
+          <el-tag v-else-if="item.status === 'success'" type="success" size="small" effect="light" class="batch-tag">✓ #{{ item.contractId }}</el-tag>
+          <el-tag v-else type="danger" size="small" effect="dark" class="batch-tag">✗ {{ item.error || '失败' }}</el-tag>
           <el-button v-if="item.status === 'pending'" size="small" :icon="'Delete'" circle plain
             @click="removeBatchItem(i)" />
         </div>
@@ -488,6 +535,15 @@ function closeBatch() {
 
       <template #footer>
         <el-button @click="closeBatch">关闭</el-button>
+        <!-- A6：上传成功后一键触发全部审查 -->
+        <el-button
+          v-if="batchSuccessIds.length"
+          type="warning"
+          :loading="batchAuditing"
+          @click="startBatchAudit"
+        >
+          一键触发全部审查（{{ batchSuccessIds.length }} 份）
+        </el-button>
         <el-button
           type="primary"
           :loading="batchUploading"
@@ -636,9 +692,18 @@ function closeBatch() {
   gap: 8px;
   margin-bottom: 12px;
 }
+.panel-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ivory);
+  letter-spacing: 0.02em;
+  font-family: var(--serif);
+}
 .col-head h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ivory);
 }
 .risk-list {
   display: flex;
@@ -703,6 +768,11 @@ function closeBatch() {
   color: var(--brass);
   font-size: 16px;
   opacity: 0.5;
+}
+/* 已复核（confirmed/ignored）的风险卡片：透明度降低，视觉退后 */
+.risk-card.reviewed {
+  opacity: 0.5;
+  background: var(--ink-3);
 }
 .risk-card {
   border: 1px solid var(--line);
@@ -814,11 +884,8 @@ function closeBatch() {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.batch-status { flex: none; font-size: 12px; }
-.batch-status.pending  { color: var(--muted); }
-.batch-status.uploading { color: var(--amber); }
-.batch-status.success  { color: var(--sage); }
-.batch-status.failed   { color: var(--seal); }
+.batch-tag { flex: none; }
+.failed-item { background: var(--seal-soft) !important; }
 .batch-summary {
   font-size: 12px;
   color: var(--muted);
