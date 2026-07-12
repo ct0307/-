@@ -6,6 +6,163 @@
 
 ---
 
+## 2026-07-12 · RAG 知识库扩充（567 → 644 条）（✅ 已完成）
+
+### 新增内容
+| 批次 | 文件 | 分类 | 新增条数 |
+|---|---|---|---|
+| 1 | 知识产权条款风险规则.txt | 风险规则 | +12 |
+| 2 | 违约金与赔偿责任风险规则.txt | 风险规则 | +10 |
+| 3 | 劳动合同法关键条款.txt | 法律法规 | +17 |
+| 4 | 个人信息保护法关键条款.txt | 法律法规 | +10 |
+| 5 | 软件开发IT服务合同标准条款.txt | 标准条款 | +12 |
+| 6 | 数据安全法关键条款.txt | 法律法规 | +8 |
+| 7 | 采购合同标准条款.txt | 标准条款 | +8 |
+
+### 最终知识库统计
+| 分类 | 条数 |
+|---|---|
+| 法律法规 | 578 |
+| 标准条款 | 29 |
+| 风险规则 | 33 |
+| 典型案例 | 4 |
+| **合计** | **644** |
+
+### 覆盖场景
+- 劳务派遣/外包合同 → 劳动合同法
+- 软件开发/IT服务合同 → IP归属、SLA、验收标准
+- 采购合同 → 交货验收、质保、付款条件
+- 数据合规合同 → 个人信息保护法、数据安全法
+- 违约责任精细化 → 违约金上限、定金规则、情势变更
+
+---
+
+## 2026-07-12 · P2 九项缺陷修复（✅ 已完成）
+
+### 改动
+| 编号 | 文件 | 内容 |
+|---|---|---|
+| **L1** | `LoginView.vue` | `el-form` 绑定 `:model` + `:rules` + `ref="formRef"`；两个 `el-form-item` 加 `prop`；`onSubmit` 改用 `formRef.validate()` 校验，空字段在输入框下方显示红色 inline 提示 |
+| **A5** | `AuditView.vue` | 已复核卡片 `.review-cta` 文字由固定"进入复核 →"改为条件渲染（已复核显示"查看详情 →"，未复核显示"进入复核 →"）；删除隐藏 `.review-cta` 的 CSS |
+| **A6** | `AuditView.vue` | 新增 `batchAuditing`/`batchSuccessIds`/`startBatchAudit`；批量上传成功后对话框底部出现"一键触发全部审查（N份）"按钮，逐一调 `/contracts/{id}/audit` |
+| **C2** | `CollaborationView.vue` | 红档 tier-btn 用 `el-tooltip` 包裹，`disabled` 时提示"当前无红档风险，无需发起三方会审" |
+| **H2** | `HistoryView.vue` | 引入 `useRouter`，添加 `goAudit()`；风险详情抽屉加 `#footer` 插槽，内含"前往审查页复核 →"全宽按钮 |
+| **R1/R2** | `RectifyView.vue` | 工具栏加搜索框（合同名/风险/责任人）；`filtered` computed 加关键词过滤；新增 `paged` computed + `el-pagination`（pageSize=10） |
+| **R3** | `RectifyView.vue` | `advance()` 对 `已闭环→待处理` 流转加 `ElMessageBox.confirm` 二次确认 |
+| **AD1/AD2** | `AdminView.vue` | 审计日志 Tab 工具栏加 `el-date-picker` 时间范围筛选；`filteredLogs` 加日期过滤；新增 `logPage`/`logPageSize` + `el-pagination`（pageSize=20） |
+| **K2** | `backend/knowledge.py` + `api/knowledge.ts` + `KnowledgeView.vue` | 后端加 `DELETE /knowledge/{id}`（仅 admin）；前端加 `deleteKnowledge()` API；知识卡片头部加删除按钮（仅 admin 可见，`@click.stop` 阻止冒泡） |
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+
+---
+
+## 2026-07-12 · P1 五项缺陷修复（✅ 已完成）
+
+### 改动
+| 编号 | 文件 | 改动内容 |
+|---|---|---|
+| A1 | `frontend/src/views/AuditView.vue` | `auditState = 'idle'` → `auditState.value = 'idle'`（Vue3 ref 赋值 bug，补 .value） |
+| A2 | `frontend/src/views/AuditView.vue` | 新增 `cancelUpload()` 函数：`ElMessageBox.confirm` 二次确认后再 `session.reset()`，防误触清空审查结果 |
+| RP1 | `frontend/src/views/ReportsView.vue` | 金额范围 `el-select` 改为 `disabled` + `el-tooltip` 说明"合同金额为自然语言文本，暂不支持数值范围筛选"；清理多余 option |
+| RU1 | `frontend/src/views/RulesView.vue` | 内置规则/模板删除按钮加 `v-if="r.builtin"` 分支：内置条目按钮 `disabled` + tooltip"不可删除"，自定义条目保留点击逻辑 |
+| RU2 | `frontend/src/views/RulesView.vue` | 新增规则表单"审查维度"从自由 `el-input` 改为 `el-select`，8个选项与 AuditView 维度枚举完全对齐 |
+
+### 说明
+W1（WorkbenchView 亮色样式）经核实：路由中无 `/workbench` 路由，该文件未被挂载，属遗留死文件，不影响运行。
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+
+---
+
+## 2026-07-12 · 登录页重构为左右分栏（消除大屏"卡片飘忽"观感）（✅ 已完成）
+
+### 背景
+用户在高分屏（2K）浏览器打开登录页，觉得卡片"飘忽/位置不稳"。排查确认：`.login-wrap` 的 `align-items/justify-content: center` 居中代码正确，卡片实际几乎正好居中——**不是居中 bug**。真正根因是「纯米色空背景无锚点 + 卡片固定 380px 窄」：屏幕越大卡片占比越小、四周留白越大，视觉上越"飘"。修居中无意义，需补视觉重心。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `frontend/src/views/LoginView.vue` | template + style 整体重构为**左右分栏**（script 逻辑零改动）：左品牌区（`--ink` 卷宗米底 + 径向微渐变 + 超大半透明"契"水印 + 印章徽标/系统名/三条卖点/底部 slogan，卖点用印章朱小方块项目符）；右登录区（`--ink-2` 信笺白底，"账号登录"标题 + 表单）。左右用 `flex: 1.15 / 0.85` 填满视口，随屏缩放不再飘。响应式 `@media(max-width:880px)`：品牌区 `display:none`，卡内补精简品牌头（`.card-brand`），"账号登录"标题隐藏避免重复 |
+
+### 验证结论（Playwright 实测三分辨率 + type-check）
+- vue-tsc type-check：exit 0，零类型错误 ✅
+- 1440×900 标准屏：左右分栏、左右内容顶端对齐、重心稳 ✅
+- 2000×1150 超宽屏（用户 2K 场景）：两栏填满视口，卡片不再飘 ✅
+- 460×860 窄屏：品牌区收起、卡内品牌头出现、表单 340px 居中 ✅
+- 登录功能未受影响：legal 账号 Enter 提交 → 跳转 /dashboard，0 console errors ✅
+
+---
+
+## 2026-07-11 · RAG 检索来源溯源（rag_sources）验证收尾 + 脱敏路径补全（✅ 已完成）
+
+### 背景
+上一轮已把「每条风险携带 RAG 检索来源、前端 RiskReviewDrawer 溯源展示」的 7 处改动写入代码（auditor 收集 rag_items → runner 落库 → Risk 模型加列 → RiskOut field_validator → types.ts → RiskReviewDrawer 展示区）。本轮做端到端验证并修复验证中发现的问题。
+
+### 验证中发现并修复的 3 件事
+| # | 问题 | 处理 |
+|---|---|---|
+| 1 | 临时验证脚本 `_verify_rag.py` 连错库（`storage/contracts.db` 空库，后端实际用 `a03_dev.db`），导致「DB 列检查」假阴性 | 先修库路径确认迁移成功，验证完删除脚本 |
+| 2 | API 响应缺 `rag_sources` 字段：后端进程是改 schema 前启动的旧进程 | 重启后端加载新 `RiskOut`，字段生效 |
+| 3 | **`masking.py` 脱敏路径遗漏**：business 角色手工构造 dict 时漏了 rag_sources，business 用户永远看不到检索来源（其他角色正常） | 方案 A 修复：dict 补 `"rag_sources": json.loads(risk.rag_sources or "[]")`，与全访问路（RiskOut validator）输出一致 |
+
+### 涉及文件
+| 文件 | 改动 |
+|---|---|
+| `backend/app/services/masking.py` | 顶部 `import json`；business 脱敏 dict 补 `rag_sources`（反序列化为 list，空值兜底 `[]`）|
+| `backend/_verify_rag.py` | 修库路径 bug 后删除（临时脚本）|
+
+### 验证结论
+- DB 迁移：`a03_dev.db` risks 表含 `rag_sources` 列，99 条历史数据 ✅
+- API 字段：重启后 legal 全访问路返回 `rag_sources` ✅
+- 端到端填充：重新审查 contract 33 → 7/7 风险带真实来源，每条 8 个来源，引用民法典第585条 + 检索 score，双 Agent 协同触发 X1 交叉验证（真实 DeepSeek 路）✅
+- masking 单测：business 得 list 类型来源 / legal 对象不受影响 / 空值兜底 `[]` 三项全过 ✅
+- business 端到端：部门隔离后见 3 条采购中心合同，contract 5 风险响应含 `rag_sources` 键、类型 list、原文脱敏正常、不崩 ✅
+
+### 遗留说明
+- 99 条历史风险 `rag_sources` 均为空 `[]`（改动前生成），仅重新审查的合同才填充真实来源，属预期。
+
+---
+
+## 2026-07-11 · 用户视角 UI 打磨（5 个页面，P1-P3 全部改动）（✅ 已完成）
+
+### 背景
+基于老师"从用户角度出发精益求精"的方向，全量扫描高频页面后发现 8 个问题，按优先级全部修复。
+
+### 改动
+| 文件 | 改动内容 |
+|---|---|
+| `plugins/icons.ts` | 新增注册 `ArrowRight`、`QuestionFilled` |
+| `views/RectifyView.vue` | rk-card 加 class（rk-pending→`--seal`，rk-processing→`--amber`，rk-done→`--sage`）；逾期截止日加 `overdue` 红色高亮 |
+| `views/AuditView.vue` | 新增 `sortedRisks` computed（待复核高风险在前，已处理沉底）；已复核卡片加 `reviewed` class（opacity:0.5，隐藏"进入复核"CTA）|
+| `components/audit/RiskReviewDrawer.vue` | 章节标题 h4 字号 12→13px；置信度补 `%` 单位 |
+| `views/HistoryView.vue` | 抽屉内 basis/suggest 颜色升 `--ivory-dim`；表格最后加箭头列（hover 变金色，明示行可点击）|
+| `views/DashboardView.vue` | KPI `trend` 文字替换为 `?` tooltip hint（口径说明更友好）；待办总数显示真实待处理数，超过5条提示"仅显示前5" |
+
+### 验证结论
+- vue-tsc type-check 零错误 ✅
+- 8 个问题点全部覆盖 ✅
+
+---
+
+## 2026-07-11 · UI 细节规范化（模块标题 + 协同字号 + 批量状态标识）（✅ 已完成）
+
+### 背景
+老师评审意见：合同审查页模块名颜色/粗细/大小不一致、各模块缺少醒目标题；多智能体协同页字体偏小；批量审查队列完成/失败标识不清晰。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `frontend/src/views/AuditView.vue` | ① `upload-panel` / `result-panel` 补 `<template #header>`（"合同上传"/"智能审查结果"），`config-panel` header 套统一 `.panel-title` 类；② 新增 `.panel-title` 样式（14px / font-weight:600 / serif / `--ivory`），与三个卡片头部对齐；③ `col-head h2` 从 15px 收拢到 14px+600+`--ivory`，与 panel-title 视觉一致；④ `batch-status` span 替换为 `el-tag`（pending=plain / uploading=warning·light / success=success·light / failed=danger·dark），failed 行整行加 `--seal-soft` 背景 |
+| `frontend/src/views/CollaborationView.vue` | `agent-section h4` 12→13px、color 升 `--ivory`；`.chip` 11→12px；`agent-mini-kpis span` 11→12px；`tier-meta` 11.5→12px；`cross-body p` line-height 1.6→1.7 |
+
+### 验证结论
+- vue-tsc type-check 零错误 ✅
+- 三处面向评审的改进点全部落地：标题统一醒目、协同字号上调、失败状态视觉容器化 ✅
+
+---
+
 ## 2026-07-09 · RAG 混合检索（BM25 + 向量 RRF 融合）（✅ 已完成）
 
 ### 背景

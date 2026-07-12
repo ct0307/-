@@ -9,6 +9,7 @@
 - 各端点显式调用，行为可审计
 - 脱敏后字段用标记 [已脱敏] 说明，满足"可解释"要求
 """
+import json
 
 
 def is_full_access(role: str) -> bool:
@@ -66,6 +67,9 @@ def apply_risk_masking(risk: dict | object, role: str) -> dict:
             "confidence": risk.confidence,
             "tier": risk.tier,
             "review_status": risk.review_status,
+            # rag_sources 是公开法条来源、非敏感数据，business 也应可见。
+            # DB 里存 JSON 字符串，此处反序列化为 list，与全访问路（RiskOut validator）输出一致。
+            "rag_sources": json.loads(risk.rag_sources or "[]"),
         }
     else:
         d = dict(risk)

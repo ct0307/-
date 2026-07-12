@@ -48,6 +48,7 @@ class Risk(Base):
     confidence: Mapped[int] = mapped_column(Integer, default=0)  # 置信度 0-100
     tier: Mapped[str] = mapped_column(String(8), default="yellow")  # 人工干预档位：green/yellow/red
     review_status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/confirmed/ignored/to_modify
+    rag_sources: Mapped[str] = mapped_column(Text, default="[]")   # JSON: [{content, source, score}]，RAG 检索溯源
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     contract: Mapped["Contract"] = relationship(back_populates="risks")

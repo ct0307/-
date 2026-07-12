@@ -45,6 +45,7 @@ def run_audit(db: Session, contract: Contract) -> dict:
             confidence=r["confidence"],
             tier=r.get("tier", "yellow"),
             review_status="pending",
+            rag_sources=json.dumps(r.get("rag_sources", []), ensure_ascii=False),
         ))
     contract.status = "done"
     db.commit()

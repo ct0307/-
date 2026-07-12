@@ -38,7 +38,10 @@ def init_db() -> None:
 # 开发期轻量补列：create_all 只建表不改已有表结构。SQLite 无 alembic 时，
 # 检测到 risks 缺少新增列则 ADD COLUMN，避免删库。生产（PostgreSQL）走 alembic 迁移。
 _DEV_COLUMNS = {
-    "risks": [("tier", "VARCHAR(8) DEFAULT 'yellow'")],
+    "risks": [
+        ("tier", "VARCHAR(8) DEFAULT 'yellow'"),
+        ("rag_sources", "TEXT DEFAULT '[]'"),   # RAG 检索溯源：结构化来源列表
+    ],
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
     "contracts": [("elements_json", "TEXT DEFAULT '{}'")],
 }

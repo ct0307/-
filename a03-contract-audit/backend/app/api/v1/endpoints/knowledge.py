@@ -330,3 +330,18 @@ def knowledge_stats(
     # 四类固定顺序输出，无数据补 0，保证前端四张统计卡不塌
     order = ["law", "template", "rule", "case"]
     return [{"cat": _CAT_LABEL[k], "count": rows.get(k, 0)} for k in order]
+
+
+@router.delete("/{chunk_id}")
+def delete_knowledge(
+    chunk_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(["admin"])),
+) -> dict:
+    """删除单条知识库条目（仅 admin）。"""
+    chunk = db.query(KnowledgeChunk).filter(KnowledgeChunk.id == chunk_id).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
+    db.delete(chunk)
+    db.commit()
+    return {"deleted": chunk_id}

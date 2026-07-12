@@ -163,12 +163,14 @@ def _agent_audit(
     # 该角色关注维度的定向 RAG 依据
     seen: set[str] = set()
     basis_lines: list[str] = []
+    rag_items: list[dict] = []   # 结构化来源列表，供溯源展示（不影响 basis 字符串格式）
     for topic in cfg["topics"]:
         for item in retrieve(topic, top_k=2):
             key = item["source"] + item["content"][:20]
             if key not in seen:
                 seen.add(key)
                 basis_lines.append(f"- {item['content']}（依据：{item['source']}）")
+                rag_items.append({"content": item["content"], "source": item["source"], "score": item["score"]})
     basis_block = "\n".join(basis_lines) if basis_lines else "（无检索到的依据，请基于通用合同合规常识判断并说明）"
 
     system_prompt = (
@@ -207,7 +209,11 @@ def _agent_audit(
     # 记录本次 LLM 调用（provider/model/token/latency），供可解释性溯源与算力对比
     _record_llm_call(db, contract_id, agent=role, resp=resp, mode="llm")
     raw = _parse_risk_json(resp.text)
-    return [_normalize(r, role) for r in raw]
+    normalized = [_normalize(r, role) for r in raw]
+    # 注入结构化 RAG 来源（每条风险共享同一次检索来源，供前端溯源展示）
+    for r in normalized:
+        r["rag_sources"] = rag_items
+    return normalized
 
 
 def _parse_risk_json(text: str) -> list[dict]:

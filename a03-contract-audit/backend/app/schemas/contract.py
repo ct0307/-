@@ -2,7 +2,7 @@
 import json
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class RiskOut(BaseModel):
@@ -16,8 +16,23 @@ class RiskOut(BaseModel):
     confidence: int
     tier: str  # 人工干预档位：green/yellow/red
     review_status: str
+    rag_sources: list[dict] = []   # RAG 检索来源：[{content, source, score}]
 
     model_config = {"from_attributes": True}
+
+    @field_validator('rag_sources', mode='before')
+    @classmethod
+    def _parse_rag_sources(cls, v):
+        """rag_sources 在 DB 里存 JSON 字符串，field_validator 读时自动反序列化。"""
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v) if v else []
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return []
+        if v is None:
+            return []
+        return v if isinstance(v, list) else []
 
 
 class CrossCheckOut(BaseModel):
