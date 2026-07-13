@@ -1,4 +1,12 @@
 """FastAPI 应用入口。"""
+import os
+
+# Embedding 离线策略：禁止 huggingface 库在运行时联网验证模型文件。
+# 模型已本地缓存（bge-small-zh-v1.5），联网验证只会超时拖慢首次请求。
+# 必须在任何 transformers/sentence_transformers import 之前设置。
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
