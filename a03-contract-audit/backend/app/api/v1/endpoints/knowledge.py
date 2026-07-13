@@ -441,19 +441,19 @@ async def import_knowledge_file(
     kept, skipped = (chunks, 0) if overwrite else _dedup_chunks(chunks, db)
     count = _do_index(kept, db) if kept else 0
 
-    # 重叠预警：同分类下其他来源条数超过阈值，提示可能存在语义重叠
-    overlap_warning: str | None = None
-    other_sources_count = (
-        db.query(func.count(KnowledgeChunk.id))
-        .filter(KnowledgeChunk.category == final_category, KnowledgeChunk.source != source)
-        .scalar() or 0
-    )
-    if count > 0 and other_sources_count > 100:
-        overlap_warning = (
-            f"当前分类「{_CAT_LABEL.get(final_category, final_category)}」"
-            f"库中已有来自其他来源的 {other_sources_count} 条，"
-            f"可能存在语义重叠，建议确认是否重复导入同一法律/文件。"
+    # 重叠预警：通过条文编号对比（精确），兜底用同分类条数阈值
+    overlap_warning = _check_article_overlap(split.chunks, final_category, source, db)
+    if not overlap_warning:
+        other_count = (
+            db.query(func.count(KnowledgeChunk.id))
+            .filter(KnowledgeChunk.category == final_category, KnowledgeChunk.source != source)
+            .scalar() or 0
         )
+        if count > 0 and other_count > 200:
+            overlap_warning = (
+                f"当前分类「{_CAT_LABEL.get(final_category, final_category)}」"
+                f"库中已有来自其他来源的 {other_count} 条，请确认是否与本次导入存在语义重叠。"
+            )
 
     # 过滤占位符数量
     filtered_placeholders = split.filtered_placeholders
@@ -484,7 +484,52 @@ async def import_knowledge_file(
     }
 
 
-def _chips_for(cat_label: str, source: str) -> list[str]:
+def _check_article_overlap(chunks: list[str], category: str, source: str, db: Session) -> str | None:
+    """通过条文编号检测内容重叠：提取新切片的「第X条」编号集，与库中同分类条目对比。
+
+    重叠率 > 50% → 同一法律已在库中，给出精确来源提示（精确到已有哪个文件）。
+    比文件名关键词匹配更可靠：直接看内容结构，不依赖文件命名规范。
+    """
+    # 提取新切片的条文编号集
+    _ART_NUM_RE = re.compile(r"第([一二三四五六七八九十百千零两\d]{1,7})条")
+    new_articles: set[str] = set()
+    for chunk in chunks:
+        for m in _ART_NUM_RE.finditer(chunk):
+            new_articles.add(m.group(1))
+
+    if len(new_articles) < 5:  # 条文数太少（段落文本、规则等），不做条文级对比
+        return None
+
+    # 查库里同分类的条文编号分布（按source统计）
+    existing = (
+        db.query(KnowledgeChunk.source, KnowledgeChunk.content)
+        .filter(KnowledgeChunk.category == category, KnowledgeChunk.source != source)
+        .all()
+    )
+
+    # 统计每个source与新文件的条文编号重叠数
+    source_overlap: dict[str, int] = {}
+    for row_source, content in existing:
+        for m in _ART_NUM_RE.finditer(content):
+            art_num = m.group(1)
+            if art_num in new_articles:
+                source_overlap[row_source] = source_overlap.get(row_source, 0) + 1
+
+    if not source_overlap:
+        return None
+
+    # 找重叠最多的来源，计算重叠率
+    top_source = max(source_overlap, key=lambda k: source_overlap[k])
+    overlap_count = source_overlap[top_source]
+    overlap_ratio = overlap_count / len(new_articles)
+
+    if overlap_ratio >= 0.5:
+        return (
+            f"检测到库中「{top_source}」与本文件有 {overlap_count} 个相同条文编号"
+            f"（重叠率 {overlap_ratio:.0%}），可能是同一法律的不同版本。"
+            f"建议先删除旧版本或开启「覆盖同名旧数据」。"
+        )
+    return None
     """卡片标签：分类中文 + 来源关键片段。"""
     chips = [cat_label]
     # 从来源名里取书名号内内容或末段作为第二个 chip
