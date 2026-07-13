@@ -17,18 +17,34 @@ from app.services.rag.retriever import index_documents
 
 router = APIRouter()
 
-# 切片长度上限（字符）：过长段落再按句号切，兼顾 embedding 质量与检索粒度。
-_MAX_CHUNK_CHARS = 500
-# 切片长度下限（字符）：短于此的碎片视为噪音丢弃（页码、孤立标点等）。
-_MIN_CHUNK_CHARS = 8
+# 切片长度上限（字符）：bge-small-zh 有效窗口约 400 中文字符，留 20 字余量。
+_MAX_CHUNK_CHARS = 380
+# 切片长度下限（字符）：短于此的碎片视为噪音丢弃。
+_MIN_CHUNK_CHARS = 20
 
-# 法条条文起始标记：「第X条」，X 支持中文数字或阿拉伯数字。
-# 用于识别法规文本并按条文边界切割，保留单条法条的完整语义。
-# 行首锚定（MULTILINE + ^\s*）：只把「行首」的第X条当条文边界，
-# 避免正文里的交叉引用（如「依照本法第五百零九条规定」）被误判为新条文起点。
+# 法条条文起始标记：「第X条」，行首锚定防交叉引用误判。
 _ARTICLE_RE = re.compile(r"^[\t 　]*第[一二三四五六七八九十百千零两\d]{1,7}条", re.MULTILINE)
 
-# 纯噪音行判定：页码（- 3 -/第3页/共10页/3/25）、纯符号、单字等。
+# 章节标题标记：「第X章/编/节 标题」，用于为法条切片附加章节上下文。
+_CHAPTER_RE = re.compile(
+    r"^[\t 　]*第[一二三四五六七八九十百千零两\d]{1,5}[章编节篇][^\n]{0,30}$",
+    re.MULTILINE,
+)
+
+# 款项编号标记：合同模板常见的多级编号格式。
+# 匹配：1.1 / 1.1.1 / 一、 / （一） / (1) / 1、
+# ≥3 命中才认定为款项模式，避免把普通段落里偶发数字误触发。
+_CLAUSE_RE = re.compile(
+    r"^[\t 　]*("
+    r"\d+\.\d+(?:\.\d+)?[\s　]"    # 1.1  1.1.1
+    r"|[一二三四五六七八九十]+[、]"  # 一、 二、
+    r"|[（(][一二三四五六七八九十百\d]+[）)]"  # （一）(1)
+    r"|\d+[、]"                     # 1、
+    r")",
+    re.MULTILINE,
+)
+
+# 纯噪音行判定：页码（- 3 -/第3页/共10页/3/25）、纯符号等。
 _NOISE_LINE_RE = re.compile(
     r"^(?:[-—\s]*第?\s*\d+\s*[页/-]?\s*(?:页|共\s*\d+\s*页)?[-—\s]*|\d+\s*/\s*\d+|[\s\W_]+)$"
 )
@@ -64,20 +80,57 @@ def _clean_lines(text: str) -> str:
 
 
 def _split_by_article(text: str) -> list[str] | None:
-    """尝试按「第X条」条文边界切割。若文本中 ≥2 条命中，返回切割结果；否则返回 None（降级）。"""
-    # 找出所有条文起始位置
-    matches = list(_ARTICLE_RE.finditer(text))
-    if len(matches) < 2:
+    """按「第X条」边界切割，每条前缀最近章节标题以补充上下文。
+
+    例：【第三章 违约责任】\n第五十八条 当事人可以…
+    ≥2 条命中才启动，否则返回 None 降级。
+    """
+    article_matches = list(_ARTICLE_RE.finditer(text))
+    if len(article_matches) < 2:
         return None
-    # 按条文边界切：从每个「第X条」开始到下一个「第X条」前结束
+
+    # 章节标题位置表：(offset, 标题文本)
+    chapters: list[tuple[int, str]] = [
+        (m.start(), m.group(0).strip()) for m in _CHAPTER_RE.finditer(text)
+    ]
+
     articles: list[str] = []
+    for i, m in enumerate(article_matches):
+        start = m.start()
+        end = article_matches[i + 1].start() if i + 1 < len(article_matches) else len(text)
+        chunk = text[start:end].strip()
+        if not chunk:
+            continue
+
+        # 找最近的前置章节标题（倒序找第一个 offset < start 的）
+        prefix = ""
+        for ch_pos, ch_title in reversed(chapters):
+            if ch_pos < start:
+                prefix = f"【{ch_title}】\n"
+                break
+
+        articles.append(prefix + chunk)
+    return articles
+
+
+def _split_by_clause(text: str) -> list[str] | None:
+    """按合同款项编号边界切割（1.1 / 一、 / （一） 等）。
+
+    ≥3 命中才启动，避免普通段落偶发数字误触发。
+    返回 None 则降级到段落切割。
+    """
+    matches = list(_CLAUSE_RE.finditer(text))
+    if len(matches) < 3:
+        return None
+
+    clauses: list[str] = []
     for i, m in enumerate(matches):
         start = m.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         chunk = text[start:end].strip()
         if chunk:
-            articles.append(chunk)
-    return articles
+            clauses.append(chunk)
+    return clauses
 
 
 def _split_paragraph(text: str) -> list[str]:
@@ -101,47 +154,87 @@ def _split_paragraph(text: str) -> list[str]:
 
 class SplitResult:
     """智能切片结果，携带模式元信息供前端展示。"""
-    __slots__ = ("chunks", "mode", "article_count", "paragraph_count")
+    __slots__ = ("chunks", "mode", "article_count", "paragraph_count", "filtered_placeholders")
 
-    def __init__(self, chunks: list[str], mode: str, article_count: int, paragraph_count: int):
+    def __init__(self, chunks: list[str], mode: str, article_count: int, paragraph_count: int, filtered_placeholders: int = 0):
         self.chunks = chunks
         self.mode = mode
         self.article_count = article_count
         self.paragraph_count = paragraph_count
+        self.filtered_placeholders = filtered_placeholders
+
+
+# 占位符模式：「第X条 章节标题第X条内容」格式——自动生成的假条文，无实质法律内容。
+# 匹配：「第96条 附则第96条内容」「第51条 特别规定第51条内容」等。
+_PLACEHOLDER_RE = re.compile(
+    r"^第[一二三四五六七八九十百千零两\d]{1,7}[条款项]\s+[^\n]{0,30}第[一二三四五六七八九十百千零两\d]{1,7}[条款项]内容\s*$"
+)
+
+
+def _is_placeholder(chunk: str) -> bool:
+    """判断切片是否为占位文本（自动生成、无语义价值）。"""
+    return bool(_PLACEHOLDER_RE.match(chunk.strip()))
 
 
 def _smart_split(text: str) -> SplitResult:
-    """智能切片：法条识别优先 → 降级段落 → 清洗碎片。
+    """智能切片三条路径：法条 → 款项 → 段落，逐级降级。
 
-    返回 SplitResult（含切片列表 + 模式元信息）。
+    最终过滤：长度 < _MIN_CHUNK_CHARS 的碎片 + 占位符条文。
+    返回 SplitResult（含切片列表 + 模式元信息 + 过滤掉的占位符数）。
     """
     cleaned = _clean_lines(text)
     if not cleaned.strip():
         return SplitResult([], "empty", 0, 0)
 
-    # 尝试条文切割
+    def _filter(chunks: list[str]) -> tuple[list[str], int]:
+        """过滤碎片和占位符，返回 (保留列表, 被过滤占位符数)。"""
+        kept, placeholder_count = [], 0
+        for c in chunks:
+            if len(c) < _MIN_CHUNK_CHARS:
+                continue
+            if _is_placeholder(c):
+                placeholder_count += 1
+                continue
+            kept.append(c)
+        return kept, placeholder_count
+
+    # 路径 1：法规法条模式（第X条边界 + 章节前缀）
     articles = _split_by_article(cleaned)
     if articles is not None:
-        # 条文模式：超长条文再做二级切割
         final: list[str] = []
         for art in articles:
             if len(art) <= _MAX_CHUNK_CHARS:
                 final.append(art)
             else:
                 final.extend(_split_paragraph(art))
-        # 过滤碎片
-        final = [c for c in final if len(c) >= _MIN_CHUNK_CHARS]
-        return SplitResult(final, "article", len(articles), 0)
+        final, ph = _filter(final)
+        return SplitResult(final, "article", len(articles), 0, ph)
 
-    # 降级到通用段落切割
+    # 路径 2：合同款项模式（1.1 / 一、 / （一）编号边界）
+    clauses = _split_by_clause(cleaned)
+    if clauses is not None:
+        final = []
+        for cl in clauses:
+            if len(cl) <= _MAX_CHUNK_CHARS:
+                final.append(cl)
+            else:
+                final.extend(_split_paragraph(cl))
+        final, ph = _filter(final)
+        return SplitResult(final, "clause", 0, len(final), ph)
+
+    # 路径 3：通用段落切割
     chunks = _split_paragraph(cleaned)
-    # 过滤碎片
-    chunks = [c for c in chunks if len(c) >= _MIN_CHUNK_CHARS]
-    return SplitResult(chunks, "paragraph", 0, len(chunks))
+    chunks, ph = _filter(chunks)
+    return SplitResult(chunks, "paragraph", 0, len(chunks), ph)
 
 
 async def _extract_file_text(file: UploadFile) -> str:
-    """从上传文件提取纯文本。支持 txt / docx / pdf。"""
+    """从上传文件提取纯文本。支持 txt / docx / pdf。
+
+    docx：按文档顺序合并段落 + 表格（表格单元格用「|」分隔），避免表格条款丢失。
+    pdf ：pdfplumber 文字提取；扫描件（extract_text 返回空）抛 400 明确提示。
+    txt ：utf-8 / gbk / utf-8-sig 三编码兜底。
+    """
     raw = await file.read()
     fname = (file.filename or "").lower()
 
@@ -157,7 +250,18 @@ async def _extract_file_text(file: UploadFile) -> str:
         try:
             from docx import Document  # python-docx
             doc = Document(io.BytesIO(raw))
-            return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            parts: list[str] = []
+            # 1. 主体段落（按文档顺序）
+            for p in doc.paragraphs:
+                if p.text.strip():
+                    parts.append(p.text.strip())
+            # 2. 表格（每行单元格以「|」拼接，行间空行分隔）
+            for tbl in doc.tables:
+                for row in tbl.rows:
+                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if cells:
+                        parts.append(" | ".join(cells))
+            return "\n\n".join(parts)
         except Exception as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"docx 解析失败：{exc}") from exc
 
@@ -166,7 +270,15 @@ async def _extract_file_text(file: UploadFile) -> str:
             import pdfplumber
             with pdfplumber.open(io.BytesIO(raw)) as pdf:
                 pages = [p.extract_text() or "" for p in pdf.pages]
-            return "\n\n".join(t for t in pages if t.strip())
+            text = "\n\n".join(t for t in pages if t.strip())
+            if not text.strip():
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "PDF 未能提取到文字（可能是扫描件/图像 PDF），请转换为文字版 PDF 或 .txt 后重新导入",
+                )
+            return text
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"pdf 解析失败：{exc}") from exc
 
@@ -205,6 +317,45 @@ def _dedup_chunks(chunks: list[dict], db: Session) -> tuple[list[dict], int]:
 def _chunk_key(source: str, content: str) -> str:
     """切片唯一键：source + content 的 MD5，用于去重。"""
     return hashlib.md5(f"{source}\x00{content}".encode("utf-8")).hexdigest()
+
+
+def _detect_category(text: str, split_mode: str) -> str:
+    """基于文本内容和切片模式精确判断知识库分类。
+
+    识别优先级：
+    1. 法条切片模式（split_mode='article'）→ 法律法规，最可靠
+    2. 裁判文书关键词 → 典型案例
+    3. 合同双方结构 → 标准条款
+    4. 审查规则关键词 → 风险规则
+    5. 兜底 → 法律法规
+    """
+    # 最可靠判断：已检出「第X条」法条结构
+    if split_mode == "article":
+        return "law"
+
+    # 取前 2000 字做关键词扫描（性能优先，开头通常最具代表性）
+    sample = text[:2000]
+
+    # 典型案例：案号格式「（2023）粤01民终XXX号」或裁判文书类型词
+    if re.search(r"案\s*号|裁判文书|判\s*决\s*书|裁\s*定\s*书|（\d{4}）.{1,12}[号]", sample):
+        return "case"
+
+    # 标准条款/合同模板：双方角色 + 协议签署结构
+    if re.search(
+        r'甲\s*方.*?乙\s*方|签订本[合协]同|本[合协]议由|特此[协]议|双方协商一致|以下简称[「"]?[甲乙]方',
+        sample,
+    ):
+        return "template"
+
+    # 风险规则：审查规则、合规要求类措辞
+    if re.search(
+        r"风险点|审查要点|注意事项|合规要求|风控规则|应当.*?约定|不得.*?条款|必须.*?明确|建议.*?条款",
+        sample,
+    ):
+        return "rule"
+
+    # 兜底：法律法规（知识库法规占比最大，无特征时最保险）
+    return "law"
 
 
 def _do_index(chunks: list[dict], db: Session) -> int:
@@ -252,39 +403,84 @@ def import_knowledge(
 @router.post("/import-file")
 async def import_knowledge_file(
     file: UploadFile = File(...),
-    category: str = Form("law"),
+    category: str = Form("auto"),
+    overwrite: bool = Form(False),
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("legal", "admin")),
 ) -> dict:
     """上传文件批量导入知识库。支持 .txt / .docx / .pdf。
 
-    智能切片：法规文本按「第X条」条文边界切割（保留单条完整语义），
-    非法规文本降级为段落切割（每片 ≤500字）；两种模式均清洗页码/碎片行。
-    入库前按 source + content 去重，同一文件重复导入不产生重复切片。
+    category 传 "auto"（默认）时自动识别分类：
+    - 检出法条结构（第X条）→ 法律法规
+    - 含裁判文书字样 → 典型案例
+    - 含甲方乙方/签订结构 → 标准条款
+    - 含风险点/审查要点 → 风险规则
+    - 兜底 → 法律法规
+
+    也可显式传 law / rule / template / case 强制指定分类。
     """
     content = await _extract_file_text(file)
     split = _smart_split(content)
     if not split.chunks:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件内容为空或无法提取文本")
 
+    # 自动识别或使用指定分类
+    auto_detect = category == "auto"
+    final_category = _detect_category(content, split.mode) if auto_detect else category
+
     source = file.filename or "未命名文件"
-    chunks = [{"category": category, "source": source, "content": p} for p in split.chunks]
-    kept, skipped = _dedup_chunks(chunks, db)
+
+    # 覆盖模式：先删除同 source 的全部旧切片
+    deleted = 0
+    if overwrite:
+        deleted = db.query(KnowledgeChunk).filter(KnowledgeChunk.source == source).delete()
+        db.commit()
+
+    chunks = [{"category": final_category, "source": source, "content": p} for p in split.chunks]
+    # 覆盖模式下旧数据已删，无需去重；追加模式正常去重
+    kept, skipped = (chunks, 0) if overwrite else _dedup_chunks(chunks, db)
     count = _do_index(kept, db) if kept else 0
+
+    # 重叠预警：同分类下其他来源条数超过阈值，提示可能存在语义重叠
+    overlap_warning: str | None = None
+    other_sources_count = (
+        db.query(func.count(KnowledgeChunk.id))
+        .filter(KnowledgeChunk.category == final_category, KnowledgeChunk.source != source)
+        .scalar() or 0
+    )
+    if count > 0 and other_sources_count > 100:
+        overlap_warning = (
+            f"当前分类「{_CAT_LABEL.get(final_category, final_category)}」"
+            f"库中已有来自其他来源的 {other_sources_count} 条，"
+            f"可能存在语义重叠，建议确认是否重复导入同一法律/文件。"
+        )
+
+    # 过滤占位符数量
+    filtered_placeholders = split.filtered_placeholders
 
     audit_log.record(
         db, user_id=user.id,
         action="import_knowledge_file",
         target=source,
-        detail=f"category={category} mode={split.mode} chunks={count} skipped={skipped}",
+        detail=(
+            f"category={final_category} auto={auto_detect} overwrite={overwrite} "
+            f"deleted={deleted} mode={split.mode} chunks={count} "
+            f"skipped={skipped} placeholders_filtered={filtered_placeholders}"
+        ),
     )
     return {
         "source": source,
-        "category": category,
+        "category": final_category,
+        "detected_category": final_category if auto_detect else None,
+        "auto_detected": auto_detect,
+        "overwrite": overwrite,
+        "deleted_chunks": deleted,
         "imported_chunks": count,
         "skipped_duplicates": skipped,
+        "filtered_placeholders": filtered_placeholders,
         "split_mode": split.mode,
         "article_count": split.article_count,
+        "overlap_warning": overlap_warning,
     }
 
 
@@ -300,16 +496,33 @@ def _chips_for(cat_label: str, source: str) -> list[str]:
 
 @router.get("/cards")
 def knowledge_cards(
+    page: int = Query(1, ge=1, description="页码，从 1 开始"),
+    size: int = Query(24, ge=1, le=100, description="每页条数"),
+    q: str = Query("", description="关键词模糊搜索（source + content）"),
+    category: str = Query("", description="按 category 英文键过滤，空字符串=全部"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
-) -> list[dict]:
-    """知识库卡片列表，形状对齐前端 KnowledgeCard（id/title/cat/desc/chips/date）。"""
-    rows = db.query(KnowledgeChunk).order_by(KnowledgeChunk.created_at.desc()).all()
-    cards: list[dict] = []
+) -> dict:
+    """知识库卡片分页列表。支持关键词搜索与分类过滤。
+    返回 {total, page, size, items}，items 形状对齐前端 KnowledgeCard。
+    """
+    query = db.query(KnowledgeChunk)
+    if q:
+        query = query.filter(
+            KnowledgeChunk.source.contains(q) | KnowledgeChunk.content.contains(q)
+        )
+    if category:
+        query = query.filter(KnowledgeChunk.category == category)
+
+    total: int = query.with_entities(func.count(KnowledgeChunk.id)).scalar() or 0
+    offset = (page - 1) * size
+    rows = query.order_by(KnowledgeChunk.created_at.desc()).offset(offset).limit(size).all()
+
+    items: list[dict] = []
     for c in rows:
         cat_label = _CAT_LABEL.get(c.category, "风险规则")
         desc = c.content if len(c.content) <= _DESC_MAX else c.content[:_DESC_MAX] + "…"
-        cards.append({
+        items.append({
             "id": f"K{c.id:02d}",
             "title": c.source or c.content[:20],
             "cat": cat_label,
@@ -317,7 +530,7 @@ def knowledge_cards(
             "chips": _chips_for(cat_label, c.source),
             "date": c.created_at.strftime("%Y-%m-%d") if c.created_at else "",
         })
-    return cards
+    return {"total": total, "page": page, "size": size, "items": items}
 
 
 @router.get("/stats")
@@ -327,10 +540,28 @@ def knowledge_stats(
 ) -> list[dict]:
     """知识库分类统计，形状对齐前端 KNOWLEDGE_STATS（cat/count）。四类恒定展示。"""
     rows = dict(db.query(KnowledgeChunk.category, func.count(KnowledgeChunk.id)).group_by(KnowledgeChunk.category).all())
-    # 四类固定顺序输出，无数据补 0，保证前端四张统计卡不塌
     order = ["law", "template", "rule", "case"]
     return [{"cat": _CAT_LABEL[k], "count": rows.get(k, 0)} for k in order]
 
+
+@router.get("/{chunk_id}")
+def get_knowledge_detail(
+    chunk_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """单条知识库详情，返回完整 content（不截断）。"""
+    chunk = db.query(KnowledgeChunk).filter(KnowledgeChunk.id == chunk_id).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="知识条目不存在")
+    cat_label = _CAT_LABEL.get(chunk.category, "风险规则")
+    return {
+        "id": chunk.id,
+        "title": chunk.source or chunk.content[:20],
+        "cat": cat_label,
+        "content": chunk.content,
+        "date": chunk.created_at.strftime("%Y-%m-%d") if chunk.created_at else "",
+    }
 
 @router.delete("/{chunk_id}")
 def delete_knowledge(

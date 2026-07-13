@@ -6,6 +6,87 @@
 
 ---
 
+## 2026-07-13 · 导入质量加固：占位符过滤 + 重叠预警（✅ 已完成）
+
+### 背景
+全面检查发现两类冗余来源：① `劳动合同法全文.txt` 含46条无语义占位文本（"第X条附则第X条内容"）；② 民法典PDF+TXT 双份入库（1332条，占总量70%）。根因是导入模块缺乏内容语义过滤和来源冲突提示。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/app/api/v1/endpoints/knowledge.py` | 新增 `_is_placeholder()` + `_PLACEHOLDER_RE`（匹配"第X条附则第X条内容"格式占位符）；`_smart_split` 的 `_filter` 步骤同时过滤碎片和占位符；`/import-file` 响应加 `filtered_placeholders` + `overlap_warning`（同分类其他来源>100条时触发） |
+| `frontend/src/api/knowledge.ts` | `ImportFileResult` 加 `filtered_placeholders`、`overlap_warning` 字段 |
+| `frontend/src/views/KnowledgeView.vue` | `FileItem` 加 `filteredPH`；完成行显示「过滤占位 N」；有 `overlap_warning` 时弹 warning toast（6秒可关） |
+
+### 知识库数据修复（直接SQL）
+| 操作 | 删除数 |
+|---|---|
+| 删空文本碎片（劳动合同法全文.txt <20字占位条文） | 46 条 |
+| 删民法典PDF版（保留TXT精准切片版526条） | 806 条 |
+| 删重复条目（第502条 id=2） | 1 条 |
+| **修复后总量** | **1055 条**，0 碎片，0 空向量 |
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+
+---
+
+## 2026-07-13 · 知识库导入模块多项完善（✅ 已完成）
+
+### 改动汇总
+| 功能 | 文件 | 内容 |
+|---|---|---|
+| **文件夹拖拽** | `KnowledgeView.vue` | 自定义 drop 处理，`webkitGetAsEntry()` 读取文件夹内容，支持拖入整个文件夹批量添加 |
+| **覆盖模式** | `knowledge.py` / `knowledge.ts` / `KnowledgeView.vue` | `/import-file` 加 `overwrite: bool` 参数；覆盖时先 DELETE 同名旧切片；前端加「覆盖同名旧数据」开关，关闭弹窗自动重置 |
+| **UI 美化** | `KnowledgeView.vue` | `:deep(.el-upload)` flex 居中，图标 44px，min-height 148px，hover/dragover 金色边框 |
+| **超时修复** | `knowledge.ts` | `importKnowledgeFile` 设 `timeout: 180_000`，防民法典PDF等大文件 embedding 耗时超 axios 默认 30s |
+| **路由顺序修复** | `knowledge.py` | `GET /stats` 移至 `GET /{chunk_id}` 前，修复 `/stats` 被动态路由拦截返回 422 导致知识库加载失败的 bug |
+| **模板 bug 修复** | `KnowledgeView.vue` | `done` 状态同时显示"待导入"的 v-else 链归属错误，已重构为状态文字链与操作按钮独立 v-if |
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+- 路由修复验证：`/knowledge/stats` 200 OK，`/knowledge/cards` 200 OK ✅
+
+---
+
+## 2026-07-13 · 文字识别与切片策略完善（方案A 五项改进）（✅ 已完成）
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/app/api/v1/endpoints/knowledge.py` | ① `_MAX_CHUNK_CHARS` 500→380；② `_MIN_CHUNK_CHARS` 8→20；③ 新增 `_CHAPTER_RE` + `_CLAUSE_RE`；④ `_split_by_article` 每条携带最近章节前缀；⑤ 新增 `_split_by_clause`（1.1/一、/（一），≥3 触发）；⑥ `_smart_split` 三路降级；⑦ docx 补读表格；⑧ PDF 扫描件空文本 400 明确提示 |
+| `frontend/src/api/knowledge.ts` | `split_mode` 加 `'clause'` |
+| `frontend/src/views/KnowledgeView.vue` | `FileItem.mode` 加 `'clause'`；完成行加「款项切分」标签 |
+
+### 三条切片路径
+| 路径 | 触发条件 | 典型文档 |
+|---|---|---|
+| `article` | `第X条` ≥2 处 | 民法典、劳动法等 |
+| `clause` | `1.1/一、/（一）` ≥3 处 | 合同模板、标准条款 |
+| `paragraph` | 无结构特征 | 风险规则、案例 |
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+
+---
+
+## 2026-07-13 · 知识库模块完善（分页+服务端搜索+详情完整内容+失败重试）（✅ 已完成）
+
+### 背景
+知识库已达 644 条，`/cards` 全量返回+前端渲染 644 张卡片存在性能问题；详情弹窗只显示 120 字截断内容，法务无法查阅完整条文；批量导入失败文件无法单独重试。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/app/api/v1/endpoints/knowledge.py` | `/cards` 加 `page/size/q/category` 四个 Query 参数，返回 `{total,page,size,items}` 分页结构；新增 `GET /{chunk_id}` 返回完整 `content`（不截断） |
+| `frontend/src/api/knowledge.ts` | 新增 `KnowledgeCardsResult` / `KnowledgeDetail` 接口类型；`getKnowledgeCards` 升级为带分页+搜索+分类参数；新增 `getKnowledgeDetail`；mock 模式同步支持分页过滤 |
+| `frontend/src/views/KnowledgeView.vue` | ① 服务端分页：`currentPage/pageSize/total` ref，`el-pagination` 组件；② 分类 chip 改为 `onCatClick()` 触发服务端重载；③ 搜索防抖（400ms）watch；④ 详情弹窗懒加载完整正文（先显示截断摘要，打开后异步拉 `/knowledge/{id}`）；⑤ 失败文件行加「重试」按钮（`retryFile()`）；⑥ 复制条文改用完整正文 |
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+
+---
+
 ## 2026-07-12 · RAG 知识库扩充（567 → 644 条）（✅ 已完成）
 
 ### 新增内容

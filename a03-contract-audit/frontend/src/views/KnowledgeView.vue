@@ -1,8 +1,15 @@
 <script setup lang="ts">
 // 法规知识库(RAG)：搜索 + 分类 chip + 4 统计卡 + 卡片网格 + 关键词高亮 + 详情 + 批量导入。
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getKnowledgeCards, getKnowledgeStats, importKnowledge, importKnowledgeFile, deleteKnowledge } from '@/api/knowledge'
+import {
+  getKnowledgeCards,
+  getKnowledgeStats,
+  getKnowledgeDetail,
+  importKnowledge,
+  importKnowledgeFile,
+  deleteKnowledge,
+} from '@/api/knowledge'
 import type { KnowledgeCard, KnowledgeCat } from '@/mock/knowledge'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -16,6 +23,11 @@ const loading = ref(false)
 const keyword = ref('')
 const activeCat = ref<'全部' | KnowledgeCat>('全部')
 
+// 分页状态
+const currentPage = ref(1)
+const pageSize = ref(24)
+const total = ref(0)
+
 const cats: ('全部' | KnowledgeCat)[] = ['全部', '法律法规', '标准条款', '风险规则', '典型案例']
 const catType: Record<string, 'primary' | 'success' | 'warning' | 'danger' | 'info'> = {
   法律法规: 'primary',
@@ -27,7 +39,14 @@ const catType: Record<string, 'primary' | 'success' | 'warning' | 'danger' | 'in
 async function load() {
   loading.value = true
   try {
-    ;[cards.value, stats.value] = await Promise.all([getKnowledgeCards(), getKnowledgeStats()])
+    const cat = activeCat.value === '全部' ? '' : catKeyMap[activeCat.value]
+    const [cardsResult, statsResult] = await Promise.all([
+      getKnowledgeCards(currentPage.value, pageSize.value, keyword.value.trim(), cat),
+      getKnowledgeStats(),
+    ])
+    cards.value = cardsResult.items
+    total.value = cardsResult.total
+    stats.value = statsResult
   } catch {
     ElMessage.error('知识库加载失败')
   } finally {
@@ -36,15 +55,23 @@ async function load() {
 }
 onMounted(load)
 
-const filtered = computed(() => {
-  const kw = keyword.value.trim()
-  return cards.value.filter((c) => {
-    const catOk = activeCat.value === '全部' || c.cat === activeCat.value
-    const kwOk =
-      !kw || c.title.includes(kw) || c.desc.includes(kw) || c.chips.some((t) => t.includes(kw))
-    return catOk && kwOk
-  })
+// 搜索防抖：400ms 后重新请求
+let _searchTimer: ReturnType<typeof setTimeout> | null = null
+watch(keyword, () => {
+  if (_searchTimer) clearTimeout(_searchTimer)
+  _searchTimer = setTimeout(() => {
+    currentPage.value = 1
+    load()
+  }, 400)
 })
+
+function onPageChange(page: number) {
+  currentPage.value = page
+  load()
+}
+
+// 服务端分页+过滤，前端只对当前页做关键词高亮
+// highlight 复用 keyword 即可，不需要 filtered computed
 
 // 关键词命中高亮
 function highlight(text: string): string {
@@ -56,13 +83,30 @@ function highlight(text: string): string {
 // 详情
 const detailOpen = ref(false)
 const active = ref<KnowledgeCard | null>(null)
-function openDetail(c: KnowledgeCard) {
+const detailContent = ref('')     // 完整正文（懒加载）
+const detailLoading = ref(false)
+
+async function openDetail(c: KnowledgeCard) {
   active.value = c
+  detailContent.value = c.desc   // 先显示截断摘要，避免白屏
   detailOpen.value = true
+  // 懒加载完整内容
+  const numId = parseInt(c.id.replace(/\D/g, ''))
+  if (!numId) return
+  detailLoading.value = true
+  try {
+    const detail = await getKnowledgeDetail(numId)
+    detailContent.value = detail.content
+  } catch {
+    // 失败时保留截断摘要，不弹错误
+  } finally {
+    detailLoading.value = false
+  }
 }
 
 function copyClause() {
-  const text = [active.value?.title, active.value?.desc].filter(Boolean).join('\n')
+  // 复制完整正文（懒加载后），未加载完则退化为标题+摘要
+  const text = [active.value?.title, detailContent.value || active.value?.desc].filter(Boolean).join('\n')
   navigator.clipboard.writeText(text)
     .then(() => ElMessage.success('已复制，可粘贴至合同修改建议'))
     .catch(() => ElMessage.error('复制失败，请手动选中文本'))
@@ -122,8 +166,16 @@ async function submitAdd() {
 
 // —— 批量导入文件 ——
 const batchOpen = ref(false)
-const batchCat = ref<KnowledgeCat>('法律法规')
 const batchImporting = ref(false)
+const overwriteMode = ref(false)   // true = 先删同名旧切片再入库
+
+// 英文分类 key → 中文标签（用于展示识别结果）
+const catLabelMap: Record<string, KnowledgeCat> = {
+  law: '法律法规',
+  template: '标准条款',
+  rule: '风险规则',
+  case: '典型案例',
+}
 
 // 文件队列状态
 interface FileItem {
@@ -131,7 +183,9 @@ interface FileItem {
   status: 'pending' | 'importing' | 'done' | 'error'
   chunks: number
   skipped: number
-  mode: 'article' | 'paragraph' | 'empty' | ''
+  mode: 'article' | 'clause' | 'paragraph' | 'empty' | ''
+  detectedCat: string
+  filteredPH: number   // 被过滤的占位符条文数
   error: string
 }
 const fileItems = ref<FileItem[]>([])
@@ -139,9 +193,7 @@ const totalImported = computed(() => fileItems.value.reduce((s, f) => s + f.chun
 const doneCount = computed(() => fileItems.value.filter((f) => f.status === 'done').length)
 
 function onBatchFileChange(file: { raw: File }) {
-  // el-upload 回调：添加到队列（去重）
-  if (fileItems.value.some((f) => f.file.name === file.raw.name)) return
-  fileItems.value.push({ file: file.raw, status: 'pending', chunks: 0, skipped: 0, mode: '', error: '' })
+  addFileToQueue(file.raw)
 }
 
 function removeFile(idx: number) {
@@ -152,15 +204,19 @@ async function startBatchImport() {
   const pending = fileItems.value.filter((f) => f.status === 'pending')
   if (!pending.length) return
   batchImporting.value = true
-  const cat = catKeyMap[batchCat.value]
   for (const item of pending) {
     item.status = 'importing'
     try {
-      const res = await importKnowledgeFile(item.file, cat)
+      const res = await importKnowledgeFile(item.file, 'auto', overwriteMode.value)
       item.chunks = res.imported_chunks
       item.skipped = res.skipped_duplicates
       item.mode = res.split_mode
+      item.detectedCat = catLabelMap[res.category] ?? res.category
+      item.filteredPH = res.filtered_placeholders ?? 0
       item.status = 'done'
+      if (res.overlap_warning) {
+        ElMessage.warning({ message: res.overlap_warning, duration: 6000, showClose: true })
+      }
     } catch (e: unknown) {
       item.status = 'error'
       const msg = e instanceof Error ? e.message : String(e)
@@ -168,7 +224,6 @@ async function startBatchImport() {
     }
   }
   batchImporting.value = false
-  // 全部完成后刷新
   if (fileItems.value.every((f) => f.status !== 'pending')) {
     await load()
     ElMessage.success(`批量导入完成，共入库 ${totalImported.value} 个切片`)
@@ -179,6 +234,106 @@ function closeBatch() {
   if (batchImporting.value) return
   batchOpen.value = false
   fileItems.value = []
+  overwriteMode.value = false
+}
+
+// —— 拖拽区（支持文件 + 文件夹）——
+const isDragging = ref(false)
+const ACCEPTED_EXTS = new Set(['.txt', '.docx', '.pdf'])
+
+function addFileToQueue(file: File) {
+  const ext = '.' + (file.name.split('.').pop() ?? '').toLowerCase()
+  if (!ACCEPTED_EXTS.has(ext)) return
+  if (fileItems.value.some((f) => f.file.name === file.name)) return
+  fileItems.value.push({
+    file, status: 'pending', chunks: 0, skipped: 0,
+    mode: '', detectedCat: '', filteredPH: 0, error: '',
+  })
+}
+
+/** 递归读取 FileSystemEntry，一级文件夹展开，不再深入子目录。 */
+async function readEntries(entries: FileSystemEntry[]): Promise<File[]> {
+  const files: File[] = []
+  for (const entry of entries) {
+    if (entry.isFile) {
+      const file = await new Promise<File>((res, rej) =>
+        (entry as FileSystemFileEntry).file(res, rej),
+      )
+      files.push(file)
+    } else if (entry.isDirectory) {
+      // 展开一级文件夹
+      const reader = (entry as FileSystemDirectoryEntry).createReader()
+      const children = await new Promise<FileSystemEntry[]>((res, rej) =>
+        reader.readEntries(res, rej),
+      )
+      for (const child of children) {
+        if (child.isFile) {
+          const file = await new Promise<File>((res, rej) =>
+            (child as FileSystemFileEntry).file(res, rej),
+          )
+          files.push(file)
+        }
+      }
+    }
+  }
+  return files
+}
+
+function onDragOver(e: DragEvent) {
+  e.preventDefault()
+  isDragging.value = true
+}
+
+function onDragLeave(e: DragEvent) {
+  // 只在离开整个拖拽区时清除，忽略内部子元素切换
+  const related = e.relatedTarget as Node | null
+  if (!(e.currentTarget as HTMLElement).contains(related)) {
+    isDragging.value = false
+  }
+}
+
+async function onDrop(e: DragEvent) {
+  e.preventDefault()
+  isDragging.value = false
+  if (!e.dataTransfer || batchImporting.value) return
+
+  const entries: FileSystemEntry[] = []
+  for (const item of e.dataTransfer.items) {
+    const entry = item.webkitGetAsEntry()
+    if (entry) entries.push(entry)
+  }
+  const files = await readEntries(entries)
+  files.forEach(addFileToQueue)
+}
+
+/** 单文件重试：重置状态后重新调接口。 */
+async function retryFile(item: FileItem) {
+  item.status = 'importing'
+  item.error = ''
+  item.chunks = 0
+  item.skipped = 0
+  item.mode = ''
+  item.detectedCat = ''
+  item.filteredPH = 0
+  try {
+    const res = await importKnowledgeFile(item.file, 'auto')
+    item.chunks = res.imported_chunks
+    item.skipped = res.skipped_duplicates
+    item.mode = res.split_mode
+    item.detectedCat = catLabelMap[res.category] ?? res.category
+    item.status = 'done'
+  } catch (e: unknown) {
+    item.status = 'error'
+    const msg = e instanceof Error ? e.message : String(e)
+    item.error = msg.slice(0, 80)
+  }
+}
+
+/** 分类 chip 切换：重置到第一页并重新拉取。 */
+function onCatClick(cat: '全部' | KnowledgeCat) {
+  activeCat.value = cat
+  currentPage.value = 1
+  load()
 }
 </script>
 
@@ -198,7 +353,7 @@ function closeBatch() {
             v-for="c in cats"
             :key="c"
             :class="{ active: activeCat === c }"
-            @click="activeCat = c"
+            @click="onCatClick(c)"
           >{{ c }}</button>
         </div>
       </div>
@@ -216,9 +371,9 @@ function closeBatch() {
       </article>
     </section>
 
-    <el-empty v-if="!filtered.length" description="未找到匹配的知识条目" />
+    <el-empty v-if="!cards.length" description="未找到匹配的知识条目" />
     <section v-else class="card-grid">
-      <article v-for="c in filtered" :key="c.id" class="k-card" @click="openDetail(c)">
+      <article v-for="c in cards" :key="c.id" class="k-card" @click="openDetail(c)">
         <div class="k-head">
           <el-tag :type="catType[c.cat]" size="small">{{ c.cat }}</el-tag>
           <span class="k-date mono">{{ c.date }}</span>
@@ -241,11 +396,25 @@ function closeBatch() {
       </article>
     </section>
 
+    <!-- 分页 -->
+    <div v-if="total > pageSize" class="pagination-row">
+      <el-pagination
+        v-model:current-page="currentPage"
+        :page-size="pageSize"
+        :total="total"
+        layout="prev, pager, next, total"
+        :pager-count="5"
+        @current-change="onPageChange"
+      />
+    </div>
+
     <!-- 详情 -->
     <el-dialog v-model="detailOpen" :title="active?.title" width="620px">
       <template v-if="active">
         <el-tag :type="catType[active.cat]" size="small" style="margin-bottom: 12px">{{ active.cat }}</el-tag>
-        <p class="detail-desc">{{ active.desc }}</p>
+        <div v-loading="detailLoading" style="min-height: 60px">
+          <p class="detail-desc">{{ detailContent }}</p>
+        </div>
         <div class="k-chips">
           <span v-for="t in active.chips" :key="t">{{ t }}</span>
         </div>
@@ -283,32 +452,41 @@ function closeBatch() {
       :close-on-click-modal="!batchImporting"
       :before-close="closeBatch"
     >
-      <!-- 分类选择 -->
+      <!-- 自动识别提示 + 覆盖开关 -->
       <div class="batch-config">
-        <span class="batch-label">导入分类</span>
-        <el-select v-model="batchCat" size="default" style="width: 160px" :disabled="batchImporting">
-          <el-option v-for="c in cats.filter((x) => x !== '全部')" :key="c" :label="c" :value="c" />
-        </el-select>
-        <span class="batch-hint">所有文件将归入此分类</span>
+        <el-icon style="color: var(--sage)"><CircleCheck /></el-icon>
+        <span class="batch-label">自动识别分类</span>
+        <span class="batch-hint">系统根据文件内容（法条结构/合同双方/案例特征）自动判断分类</span>
+        <div class="batch-overwrite">
+          <el-switch v-model="overwriteMode" size="small" :disabled="batchImporting" />
+          <span class="batch-hint" style="margin-left:6px">覆盖同名旧数据</span>
+        </div>
       </div>
 
-      <!-- 上传区 -->
-      <el-upload
-        multiple
-        :auto-upload="false"
-        :show-file-list="false"
-        accept=".txt,.docx,.pdf"
-        :disabled="batchImporting"
-        :on-change="onBatchFileChange"
-        drag
+      <!-- 上传区：外层 div 处理文件夹拖拽，el-upload 负责点击选择 -->
+      <div
         class="batch-upload"
+        :class="{ 'is-dragover': isDragging }"
+        @dragover="onDragOver"
+        @dragleave="onDragLeave"
+        @drop="onDrop"
       >
-        <el-icon class="el-icon--upload"><Upload /></el-icon>
-        <div class="el-upload__text">
-          拖拽文件到此，或<em>点击选择</em>
-          <p class="upload-sub">支持 .txt / .docx / .pdf，可多选</p>
-        </div>
-      </el-upload>
+        <el-upload
+          multiple
+          :auto-upload="false"
+          :show-file-list="false"
+          accept=".txt,.docx,.pdf"
+          :disabled="batchImporting"
+          :on-change="onBatchFileChange"
+          class="batch-upload-inner"
+        >
+          <el-icon class="el-icon--upload"><Upload /></el-icon>
+          <div class="el-upload__text">
+            拖拽文件或<em>文件夹</em>到此，或<em>点击选择文件</em>
+            <p class="upload-sub">支持 .txt / .docx / .pdf，可多选，支持整个文件夹</p>
+          </div>
+        </el-upload>
+      </div>
 
       <!-- 文件列表 -->
       <div v-if="fileItems.length" class="file-list">
@@ -321,18 +499,26 @@ function closeBatch() {
           </el-icon>
           <span class="file-name">{{ f.file.name }}</span>
           <span v-if="f.status === 'done'" class="file-result done">
-            <span v-if="f.mode === 'article'" class="mode-tag article">法条识别</span>
+            <span v-if="f.detectedCat" class="mode-tag article">{{ f.detectedCat }}</span>
+            <span v-if="f.mode === 'article'" class="mode-tag para">法条识别</span>
+            <span v-else-if="f.mode === 'clause'" class="mode-tag para">款项切分</span>
             <span v-else-if="f.mode === 'paragraph'" class="mode-tag para">段落切分</span>
-            +{{ f.chunks }} 条<template v-if="f.skipped"> · 去重 {{ f.skipped }}</template>
+            +{{ f.chunks }} 条
+            <template v-if="f.skipped"> · 去重 {{ f.skipped }}</template>
+            <template v-if="f.filteredPH"> · 过滤占位 {{ f.filteredPH }}</template>
           </span>
           <span v-else-if="f.status === 'error'" class="file-result error" :title="f.error">失败</span>
           <span v-else-if="f.status === 'importing'" class="file-result pending">导入中…</span>
           <span v-else class="file-result pending">待导入</span>
+          <!-- 操作按钮：独立 v-if，不参与状态文字的 v-else 链 -->
+          <el-button
+            v-if="f.status === 'error'"
+            link type="primary" size="small"
+            @click="retryFile(f)"
+          >重试</el-button>
           <el-button
             v-if="f.status === 'pending'"
-            link
-            type="danger"
-            size="small"
+            link type="danger" size="small"
             @click="removeFile(i)"
           >移除</el-button>
         </div>
@@ -487,6 +673,12 @@ function closeBatch() {
   align-items: center;
   gap: 12px;
   margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.batch-overwrite {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
 }
 .batch-label {
   font-size: 13px;
@@ -498,7 +690,45 @@ function closeBatch() {
   color: var(--muted);
 }
 .batch-upload {
+  border: 2px dashed var(--line);
+  border-radius: var(--r-md);
   margin-bottom: 16px;
+  transition: border-color 0.2s, background 0.2s;
+  cursor: pointer;
+}
+.batch-upload:hover {
+  border-color: var(--brass);
+}
+.batch-upload.is-dragover {
+  border-color: var(--brass);
+  background: var(--brass-soft);
+}
+/* 让 el-upload 内部铺满外层 div，居中显示图标+文字 */
+.batch-upload :deep(.el-upload) {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 148px;
+  padding: 28px 20px;
+  box-sizing: border-box;
+}
+.batch-upload :deep(.el-icon--upload) {
+  font-size: 44px;
+  color: var(--brass);
+  margin-bottom: 10px;
+  opacity: 0.75;
+}
+.batch-upload :deep(.el-upload__text) {
+  text-align: center;
+  color: var(--ivory-dim);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.batch-upload :deep(.el-upload__text em) {
+  color: var(--brass);
+  font-style: normal;
 }
 .upload-sub {
   margin: 4px 0 0;
@@ -557,6 +787,11 @@ function closeBatch() {
   color: var(--sage);
   text-align: right;
   padding: 4px 0;
+}
+.pagination-row {
+  display: flex;
+  justify-content: center;
+  padding: 20px 0 8px;
 }
 :deep(mark) {
   background: var(--amber-soft);
