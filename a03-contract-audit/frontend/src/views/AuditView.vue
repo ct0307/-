@@ -21,8 +21,9 @@ const rectify = useRectifyStore()
 const notify = useNotifyStore()
 const auth = useAuthStore()
 
-const department = ref('采购中心')
+const department = ref('采购中心') // 保留兼容（批量上传可能引用），实际展示改用 auth.department
 const contractType = ref('软件开发外包合同')
+const dimExpanded = ref(false) // 审查维度折叠面板，默认收起
 
 // 降级默认值（接口失败时兜底）
 const _DEFAULT_DEPTS = ['采购中心', '销售部', '研发部', '法务部', '财务部', '人力资源部', '行政部', '运营部']
@@ -45,16 +46,16 @@ onMounted(async () => {
   }
 })
 
-// 审查维度（对齐 demo，仅前端展示，不改后端契约）
+// 审查维度：勾选项传给后端，LLM 按维度聚焦输出
 const dimensions = ref([
   { key: 'legal', label: '法律条款合规性', on: true },
   { key: 'risk', label: '风险条款识别', on: true },
   { key: 'payment', label: '金额与付款条款', on: true },
   { key: 'breach', label: '违约责任分析', on: true },
-  { key: 'ip', label: '知识产权条款', on: false },
-  { key: 'confidentiality', label: '保密条款审查', on: false },
-  { key: 'termination', label: '终止与解除条款', on: false },
-  { key: 'dispute', label: '争议解决条款', on: false },
+  { key: 'ip', label: '知识产权条款', on: true },
+  { key: 'confidentiality', label: '保密条款审查', on: true },
+  { key: 'termination', label: '终止与解除条款', on: true },
+  { key: 'dispute', label: '争议解决条款', on: true },
 ])
 
 // —— 上传 + 解析（真接口）——
@@ -118,7 +119,7 @@ async function onAudit() {
   }
   _startProgress()
   try {
-    await session.runAudit()
+    await session.runAudit(dimensions.value.filter(d => d.on).map(d => d.key))
     _clearProgress()
     auditProgress.value = 100
     auditProgressLabel.value = '审查完成'
@@ -161,17 +162,47 @@ function onAbort() {
   ElMessage.info('审查已中止')
 }
 
-// —— 风险排序：待复核在前（high→medium→low），已处理（confirmed/ignored）沉底 ——
+// —— 维度关键词映射：用于判断风险条目属于哪个维度 ——
+const _DIM_KEYWORDS: Record<string, string[]> = {
+  legal:       ['合规', '法律', '主体', '资格', '效力', '合同主体'],
+  risk:        ['风险条款', '风险识别'],
+  payment:     ['金额', '付款', '价款', '结算', '发票', '币种', '预付', '要素缺失'],
+  breach:      ['违约', '赔偿', '条款缺失'],
+  ip:          ['知识产权', '著作权', '专利', '商标', '版权'],
+  nda:         ['保密'],
+  termination: ['终止', '解除'],
+  dispute:     ['争议', '仲裁', '诉讼', '管辖'],
+}
+
+function _riskMatchesDim(risk: { category: string; basis: string }, dimKey: string): boolean {
+  const kws = _DIM_KEYWORDS[dimKey] ?? []
+  const text = risk.category + risk.basis
+  return kws.some(kw => text.includes(kw))
+}
+
+function _isDimFocused(r: { category: string; basis: string; review_status: string }): boolean {
+  if (_DONE_STATUS.has(r.review_status)) return false
+  const active = dimensions.value.filter(d => d.on)
+  if (active.length === dimensions.value.length) return false // 全选时不突出
+  return active.some(d => _riskMatchesDim(r, d.key))
+}
+
+// —— 风险排序：先按"是否命中勾选维度"分组，组内 high→medium→low，已处理沉底 ——
 const _LEVEL_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 }
 const _DONE_STATUS = new Set(['confirmed', 'ignored'])
-const sortedRisks = computed(() =>
-  [...session.risks].sort((a, b) => {
-    const doneA = _DONE_STATUS.has(a.review_status) ? 1 : 0
-    const doneB = _DONE_STATUS.has(b.review_status) ? 1 : 0
-    if (doneA !== doneB) return doneA - doneB
-    return (_LEVEL_ORDER[a.level] ?? 9) - (_LEVEL_ORDER[b.level] ?? 9)
-  })
-)
+const sortedRisks = computed(() => {
+  const activeDimKeys = dimensions.value.filter(d => d.on).map(d => d.key)
+  const allSelected = activeDimKeys.length === dimensions.value.length
+
+  function score(r: typeof session.risks[0]) {
+    const done = _DONE_STATUS.has(r.review_status) ? 100 : 0
+    // 全选时不区分；否则命中优先
+    const dimBonus = (!allSelected && activeDimKeys.some(k => _riskMatchesDim(r, k))) ? 0 : 10
+    return done + dimBonus + (_LEVEL_ORDER[r.level] ?? 9)
+  }
+
+  return [...session.risks].sort((a, b) => score(a) - score(b))
+})
 
 // —— 复核抽屉 ——
 const drawerOpen = ref(false)
@@ -358,21 +389,30 @@ function closeBatch() {
       </el-card>
 
       <el-card shadow="never" class="config-panel">
-        <template #header><span class="panel-title">审查维度配置</span></template>
+        <template #header><span class="panel-title">合同信息 &amp; 审查配置</span></template>
         <div class="form-grid">
-          <label>业务部门
-            <el-select v-model="department" size="default" filterable>
-              <el-option v-for="d in departmentOptions" :key="d" :label="d" :value="d" />
-            </el-select>
-          </label>
           <label>合同类型
             <el-select v-model="contractType" size="default" filterable>
               <el-option v-for="t in contractTypeOptions" :key="t" :label="t" :value="t" />
             </el-select>
           </label>
+          <label>归属部门
+            <div class="dept-readonly">
+              {{ auth.department || '（未知部门）' }}
+              <span class="dept-hint">当前账号自动归属</span>
+            </div>
+          </label>
         </div>
-        <div class="check-grid">
-          <el-checkbox v-for="d in dimensions" :key="d.key" v-model="d.on" :label="d.label" />
+        <!-- 维度折叠区 -->
+        <div class="dim-collapse">
+          <button class="dim-toggle" @click="dimExpanded = !dimExpanded">
+            <span>审查维度</span>
+            <span class="dim-summary">{{ dimExpanded ? '▲ 收起' : `▼ 自定义（${dimensions.filter(d => d.on).length}/${dimensions.length} 项）` }}</span>
+            <span class="dim-hint">全量审查 · 维度选择仅影响结果聚焦展示</span>
+          </button>
+          <div v-show="dimExpanded" class="check-grid">
+            <el-checkbox v-for="d in dimensions" :key="d.key" v-model="d.on" :label="d.label" />
+          </div>
         </div>
         <!-- 运行中：换成终止按钮；否则：启动按钮 -->
         <el-button
@@ -464,7 +504,11 @@ function closeBatch() {
                   v-for="r in sortedRisks"
                   :key="r.id"
                   class="risk-card"
-                  :class="[`lvl-${r.level}`, { reviewed: _DONE_STATUS.has(r.review_status) }]"
+                  :class="[
+                    `lvl-${r.level}`,
+                    { reviewed: _DONE_STATUS.has(r.review_status) },
+                    { 'dim-focus': _isDimFocused(r) }
+                  ]"
                   @click="openReview(r)"
                 >
                   <div class="risk-head">
@@ -603,11 +647,54 @@ function closeBatch() {
   font-size: 13px;
   color: var(--ivory-dim);
 }
+/* 归属部门只读展示 */
+.dept-readonly {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  background: var(--ink-3);
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  color: var(--ivory);
+  border: 1px solid var(--line);
+}
+.dept-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+/* 维度折叠区 */
+.dim-collapse {
+  margin-bottom: 14px;
+}
+.dim-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--line);
+  padding: 10px 0 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ivory-dim);
+  text-align: left;
+}
+.dim-toggle:hover { color: var(--ivory); }
+.dim-summary { font-size: 12px; color: var(--brass); }
+.dim-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}
 .check-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 4px 12px;
-  margin-bottom: 16px;
+  padding: 8px 0 4px;
 }
 .run-btn {
   width: 100%;
@@ -773,6 +860,11 @@ function closeBatch() {
 .risk-card.reviewed {
   opacity: 0.5;
   background: var(--ink-3);
+}
+/* 命中用户关注维度的卡片：左侧加亮铜色竖线强调 */
+.risk-card.dim-focus {
+  border-color: var(--brass);
+  background: var(--brass-soft);
 }
 .risk-card {
   border: 1px solid var(--line);

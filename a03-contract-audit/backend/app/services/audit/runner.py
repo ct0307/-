@@ -15,19 +15,27 @@ from app.services.parser.extractor import extract_elements, extract_text
 log = get_logger("audit_runner")
 
 
-def run_audit(db: Session, contract: Contract) -> dict:
-    """对单份合同执行审查并落库。
-
-    返回 {"risk_count": int, "cross_checks": [...]}：
-      - 风险清单（含 tier 分档）落库到 risks 表；
-      - 交叉验证冲突项为审查态动态结果，不落库，随本次响应返回。
-    """
+def run_audit(db: Session, contract: Contract, dimensions: list[str] | None = None) -> dict:
+    """对单份合同执行审查并落库。dimensions 为空/None 时全量审查。"""
     contract.status = "auditing"
     db.commit()
 
     text = extract_text(contract.storage_path)
-    elements = extract_elements(text)
-    result = audit_contract(elements, text, db=db, contract_id=contract.id)
+    # 优先用 parse 时已 LLM 精抽的要素（elements_json），无则实时正则提取。
+    # 避免审查时重复调 LLM，同时保留 has_*/text_length 等正则信号。
+    elements = extract_elements(text)  # 先跑正则（信号字段）
+    try:
+        saved = json.loads(contract.elements_json or "{}")
+        if any(saved.get(k) for k in ("party_a", "subject", "payment_terms")):
+            elements.update({k: v for k, v in saved.items() if v and isinstance(v, str)})
+    except (ValueError, AttributeError):
+        pass  # elements_json 损坏时静默降级
+    result = audit_contract(
+        elements, text,
+        db=db, contract_id=contract.id,
+        dimensions=dimensions or [],
+        contract_type=contract.contract_type or "",
+    )
     risks = result["risks"]
     cross_checks = result["cross_checks"]
 

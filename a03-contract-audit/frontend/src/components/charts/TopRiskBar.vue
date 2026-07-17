@@ -37,5 +37,5 @@ const option = computed<EChartsCoreOption>(() => {
 </script>
 
 <template>
-  <BaseChart :option="option" height="240px" />
+  <BaseChart :option="option" height="260px" />
 </template>

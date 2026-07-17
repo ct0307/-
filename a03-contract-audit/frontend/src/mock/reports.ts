@@ -24,7 +24,6 @@ export const REPORT_DATA: Record<RangeKey, ReportData> = {
       { name: '高风险', value: 32 },
       { name: '中风险', value: 56 },
       { name: '低风险', value: 74 },
-      { name: '无风险', value: 128 },
     ],
     depts: [
       { name: '采购中心', risk: 42, money: '¥1,280万' },
@@ -53,7 +52,6 @@ export const REPORT_DATA: Record<RangeKey, ReportData> = {
       { name: '高风险', value: 88 },
       { name: '中风险', value: 152 },
       { name: '低风险', value: 210 },
-      { name: '无风险', value: 386 },
     ],
     depts: [
       { name: '采购中心', risk: 118, money: '¥3,860万' },
@@ -82,7 +80,6 @@ export const REPORT_DATA: Record<RangeKey, ReportData> = {
       { name: '高风险', value: 326 },
       { name: '中风险', value: 452 },
       { name: '低风险', value: 508 },
-      { name: '无风险', value: 0 },
     ],
     depts: [
       { name: '采购中心', risk: 386, money: '¥1.28亿' },

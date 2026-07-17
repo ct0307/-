@@ -1,23 +1,23 @@
 <script setup lang="ts">
-// 多维报表：时间分段(月/季/年) + 多维钻取 + 4 KPI + 4 ECharts。
-import { computed, onMounted, ref, watch } from 'vue'
+// 多维报表：明细驱动 + 多维钻取 + 4 KPI + 4 ECharts + 合同要素汇总。
+// 数据分两层：① 明细层 contractsMeta（真实、参与钻取，驱动 KPI + 风险分布环形图）；
+// ② 全局聚合层 report_summary（趋势/部门/TOP5，条款级，标注「全局视图」不随钻取变）。
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getReportData, exportRiskLedger, getContractsMetadata, type ContractMeta } from '@/api/reports'
-import type { ReportData, RangeKey } from '@/mock/reports'
+import type { ReportData } from '@/mock/reports'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 import TrendLine from '@/components/charts/TrendLine.vue'
 import RiskDonut from '@/components/charts/RiskDonut.vue'
 import DeptBar from '@/components/charts/DeptBar.vue'
 import TopRiskBar from '@/components/charts/TopRiskBar.vue'
 
-const range = ref<RangeKey>('month')
 const raw = ref<ReportData | null>(null)
 const loading = ref(false)
 const errored = ref(false)
 
-// 多维钻取（确定性系数缩放，模拟子集统计）
+// 多维钻取（对明细做真实过滤，联动 KPI + 环形图）
 const drillType = ref('全部')
-const drillAmount = ref('全部')
 const drillLevel = ref('全部')
 
 const contractsMeta = ref<ContractMeta[]>([])
@@ -27,7 +27,7 @@ async function load() {
   errored.value = false
   try {
     const [reportData, meta] = await Promise.all([
-      getReportData(range.value),
+      getReportData('month'), // 趋势已改全局累计，range 不再影响数据，固定传参
       getContractsMetadata(),
     ])
     raw.value = reportData
@@ -40,9 +40,14 @@ async function load() {
   }
 }
 onMounted(load)
-watch(range, load)
 
-// 多维钻取：对 contractsMeta 做真实本地过滤（charts/KPI 反映全局，不参与钻取）
+// 钻取「合同类型」选项：从真实明细 distinct，避免出现库中不存在的类型
+const typeOptions = computed(() => {
+  const set = new Set(contractsMeta.value.map((c) => c.contract_type).filter((t) => t && t !== '—'))
+  return Array.from(set)
+})
+
+// 明细钻取：合同类型 + 风险等级（高=有高风险 / 中=无高有中低 / 低=无风险）
 const filteredMeta = computed(() => {
   let list = contractsMeta.value
   if (drillType.value !== '全部')
@@ -53,17 +58,42 @@ const filteredMeta = computed(() => {
     list = list.filter((c) => c.risk_high === 0 && c.risk_total > 0)
   else if (drillLevel.value === '低风险')
     list = list.filter((c) => c.risk_total === 0)
-  // 金额范围：amount 字段为自然语言字符串，格式不统一，暂不做过滤
   return list
 })
-const drilling = computed(() =>
-  drillType.value !== '全部' || drillLevel.value !== '全部',
-)
-const drillHint = computed(() =>
-  `已按条件筛选 · 命中 ${filteredMeta.value.length} / ${contractsMeta.value.length} 份`,
+const drilling = computed(() => drillType.value !== '全部' || drillLevel.value !== '全部')
+const drillHint = computed(
+  () => `已按条件筛选 · 命中 ${filteredMeta.value.length} / ${contractsMeta.value.length} 份`,
 )
 
-const data = computed<ReportData | null>(() => raw.value)
+// KPI 基于钻取后的明细实时重算（口径：合规通过率 = 无高风险合同占比）
+const kpiCards = computed(() => {
+  const list = filteredMeta.value
+  const total = list.length
+  const passed = list.filter((c) => c.risk_high === 0).length
+  const passRate = total ? Math.round((passed / total) * 1000) / 10 : 0
+  const highClauses = list.reduce((s, c) => s + c.risk_high, 0)
+  const totalClauses = list.reduce((s, c) => s + c.risk_total, 0)
+  return [
+    { label: '审查合同数', value: total.toLocaleString(), tip: drilling.value ? '当前钻取条件下的合同数' : '' },
+    {
+      label: '合规通过率',
+      value: `${passRate}%`,
+      tip: '无「高风险」条款的合同数 ÷ 合同总数，反映本期合规水平',
+    },
+    { label: '高风险条款', value: String(highClauses), tip: '当前范围内所有高风险条款累计' },
+    { label: '风险条款总数', value: String(totalClauses), tip: '高 + 中 + 低风险条款累计' },
+  ]
+})
+
+// 风险等级分布环形图：基于钻取后明细重算（纯条款等级分布，量纲统一）
+const donutData = computed(() => {
+  const list = filteredMeta.value
+  return [
+    { name: '高风险', value: list.reduce((s, c) => s + c.risk_high, 0) },
+    { name: '中风险', value: list.reduce((s, c) => s + c.risk_medium, 0) },
+    { name: '低风险', value: list.reduce((s, c) => s + c.risk_low, 0) },
+  ]
+})
 
 const exporting = ref(false)
 async function doExport() {
@@ -80,60 +110,27 @@ async function doExport() {
 
 function resetDrill() {
   drillType.value = '全部'
-  drillAmount.value = '全部'
   drillLevel.value = '全部'
 }
-
-const kpiCards = computed(() => {
-  if (!data.value) return []
-  const d = data.value
-  return [
-    { label: '审查合同总数', value: d.kpi.total.toLocaleString(), trend: d.kpiTrend.total, up: true, tip: '' },
-    { label: '合规通过率',   value: `${d.kpi.pass}%`,            trend: d.kpiTrend.pass,  up: true,
-      tip: '已确认 + 已忽略风险条款 ÷ 总复核数，反映本期合规水平' },
-    { label: '高风险条款',   value: String(d.kpi.risk),           trend: d.kpiTrend.risk,  up: false, tip: '' },
-    { label: '平均审查耗时', value: d.kpi.time,                   trend: d.kpiTrend.time,  up: true,
-      tip: '从合同上传到审查结果返回的平均时长（不含人工复核等待时间）' },
-  ]
-})
-
-const rangeSegs: { key: RangeKey; label: string }[] = [
-  { key: 'month', label: '本月' },
-  { key: 'quarter', label: '本季度' },
-  { key: 'year', label: '本年' },
-]
 </script>
 
 <template>
   <div>
     <div class="toolbar">
-      <div class="seg">
-        <button v-for="s in rangeSegs" :key="s.key" :class="{ active: range === s.key }" @click="range = s.key">
-          {{ s.label }}
-        </button>
-      </div>
+      <span class="toolbar-title">合同合规多维报表</span>
       <div class="toolbar-right">
         <el-button :icon="'Download'" :loading="exporting" @click="doExport">导出台账</el-button>
         <DemoBadge module="reports" />
       </div>
     </div>
 
-    <!-- 多维钻取 -->
+    <!-- 多维钻取：联动 KPI + 风险等级分布 -->
     <section class="drill-bar">
       <span class="drill-label"><el-icon><Search /></el-icon>多维钻取</span>
-      <el-select v-model="drillType" size="default" style="width: 160px">
+      <el-select v-model="drillType" size="default" style="width: 180px">
         <el-option label="全部类型" value="全部" />
-        <el-option label="软件开发外包合同" value="软件开发外包合同" />
-        <el-option label="采购合同" value="采购合同" />
-        <el-option label="技术服务合同" value="技术服务合同" />
+        <el-option v-for="t in typeOptions" :key="t" :label="t" :value="t" />
       </el-select>
-      <el-tooltip content="合同金额为自然语言文本，格式不统一，暂不支持数值范围筛选" placement="top">
-        <span style="display: inline-block">
-          <el-select v-model="drillAmount" size="default" style="width: 150px; pointer-events: none; opacity: 0.45" disabled>
-            <el-option label="不限金额" value="全部" />
-          </el-select>
-        </span>
-      </el-tooltip>
       <el-select v-model="drillLevel" size="default" style="width: 130px">
         <el-option label="全部等级" value="全部" />
         <el-option label="高风险" value="高风险" />
@@ -142,6 +139,7 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
       </el-select>
       <el-button v-if="drilling" link type="primary" @click="resetDrill">重置钻取</el-button>
       <span v-if="drilling" class="drill-hint mono">{{ drillHint }}</span>
+      <span class="drill-scope">钻取联动 KPI 与风险等级分布 · 趋势/部门/TOP5 为全局视图</span>
     </section>
 
     <div v-loading="loading" class="report-body">
@@ -149,7 +147,7 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
         <template #extra><el-button type="primary" @click="load">重新加载</el-button></template>
       </el-result>
 
-      <template v-else-if="data">
+      <template v-else-if="raw">
         <section class="kpi-row">
           <article v-for="k in kpiCards" :key="k.label" class="kpi-card">
             <span class="kpi-label">
@@ -159,35 +157,54 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
               </el-tooltip>
             </span>
             <strong class="mono">{{ k.value }}</strong>
-            <em class="mono" :class="{ up: k.up, down: !k.up }">{{ k.trend }}</em>
           </article>
         </section>
 
         <section class="chart-grid">
-          <el-card shadow="never" class="wide">
-            <template #header>合同审查趋势</template>
-            <TrendLine :data="data.trend" />
+          <el-card shadow="never">
+            <template #header>
+              <div class="panel-head">
+                <span>合同审查趋势</span>
+                <el-tag size="small" type="info">累计 · 全局</el-tag>
+              </div>
+            </template>
+            <TrendLine :data="raw.trend" />
           </el-card>
           <el-card shadow="never">
-            <template #header>风险等级分布</template>
-            <RiskDonut :data="data.donut" :pass="data.kpi.pass" />
+            <template #header>
+              <div class="panel-head">
+                <span>风险等级分布</span>
+                <el-tag v-if="drilling" size="small" type="warning">钻取中</el-tag>
+              </div>
+            </template>
+            <RiskDonut :data="donutData" />
           </el-card>
           <el-card shadow="never">
-            <template #header>部门风险排行</template>
-            <DeptBar :data="data.depts" />
+            <template #header>
+              <div class="panel-head">
+                <span>部门风险排行</span>
+                <el-tag size="small" type="info">全局</el-tag>
+              </div>
+            </template>
+            <DeptBar :data="raw.depts" />
           </el-card>
           <el-card shadow="never">
-            <template #header>高风险条款 TOP5</template>
-            <TopRiskBar :data="data.tops" />
+            <template #header>
+              <div class="panel-head">
+                <span>高风险条款 TOP5</span>
+                <el-tag size="small" type="info">全局</el-tag>
+              </div>
+            </template>
+            <TopRiskBar :data="raw.tops" />
           </el-card>
         </section>
 
-        <!-- 合同要素汇总：甲方 / 合同标的 / 收付款节点 -->
+        <!-- 合同要素汇总：甲方 / 合同标的 / 收付款节点（随钻取过滤） -->
         <el-card shadow="never" class="meta-card">
           <template #header>
             <div class="panel-head">
               <span>合同要素汇总</span>
-              <el-tag size="small" type="info">{{ contractsMeta.length }} 份</el-tag>
+              <el-tag size="small" type="info">{{ filteredMeta.length }} / {{ contractsMeta.length }} 份</el-tag>
             </div>
           </template>
           <el-empty v-if="!filteredMeta.length" description="暂无合同要素数据，上传并解析合同后自动提取" />
@@ -218,29 +235,16 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
   align-items: center;
   margin-bottom: 16px;
 }
+.toolbar-title {
+  font-family: var(--serif);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ivory);
+}
 .toolbar-right {
   display: flex;
   align-items: center;
   gap: 12px;
-}
-.seg {
-  display: inline-flex;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  overflow: hidden;
-  background: var(--ink-2);
-}
-.seg button {
-  padding: 7px 16px;
-  border: none;
-  background: transparent;
-  color: var(--ivory-dim);
-  cursor: pointer;
-  font-size: 13px;
-}
-.seg button.active {
-  background: var(--brass);
-  color: #fff;
 }
 .drill-bar {
   display: flex;
@@ -265,6 +269,11 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
   font-size: 12px;
   color: var(--sage);
 }
+.drill-scope {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--muted);
+}
 .report-body {
   min-height: 200px;
 }
@@ -280,10 +289,6 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
   border-radius: var(--r-lg);
   padding: 16px 20px;
   box-shadow: var(--shadow-sm);
-}
-.kpi-card span {
-  font-size: 13px;
-  color: var(--ivory-dim);
 }
 .kpi-label {
   display: flex;
@@ -301,25 +306,12 @@ const rangeSegs: { key: RangeKey; label: string }[] = [
   display: block;
   font-size: 28px;
   color: var(--ivory);
-  margin: 6px 0 4px;
-}
-.kpi-card em {
-  font-size: 12px;
-  font-style: normal;
-}
-.kpi-card em.up {
-  color: var(--sage);
-}
-.kpi-card em.down {
-  color: var(--seal);
+  margin: 6px 0 0;
 }
 .chart-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
-}
-.chart-grid .wide {
-  grid-column: 1 / -1;
 }
 @media (max-width: 1180px) {
   .kpi-row {

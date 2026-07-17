@@ -5,6 +5,7 @@ export interface LoginResult {
   token_type: string
   role: string
   username: string
+  department: string
 }
 
 export interface ContractOut {

@@ -126,3 +126,92 @@ def extract_elements(text: str) -> dict:
     elements["has_dispute_clause"] = bool(re.search(r"争议(?:解决|处理)|仲裁|诉讼", text))  # type: ignore[assignment]
     log.info("parser.elements", extracted={k: v for k, v in elements.items() if v})
     return elements
+
+
+# ---------------------------------------------------------------------------
+# LLM 要素抽取（方案 A）：正则兜底 + LLM 补语义字段
+# ---------------------------------------------------------------------------
+
+def _parse_json_obj(text: str) -> dict:
+    """从 LLM 输出中提取 JSON 对象，容错代码块围栏与前后噪声。"""
+    cleaned = re.sub(r"```(?:json)?|```", "", text).strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError("LLM 输出未找到 JSON 对象")
+    import json as _json
+    return _json.loads(cleaned[start:end + 1])
+
+
+def _build_extract_excerpt(text: str, max_chars: int = 5000) -> str:
+    """智能截取合同文本：前 3500 字覆盖甲乙方/标的，尾部附付款段落（最多 1500 字）。
+
+    付款条款常位于合同中后部，纯截前段会遗漏，故单独定位追加。
+    """
+    head = text[:3500]
+    pay_m = re.search(r"(?:付款|收款|付款方式|结算方式|收付款)[^\n]{0,30}", text)
+    tail = ""
+    if pay_m:
+        s = max(0, pay_m.start() - 100)
+        segment = text[s: s + 1500]
+        if segment not in head:  # 避免重复
+            tail = "\n……\n" + segment
+    return (head + tail)[:max_chars]
+
+
+def llm_extract_elements(text: str) -> dict | None:
+    """用 LLM 从合同文本中抽取六个核心要素，返回 dict；调用失败返回 None。
+
+    字段：party_a / party_b / subject / payment_terms / amount / duration。
+    失败时返回 None，调用方用正则结果兜底，链路不因 LLM 不可用而中断。
+    """
+    from app.llm.factory import get_llm_adapter
+    from app.llm.base import LLMError
+    import json as _json
+
+    excerpt = _build_extract_excerpt(text)
+    system = (
+        "你是合同要素提取助手。从给定的合同文本中准确提取关键要素，"
+        "只返回 JSON 对象，不要任何解释或代码块。"
+        "字段说明：party_a（甲方全称）、party_b（乙方全称）、"
+        "subject（合同标的，简洁描述，不超过60字）、"
+        "payment_terms（收付款安排，保留关键节点和金额比例，不超过150字）、"
+        "amount（合同总金额，含单位）、duration（合同期限）。"
+        "找不到的字段填 null。"
+        "示例格式：{\"party_a\":\"XX有限公司\",\"party_b\":\"YY公司\","
+        "\"subject\":\"软件定制开发\",\"payment_terms\":\"签订后30天付30%……\","
+        "\"amount\":\"100万元\",\"duration\":\"12个月\"}"
+    )
+    user = f"请提取以下合同的要素：\n\n{excerpt}"
+    try:
+        adapter = get_llm_adapter()
+        resp = adapter.chat(system, user, temperature=0.1)
+        result = _parse_json_obj(resp.text)
+        # 只保留预期字段，防止 LLM 输出意外字段
+        allowed = {"party_a", "party_b", "subject", "payment_terms", "amount", "duration"}
+        cleaned = {k: v for k, v in result.items() if k in allowed and v}
+        log.info("parser.llm_extract_ok", fields=list(cleaned.keys()))
+        return cleaned
+    except (LLMError, ValueError, Exception) as exc:
+        log.warning("parser.llm_extract_failed", error=str(exc))
+        return None
+
+
+def extract_elements_with_llm(text: str) -> dict:
+    """要素抽取升级版：正则先跑保留审查信号，LLM 补/覆盖六个语义要素。
+
+    供 parse 端点调用（精解析场景）；批量上传和审查器继续用 extract_elements（纯正则，速度优先）。
+    LLM 失败时静默降级为纯正则结果，链路不中断。
+    """
+    # Step 1：正则抽取（保留 text_length / has_* 审查信号，这些字段不走 LLM）
+    base = extract_elements(text)
+
+    # Step 2：LLM 补/覆盖六要素（只覆盖有值的字段，不用 null 覆盖正则的正确结果）
+    llm_result = llm_extract_elements(text)
+    if llm_result:
+        for key in ("party_a", "party_b", "subject", "payment_terms", "amount", "duration"):
+            if llm_result.get(key):
+                base[key] = llm_result[key]
+    else:
+        log.info("parser.llm_fallback", hint="LLM 提取失败，使用纯正则结果")
+
+    return base

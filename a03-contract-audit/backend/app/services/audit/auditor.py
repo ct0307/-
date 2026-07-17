@@ -93,36 +93,30 @@ def audit_contract(
     contract_text: str,
     db: "Session | None" = None,
     contract_id: int | None = None,
+    dimensions: list[str] | None = None,
+    contract_type: str = "",
 ) -> dict:
-    """多智能体主从协同审查。
-
-    返回 {"risks": [...], "cross_checks": [...]}：
-      - risks：两个 Agent 的风险清单（每条带 tier 分档）
-      - cross_checks：交叉验证产出的跨 Agent 冲突项
-
-    执行顺序为串行：法务先行写入共享上下文，财务读取后再审。
-    每个 Agent 优先 LLM；不可用或解析失败仅该角色降级到 Mock（不影响另一角色）。
-    """
+    """多智能体主从协同审查。dimensions 为空/None 时全量审查。"""
     all_risks: list[dict] = []
-    # 共享上下文（共享记忆窗口）：上游 Agent 的结论供下游读取，避免重复解析。
     shared_context: dict = {"elements": elements}
 
     for role in _AGENT_ORDER:
         try:
-            risks = _agent_audit(role, elements, contract_text, shared_context, db=db, contract_id=contract_id)
+            risks = _agent_audit(
+                role, elements, contract_text, shared_context,
+                db=db, contract_id=contract_id,
+                dimensions=dimensions or [],
+                contract_type=contract_type,
+            )
             log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(risks))
         except (LLMError, ValueError) as exc:
             log.warning("audit.agent_fallback", agent=role, error=str(exc)[:120])
             risks = _mock_audit(role, elements)
             log.info("audit.agent_done", agent=role, mode="mock", risk_count=len(risks))
         all_risks.extend(risks)
-        # 把该角色结论写入共享上下文，供下游 Agent 读取
         shared_context[role] = _summarize_for_context(role, risks, elements)
 
-    # 交叉验证：比对两 Agent 结论，产出冲突项
     cross_checks = detect_conflicts(shared_context, elements)
-
-    # 分级归档：卷入冲突的类别在分档时强制升红
     conflict_categories = {c["category"] for c in cross_checks if c["verdict"] == "conflict"}
     for r in all_risks:
         r["tier"] = classify_tier(r, conflict_categories)
@@ -147,6 +141,19 @@ def _summarize_for_context(role: str, risks: list[dict], elements: dict) -> dict
     }
 
 
+# 维度 key → 中文名映射（对齐前端 dimensions 定义）
+_DIM_LABELS: dict[str, str] = {
+    "legal":       "法律条款合规性",
+    "risk":        "风险条款识别",
+    "payment":     "金额与付款条款",
+    "breach":      "违约责任分析",
+    "ip":          "知识产权条款",
+    "nda":         "保密条款审查",
+    "termination": "终止与解除条款",
+    "dispute":     "争议解决条款",
+}
+
+
 def _agent_audit(
     role: str,
     elements: dict,
@@ -154,6 +161,8 @@ def _agent_audit(
     shared_context: dict,
     db: "Session | None" = None,
     contract_id: int | None = None,
+    dimensions: list[str] | None = None,
+    contract_type: str = "",
 ) -> list[dict]:
     """单个 Agent 审查：定向 RAG 依据 + 角色 prompt（含上游共享上下文）→ chat → 解析。
     db/contract_id 可选，仅用于写 LLM 调用日志，不影响审查主链路。
@@ -199,6 +208,7 @@ def _agent_audit(
 
     user_prompt = (
         f"【给定的法规/规则依据】\n{basis_block}\n{upstream_block}\n"
+        f"【合同基本信息】\n合同类型：{contract_type or '未指定'}\n"
         f"【已抽取的合同要素】\n{json.dumps({k: v for k, v in elements.items() if not k.startswith('has_')}, ensure_ascii=False)}\n\n"
         f"【合同全文】\n{contract_text[:8000]}\n\n"
         f"请以{cfg['name']}的视角，输出 JSON 数组形式的风险清单。"

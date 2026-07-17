@@ -23,34 +23,39 @@
 数据留存合规（保留期限、删除策略、导出权限）作为补充项跟进。
 
 ## 目录结构
-- `a03-demo/` — 产品原型 / 参赛演示页面（**当前唯一的代码**）
-  - `index.html` / `styles.css` / `app.js` — 纯原生 HTML+CSS+JS，无框架，**全部为模拟数据**
-  - `app.js` 1586 行，含角色体系 / 工作台 / 批量队列 / 多智能体协同 / 全文批注
-- `A03企业合同合规审查系统实施方案.docx` — 完整实施方案（技术栈、模块、接口、路线图、验收指标）
+- `a03-contract-audit/` — **主项目目录（当前所有代码）**
+  - `frontend/` — Vue3 + TS + Element Plus，卷宗风 UI，10个视图
+  - `backend/` — FastAPI + SQLAlchemy + SQLite，JWT+RBAC，LLM Adapter，RAG
+  - `backend/storage/` — 合同加密文件 + `a03_dev.db` 数据库
+  - `PROGRESS.md` — 详细改动日志（每次功能闭环后追加）
+- `a03-demo/` — 原生 JS 静态原型（已废弃，仅作交互参考）
+- `A03企业合同合规审查系统实施方案.docx` — 完整实施方案
 - `浙江省外包赛-2026赛题手册.pdf` — 官方赛题手册
-- `浙江省外包赛-2026赛题手册综合分析.docx` — 赛题综合分析
-- `backend/` — **尚未创建**，方案中规划的 FastAPI 后端
 
-## 当前状态（2026-07-07）
-- 只有纯前端静态原型（模拟数据），后端尚未开工
-- git 仓库已初始化（分支 master），**无任何提交**，所有文件 untracked
-- 下一步按方案：新建 `backend/`（FastAPI），前端从静态模拟逐步切换为调用真实接口
+## 当前状态（2026-07-17）
+- **前后端全部完成，11个模块功能闭环，100% 调真实接口（MOCK_ENABLED 全 false）**
+- 前端已从原生JS原型迁移到 Vue3 + TypeScript + Element Plus，卷宗风UI
+- 后端 FastAPI + SQLite（开发期）完整运行，25条API路由，10张数据库表
+- RAG 全链路接通：本地 bge-small-zh-v1.5 embedding + BM25+向量RRF混合检索，知识库 973条
+- 数据安全：合同Fernet加密存储、字段级脱敏、部门访问隔离、审计日志
+- 演示账号：admin/admin123、legal/legal123、finance/finance123、business/business123
 
-## 规划技术栈（来自实施方案，尚未落地）
-| 层 | 技术 |
-|---|---|
-| 前端 | Vue 3 + Vite + TypeScript + Element Plus（注：现有 demo 是原生 JS，非 Vue） |
-| 图表 | ECharts |
-| 后端 | Python FastAPI |
-| 数据库 | PostgreSQL（开发期可用 SQLite） |
-| 向量库 | PostgreSQL + pgvector（Demo 期用 Chroma），支持 RAG |
-| 文档解析 | pdfplumber / pypdf / python-docx |
-| 报表 | openpyxl（导出 Excel 风险台账） |
-| 异步任务 | Redis + RQ 或 Celery（支撑 50 份合同批量） |
-| 文件存储 | 本地存储 / MinIO |
-| AI 模型 | 统一 LLM Adapter，可切换 OpenClaw / DeepSeek / Qwen |
-| 权限 | JWT + RBAC（业务/法务/财务/管理员） |
-| 部署 | Docker Compose |
+## 已落地技术栈
+| 层 | 技术 | 状态 |
+|---|---|---|
+| 前端 | Vue 3 + Vite + TypeScript + Element Plus | ✅ 运行中 |
+| 图表 | ECharts | ✅ 已集成 |
+| 后端 | Python FastAPI | ✅ 运行中 |
+| 数据库 | SQLite（开发）/ PostgreSQL（生产待迁移） | ✅ SQLite 运行中 |
+| 向量库 | JSON+numpy 内存计算（pgvector 待迁移） | 开发期够用 |
+| 文档解析 | pdfplumber / python-docx | ✅ 已集成 |
+| 报表 | openpyxl（导出 Excel 风险台账） | ✅ 已集成 |
+| 文件存储 | 本地存储（Fernet AES 加密） | ✅ 已集成 |
+| AI 模型 | LLM Adapter（DeepSeek/Qwen/OpenClaw 可切换） | ✅ DeepSeek 运行中 |
+| Embedding | BAAI/bge-small-zh-v1.5 本地离线 | ✅ 已集成 |
+| RAG 检索 | BM25 + 向量 RRF 混合检索 | ✅ 已集成 |
+| 权限 | JWT + RBAC（admin/legal/finance/business） | ✅ 已集成 |
+| 部署 | Docker Compose | 配置完成，未实测 build |
 
 ## 技术栈取舍（企业交付视角，已重评）
 - **保留（企业刚需）**：FastAPI、LLM Adapter、PostgreSQL、Docker Compose、RBAC+JWT+审计日志（升为 P1）、Celery+Redis 队列（企业真实批量/长任务/失败重试/任务可观测都需要，不砍）。
@@ -67,15 +72,22 @@
 ## 核心业务闭环（最小 RAG 流程）
 合同上传 → 文本+要素抽取 → RAG 检索 Top3 法规/规则/模板片段 → LLM 出具结构化 JSON 风险结论 → 人工审核闭环（待处理/已确认/已忽略/需修改）→ Excel 台账 + 多维报表
 
-## 关键 API（规划）
-- `POST /api/contracts/upload` 上传合同
-- `POST /api/contracts/{id}/parse` 解析文本
-- `POST /api/contracts/{id}/audit` 触发审查
-- `GET  /api/contracts/{id}/risks` 风险清单
-- `PATCH /api/risks/{id}/status` 更新处理状态
-- `GET  /api/reports/export` 导出 Excel 台账
-- `GET  /api/dashboard/summary` 看板统计
-- `POST /api/knowledge/import` 导入法规/行业规则/合同模板
+## 关键 API（已实现，共25条路由）
+- `POST /api/v1/auth/login` 登录（form-urlencoded）
+- `POST /api/v1/contracts/upload` 上传合同（加密存储）
+- `POST /api/v1/contracts/batch-upload` 批量上传（最多50份）
+- `POST /api/v1/contracts/{id}/parse` 解析文本+要素抽取
+- `POST /api/v1/contracts/{id}/audit` 触发双Agent审查
+- `GET  /api/v1/contracts/{id}/risks` 风险清单（含rag_sources）
+- `PATCH /api/v1/risks/{id}/status` 更新复核状态
+- `GET  /api/v1/reports/export` 导出 Excel 台账
+- `GET  /api/v1/dashboard/summary` 看板统计
+- `POST /api/v1/knowledge/import-file` 导入法规文件（含智能切片）
+- `GET  /api/v1/knowledge/cards` 知识库分页列表
+- `POST /api/v1/chat` 风险条款追问 AI
+- `GET  /api/v1/admin/audit-logs` 审计日志
+- `GET  /api/v1/admin/llm-calls` LLM 调用记录
+- （其余 CRUD 路由见 router.py）
 
 ## 验收指标（评分关注点）
 - 合同要素抽取准确率目标 ≥ 90%
@@ -94,7 +106,6 @@
 ## 约定
 - **企业交付第一、参赛演示第二**，所有取舍以企业交付硬约束为准（见上文）
 - 交付物含可运行系统 + 部署教程 + 演示 + 说明文档
-- 现有 `a03-demo` 是原型/交互参考，前端将迁移到 Vue3；改后端接口时逐步替换模拟数据
 - 前端改动需覆盖：正常/空/错误/响应式状态，完成后尽量本地起服务浏览器实测
 - 涉及删除、重置、依赖安装前先确认
 - **进度记录（强制）**：每完成一次完整改动（功能闭环 / 前后端联动 / 重要重构），必须在 `a03-contract-audit/PROGRESS.md` 追加一条（最新在上），记录日期、改动主题、涉及文件、验证结论。零散小修不必记，成体系的改动必记。

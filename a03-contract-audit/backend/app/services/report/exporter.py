@@ -107,6 +107,8 @@ def contracts_metadata(db: Session) -> list[dict]:
             "payment_terms": (elems.get("payment_terms") or "—")[:80],  # 截断防超宽
             "amount": elems.get("amount") or "—",
             "risk_high": risk_counts.get("high", 0),
+            "risk_medium": risk_counts.get("medium", 0),
+            "risk_low": risk_counts.get("low", 0),
             "risk_total": sum(risk_counts.values()),
             "status": c.status,
         })
@@ -153,8 +155,10 @@ def report_summary(db: Session, range_key: str = "month") -> dict:
     """多维报表聚合：KPI + 趋势 + 风险分布 + 部门排行 + 高风险类别 Top5。
 
     形状对齐前端 `ReportData`（frontend/src/mock/reports.ts）。
-    KPI/风险分布/部门/Top 来自真实聚合；趋势轴无历史快照，用固定档位标签，
-    末点落真实总量、前几点按比例递推，响应以 mode 标注（real/sparse）。
+    全部来自真实聚合：KPI/风险分布/部门/Top 为全量统计；趋势按合同 created_at
+    逐日累计（合同级口径，与 KPI 一致），数据点数 = 有合同产生的自然日数，
+    响应以 mode 标注（real≥2 点 / sparse<2 点）。range_key 保留向后兼容，
+    当前趋势为全量累计、不随分段变化（数据跨度不足时分段无意义）。
     """
     range_key = range_key if range_key in _RANGE_LABELS else "month"
 
@@ -167,11 +171,12 @@ def report_summary(db: Session, range_key: str = "month") -> dict:
     medium = level_rows.get("medium", 0)
     low = level_rows.get("low", 0)
 
-    # 合规通过率：无风险合同占比（近似——合同下无风险即视为通过）
-    risky_contract_ids = {cid for (cid,) in db.query(Risk.contract_id).distinct().all()}
-    passed = total_contracts - len(risky_contract_ids)
+    # 合规通过率：无「高风险」合同占比（口径统一——合同下无 high 级风险即视为通过）
+    high_risk_contract_ids = {
+        cid for (cid,) in db.query(Risk.contract_id).filter(Risk.level == "high").distinct().all()
+    }
+    passed = total_contracts - len(high_risk_contract_ids)
     pass_rate = round(passed / total_contracts * 100, 1) if total_contracts else 0.0
-    no_risk = passed  # donut「无风险」段 = 通过的合同数
 
     # 部门风险排行：按合同部门聚合风险数
     dept_rows = (
@@ -196,13 +201,11 @@ def report_summary(db: Session, range_key: str = "month") -> dict:
     )
     tops = [{"name": cat, "value": cnt} for cat, cnt in cat_rows]
 
-    # 趋势：无时间序列表，用固定档位标签 + 末点真实总量、前点按等比递推占位
-    labels = _RANGE_LABELS[range_key]
-    n = len(labels)
-    total_series = _ramp_series(total_contracts, n)
-    risk_series = _ramp_series(high + medium, n)
-    pass_series = [max(0, t - r) for t, r in zip(total_series, risk_series)]
-    mode = "real" if total_contracts >= n else "sparse"
+    # 趋势：按合同真实 created_at 逐日累计（合同级口径，与 KPI 一致）。
+    # total=累计审查合同数，risk=累计含高风险合同数，pass=累计通过（无高风险）合同数。
+    # 数据点数 = 有合同产生的自然日数；<2 天时 mode=sparse，前端提示"数据积累中"。
+    labels, total_series, pass_series, risk_series = _cumulative_trend(db, high_risk_contract_ids)
+    mode = "real" if len(labels) >= 2 else "sparse"
 
     return {
         "kpi": {
@@ -222,7 +225,6 @@ def report_summary(db: Session, range_key: str = "month") -> dict:
             {"name": "高风险", "value": high},
             {"name": "中风险", "value": medium},
             {"name": "低风险", "value": low},
-            {"name": "无风险", "value": no_risk},
         ],
         "depts": depts,
         "tops": tops,
@@ -230,13 +232,35 @@ def report_summary(db: Session, range_key: str = "month") -> dict:
     }
 
 
-def _ramp_series(total: int, n: int) -> list[int]:
-    """把总量 total 分摊成 n 点的递增趋势占位（末点接近 total）。"""
-    if n <= 0:
-        return []
-    if total <= 0:
-        return [0] * n
-    # 线性递增权重，归一化后按 total 分配，保证求和≈total 且末点最大
-    weights = [i + 1 for i in range(n)]
-    s = sum(weights)
-    return [max(1, round(total * w / s)) for w in weights]
+def _cumulative_trend(db: Session, high_risk_contract_ids: set) -> tuple[list, list, list, list]:
+    """按合同 created_at 的自然日聚合，返回 (日期标签, 累计合同数, 累计通过数, 累计高风险数)。
+
+    真实时间序列：每个数据点对应一个有合同产生的日期，数值为截至当日的累计量。
+    数据稀疏（合同集中在少数几天）时点数就少，是真实反映而非编造。
+    """
+    rows = db.query(Contract.id, Contract.created_at).order_by(Contract.created_at).all()
+    # 按日期分桶：{date_str: [该日合同数, 该日高风险合同数]}
+    buckets: dict[str, list[int]] = {}
+    for cid, created in rows:
+        if created is None:
+            continue
+        day = created.strftime("%m-%d")
+        b = buckets.setdefault(day, [0, 0])
+        b[0] += 1
+        if cid in high_risk_contract_ids:
+            b[1] += 1
+
+    labels: list[str] = []
+    total_series: list[int] = []
+    pass_series: list[int] = []
+    risk_series: list[int] = []
+    cum_total = cum_risk = 0
+    for day in sorted(buckets.keys()):
+        cnt, risk_cnt = buckets[day]
+        cum_total += cnt
+        cum_risk += risk_cnt
+        labels.append(day)
+        total_series.append(cum_total)
+        risk_series.append(cum_risk)
+        pass_series.append(cum_total - cum_risk)
+    return labels, total_series, pass_series, risk_series

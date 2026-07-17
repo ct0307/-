@@ -6,24 +6,29 @@ export const useAuthStore = defineStore('auth', () => {
   const token = ref<string>(localStorage.getItem('token') || '')
   const role = ref<string>(localStorage.getItem('role') || '')
   const username = ref<string>(localStorage.getItem('username') || '')
+  const department = ref<string>(localStorage.getItem('department') || '')
 
   async function login(user: string, password: string) {
     const res = await loginApi(user, password)
     token.value = res.access_token
     role.value = res.role
     username.value = res.username
+    department.value = res.department || ''
     localStorage.setItem('token', res.access_token)
     localStorage.setItem('role', res.role)
     localStorage.setItem('username', res.username)
+    localStorage.setItem('department', res.department || '')
   }
 
   function logout() {
     token.value = ''
     role.value = ''
     username.value = ''
+    department.value = ''
     localStorage.removeItem('token')
     localStorage.removeItem('role')
     localStorage.removeItem('username')
+    localStorage.removeItem('department')
   }
 
   function isAuthenticated() {
@@ -36,5 +41,5 @@ export const useAuthStore = defineStore('auth', () => {
     return roles.includes(role.value)
   }
 
-  return { token, role, username, login, logout, isAuthenticated, hasRole }
+  return { token, role, username, department, login, logout, isAuthenticated, hasRole }
 })

@@ -60,6 +60,18 @@ _CAT_LABEL = {
 _DESC_MAX = 120
 
 
+def _chips_for(cat_label: str, source: str | None) -> list[str]:
+    """根据分类和来源生成卡片标签列表。"""
+    chips: list[str] = [cat_label]
+    if source:
+        # 去掉常见文件扩展名，截断过长来源名
+        name = source.rsplit(".", 1)[0] if "." in source else source
+        name = name[:20] + "…" if len(name) > 20 else name
+        if name and name != cat_label:
+            chips.append(name)
+    return chips
+
+
 # —— 工具函数 ——
 
 def _clean_lines(text: str) -> str:

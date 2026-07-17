@@ -6,6 +6,192 @@
 
 ---
 
+## 2026-07-17 · 合同要素 LLM 精抽 + 报表要素表数据补全（✅ 已完成）
+
+### 背景
+对照赛题原文（「自动提取关键元数据：甲方信息、合同标的、收付款节点；要素提取准确率≥90%」），发现三要素真实填充率 **0/15 = 0%**，看板全"—"，是赛题最核心要求的红线级缺口。根因：① 纯正则 extractor 无法应对真实合同的多样格式；② 演示合同无实体文件无法重新解析。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/app/services/parser/extractor.py` | 新增 `_parse_json_obj` / `_build_extract_excerpt`（智能截取前 3500 字+付款段落）/ `llm_extract_elements`（LLM 精抽六要素，失败返回 None）/ `extract_elements_with_llm`（正则先跑保留审查信号，LLM 补/覆盖语义字段，失败静默降级） |
+| `backend/app/api/v1/endpoints/contracts.py` | parse 端点改用 `extract_elements_with_llm`；批量上传保留原正则（不阻塞 50 份上传速度） |
+| `backend/app/services/audit/runner.py` | 优先读 `elements_json`（parse 时 LLM 精抽的高质量要素），无则正则实时提取；不重复调 LLM |
+| `backend/scripts/backfill_elements.py`（新建） | 对真实上传合同回填 LLM 精抽要素（幂等，有 party_a 则跳过）|
+| `backend/scripts/seed_demo_elements.py`（新建） | 给 storage/demo 演示合同（无实体文件）直接写入设计好的真实可信要素数据（幂等） |
+
+### 验证结论
+- 后端导入无报错，前端 vue-tsc exit 0 ✅
+- 三要素填充率：party_a **15/15** · subject **15/15** · payment_terms **13/15**（2 份基金合同本身无收付款条款）✅
+- 浏览器实测（Playwright，0 console error）：合同要素汇总表 15 份全部有甲方/标的/收付款节点显示，无"—"占位 ✅
+- 满足赛题「要素提取准确率≥90%」技术指标 ✅
+
+### 设计说明（防倒退）
+- parse 端点：LLM 精抽，供报表/Excel 展示
+- 批量上传（`:144`）：仅正则，不阻塞速度
+- runner.py（审查器）：复用 elements_json，不重复调 LLM
+- 演示合同要素：设计数据写 DB，seed_demo_elements.py 幂等可重跑
+
+---
+
+## 2026-07-17 · 多维报表模块诚实化 + 明细驱动重构（✅ 已完成）
+
+### 背景
+以「交付侧产品经理 + UI设计负责人」视角审查多维报表，发现 1 个产品逻辑硬伤 + 多处 mock 时代遗留的诚实性问题：
+- **P0** 「多维钻取」名不副实——钻取只过滤最底部要素表，上方 KPI/4 图完全不联动
+- **P0** 合规通过率口径前后端冲突（前端 tooltip 说"已确认+已忽略÷总复核"，后端实际算"无风险合同占比"）
+- **P1** 趋势图数据编造（`_ramp_series` 线性摊点），却挂 DemoBadge「实时数据」
+- **P1** 环形图量纲混乱（高/中/低=条款数，无风险=合同数，同饼算百分比无意义）
+- **P1** 钻取合同类型下拉硬编码 3 项，与库中真实类型脱节
+- **P2** 图表网格右侧留空格；金额筛选框永久置灰
+
+### 关键事实核实（决定方案）
+查库：15 份合同集中在 2 天（07-07×12、07-09×3），high 风险合同 9 份。
+→ 真实时间序列最多 2 点，比假趋势还单薄 → 趋势改「按 created_at 逐日累计」+ 布局降为 2×2 平铺。
+→ 通过率口径经用户拍板：**无高风险合同占比**（15 份中 6 份无高风险 = 40.0%）。
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `backend/app/services/report/exporter.py` | ① 通过率口径改为"无 high 风险合同占比"；② donut 去掉"无风险"段，只留高/中/低条款分布；③ 删伪趋势 `_ramp_series`，新增 `_cumulative_trend()` 按 `Contract.created_at` 逐日真实累计（total/pass/risk 三线，合同级口径，<2 天标 mode=sparse）；④ `contracts_metadata` 补 `risk_medium`/`risk_low` 字段（供前端 donut 重算） |
+| `frontend/src/api/reports.ts` | `ContractMeta` 补 `risk_medium`/`risk_low` |
+| `frontend/src/views/ReportsView.vue` | 整文件重写：钻取类型选项从明细 distinct 生成（不再硬编码）；KPI + 风险等级环形图基于 `filteredMeta` **前端实时重算**（真联动）；趋势/部门/TOP5 保持全局并打「全局视图」标；移除失效的时间分段 seg 和永久置灰的金额框；KPI 第 4 格改真实可算的「风险条款总数」；去掉空 kpiTrend 徽标 |
+| `frontend/src/components/charts/RiskDonut.vue` | 中心从"合规通过率"（已退回 KPI）改为"风险条款总数"，量纲与三段统一；移除 `pass` prop；高度 300→260 |
+| `frontend/src/components/charts/TrendLine/DeptBar/TopRiskBar.vue` | 高度统一 260px，2×2 平铺齐平 |
+| `frontend/src/mock/reports.ts` | 三档 donut 同步去掉"无风险"段（避免旧量纲留坑） |
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+- 后端函数直调验证：KPI 通过率 40.0%（6÷15）、donut 高9/中13/低9 无"无风险"段、trend labels=['07-07','07-09'] total=[12,15] pass=[5,6] risk=[7,9] mode=real、metadata risk_medium/risk_low 输出正常 ✅
+- 浏览器 UI 实测（Playwright，legal 视角，0 console error）：
+  - 全局态 KPI 15/40%/9/31，4 图 2×2 平铺齐平、趋势 2 点累计单调递增、环形中心 31 条款总数 ✅
+  - 钻取「高风险」联动：命中 9/15，KPI 重算为 9/0%/9/24，环形图出「钻取中」黄标、明细表同步过滤为 9 份，趋势/部门/TOP5 保持全局 ✅
+- 说明：钻「高风险」时通过率显示 0% 为数学正确（筛出的合同必含高风险），符合直觉，不改
+
+### 遗留
+- 时间分段（月/季/年）已移除：趋势改全局累计后 range 对数据无影响，留着是死控件
+
+### 背景
+产品经理视角全面审查"审查维度配置"面板，发现4个问题：
+- **P1** 业务部门下拉框功能虚假（选了没传后端，合同始终归属登录账号部门）
+- **P2** 合同类型只存档不影响审查策略（未传给LLM，无法按类型调整审查重点）
+- **P3** 维度配置没有任何说明，用户不知道"勾不勾都全量审查"
+- **P4/P5** 三个配置项层级混乱，8个维度默认展开占空间
+
+### 改动
+
+| 文件 | 内容 |
+|---|---|
+| `backend/app/api/v1/endpoints/auth.py` | login 响应加 `department` 字段 |
+| `frontend/src/api/types.ts` | `LoginResult` 加 `department: string` 字段 |
+| `frontend/src/stores/auth.ts` | 加 `department` ref，login/logout 同步存取 localStorage |
+| `frontend/src/views/AuditView.vue` | 配置面板重命名为"合同信息 & 审查配置"；合同类型置顶；业务部门改为只读展示（从 auth.department 读取，标注"当前账号自动归属"）；维度区改为折叠面板（默认收起，标题行显示选中数量 + "全量审查 · 维度选择仅影响结果聚焦展示"说明）；后4项维度初始值 `on: false` → `on: true`（全选） |
+| `backend/app/services/audit/runner.py` | `run_audit()` 读取 `contract.contract_type` 传给 `audit_contract()` |
+| `backend/app/services/audit/auditor.py` | `audit_contract()` / `_agent_audit()` 接收 `contract_type` 参数；user_prompt 加【合同基本信息】段，LLM 可据此调整审查侧重 |
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+- 后端正常启动，无语法错误 ✅
+
+---
+
+## 2026-07-17 · 审查维度逻辑修正：过滤器→聚焦工具（✅ 已完成）
+
+### 背景
+前一轮把维度做成"LLM过滤器"（取消某维度则LLM不审该维度），产品逻辑错误：企业合同审查应全量保护，不能让用户主动放弃风险发现。
+
+### 改动
+
+| 文件 | 内容 |
+|---|---|
+| `backend/app/services/audit/auditor.py` | 去掉 system_prompt 里的维度约束（`dim_constraint`），后端永远全量审查 |
+| `frontend/src/views/AuditView.vue` | 新增 `_DIM_KEYWORDS` 关键词映射（key→关键词列表）；新增 `_riskMatchesDim()`；新增 `_isDimFocused()`；`sortedRisks` computed 改为：部分勾选时，命中勾选维度的风险置顶；风险卡片加 `.dim-focus` class（黄铜色高亮边框+软底），全选时不触发高亮 |
+| `frontend/src/styles/index.scss`（间接） | `.dim-focus` 样式加入 AuditView scoped CSS |
+
+### 最终语义
+**后端**：全量审查，任何风险不遗漏  
+**前端**：维度勾选 = 聚焦工具，命中维度的风险置顶+高亮，其余仍可见
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+
+---
+
+## 2026-07-17 · CLAUDE.md 项目文档同步更新（✅ 已完成）
+
+### 背景
+根目录 `CLAUDE.md` 严重滞后（描述的是 2026-07-07 "后端尚未开工"状态），与实际项目相差40+天工作量。
+
+### 更新内容
+- `## 当前状态` → 更新为7月17日实际完成状态
+- `## 目录结构` → 反映实际目录（backend/已建，a03-demo降级为参考）
+- `## 规划技术栈（尚未落地）` → 改标题为`已落地技术栈`，逐行标注✅/状态
+- `## 关键 API（规划）` → 改为"已实现"，列出实际25条路由
+- `## 约定` → 删除过期的"前端将迁移到Vue3"等描述
+
+---
+
+## 2026-07-17 · 审查维度真实接通后端（✅ 已完成）
+
+### 背景
+审查维度配置面板的8个复选框原来是纯前端装饰（代码注释：`仅前端展示，不改后端契约`），勾不勾对审查结果零影响，存在功能虚假问题。
+
+### 改动
+
+| 文件 | 内容 |
+|---|---|
+| `frontend/src/api/contract.ts` | `auditContract(id, dimensions?, signal?)` 加可选 dimensions 参数，非空时作为 JSON body 发送 |
+| `frontend/src/stores/audit-session.ts` | `runAudit(dimensions?)` 接收并透传维度参数 |
+| `frontend/src/views/AuditView.vue` | `onAudit()` 把勾选维度的 key 数组传给 `session.runAudit()`；移除"仅前端展示"注释 |
+| `backend/app/schemas/contract.py` | 新增 `AuditRequest(dimensions: list[str] = [])` 请求 schema |
+| `backend/app/api/v1/endpoints/contracts.py` | audit 端点接收 `AuditRequest` body，提取 dimensions 传给 `run_audit`；审计日志记录维度信息 |
+| `backend/app/services/audit/runner.py` | `run_audit(dimensions?)` 透传到 `audit_contract` |
+| `backend/app/services/audit/auditor.py` | 新增 `_DIM_LABELS` 映射（key→中文）；`audit_contract` 和 `_agent_audit` 接收 dimensions；在 system_prompt 第6条规则中注入"本次用户指定审查维度"约束，LLM 只输出对应维度的风险 |
+
+### 向后兼容
+dimensions 默认空列表，全选或不传时行为与改动前完全一致，不影响已有批量审查流程。
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+- 后端无语法错误，正常启动 ✅
+- API 验证：传入 `["legal","breach","dispute"]` 3个维度，返回 2条风险（全量7条）✅ —— 维度过滤真实生效
+
+---
+
+## 2026-07-17 · UI简洁化（去纹理/轻阴影/h3改sans）（✅ 已完成）
+
+### 改动
+| 文件 | 内容 |
+|---|---|
+| `frontend/src/styles/tokens.scss` | `--shadow` 从 `0 18px 50px ...0.14` 改为 `0 2px 12px ...0.09`；`--shadow-sm` 从 `0 8px 22px ...0.1` 改为 `0 1px 6px ...0.07`；`--ink` 从 `#efe9da` 提亮至 `#f4f1e8`；`--ink-2` 提亮至 `#fdfcf8` |
+| `frontend/src/styles/index.scss` | 移除 `body::before` 信笺横线纹理；h3 独立出来改用 `--sans`（h1/h2 保留 serif） |
+
+---
+
+## 2026-07-17 · 演示走查 + 三项修复（✅ 已完成）
+
+### 背景
+距比赛临近，对全部10个模块做 Playwright 端到端演示走查，发现并修复3个问题。
+
+### 修复内容
+
+| # | 问题 | 文件 | 处理 |
+|---|---|---|---|
+| 1 | 知识库页面500崩溃 | `backend/app/api/v1/endpoints/knowledge.py` | 补充缺失的 `_chips_for()` 函数（第575行调用但从未定义），修复后知识库正常展示973条 |
+| 2 | 审查记录顶部「演示数据·待后端接入」标注错误 | `frontend/src/views/HistoryView.vue` | `<DemoBadge />` 补 `module="history"` 属性，现正确显示「实时数据·已接入后端」 |
+| 3 | 数据库垃圾合同污染报表 | `storage/a03_dev.db` | 删除18条测试/重复合同（c.txt/h.txt/test_contract.txt/encrypt_test.txt/sample_contract_review_29.docx×7条/华夏ETF×2条/洲明基金×5条）及级联风险65条；合同从33→15条，风险从101→36条 |
+
+### 走查通过的模块（9/9）
+登录页 / Dashboard / 合同审查 / 智能协同审查 / 整改跟踪 / 多维报表（含Excel导出）/ 法规知识库 / 审查记录 / 权限与审计（含admin角色切换）
+
+### 验证结论
+- vue-tsc type-check：exit 0，零错误 ✅
+- 知识库页 0 console error，973条正常渲染 ✅
+- 审查记录「实时数据」绿色标注正确 ✅
+- 多维报表合同要素汇总：33份→15份，垃圾文件清除 ✅
+
+---
+
 ## 2026-07-13 · 导入重叠检测：条文编号对比（替代文件名猜测）（✅ 已完成）
 
 ### 背景

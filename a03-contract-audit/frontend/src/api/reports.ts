@@ -21,6 +21,8 @@ export interface ContractMeta {
   payment_terms: string
   amount: string
   risk_high: number
+  risk_medium: number
+  risk_low: number
   risk_total: number
   status: string
 }

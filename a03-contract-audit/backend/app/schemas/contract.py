@@ -47,6 +47,11 @@ class CrossCheckOut(BaseModel):
     category: str
 
 
+class AuditRequest(BaseModel):
+    """审查触发请求：可选维度列表，空/不传表示全量审查。"""
+    dimensions: list[str] = []
+
+
 class AuditResponse(BaseModel):
     """审查触发响应：同步返回风险数与冲突项；异步返回 task_id。"""
     contract_id: int

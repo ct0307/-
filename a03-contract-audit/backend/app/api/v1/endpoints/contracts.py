@@ -11,11 +11,11 @@ from app.api.deps import get_current_user, require_roles
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.models import Contract, Risk, User
-from app.schemas.contract import AuditResponse, ContractOut, CrossCheckOut, HistoryRow, RiskOut
+from app.schemas.contract import AuditResponse, AuditRequest, ContractOut, CrossCheckOut, HistoryRow, RiskOut
 from app.services import audit_log
 from app.services import masking
 from app.services.audit.runner import run_audit
-from app.services.parser.extractor import extract_elements, extract_text
+from app.services.parser.extractor import extract_elements, extract_elements_with_llm, extract_text
 
 router = APIRouter()
 
@@ -210,9 +210,9 @@ def upload_contract(
 def parse_contract(contract_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict:
     contract = _get_contract(db, contract_id, user)
     text = extract_text(contract.storage_path)
-    elements = extract_elements(text)
+    # 精解析：正则 + LLM 语义抽取六要素（供报表/Excel 展示），LLM 失败自动降级正则
+    elements = extract_elements_with_llm(text)
     contract.status = "parsed"
-    # 持久化解析要素：甲方/乙方/合同标的/收付款节点等，供报表导出使用
     contract.elements_json = json.dumps(
         {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
         ensure_ascii=False,
@@ -225,25 +225,24 @@ def parse_contract(contract_id: int, db: Session = Depends(get_db), user: User =
 @router.post("/{contract_id}/audit", response_model=AuditResponse)
 def audit_contract_endpoint(
     contract_id: int,
+    body: AuditRequest = AuditRequest(),
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("legal", "finance")),
 ) -> AuditResponse:
     contract = _get_contract(db, contract_id, user)
+    dimensions = body.dimensions or []
 
     if settings.AUDIT_ASYNC:
-        # 异步：派发 Celery 任务，立即返回 task_id，前端轮询任务状态。
-        # 冲突项在任务完成后由前端拉取风险时另行获取（此处不阻塞）。
         from app.tasks.audit_tasks import run_contract_audit
-
-        task = run_contract_audit.delay(contract_id)
+        task = run_contract_audit.delay(contract_id, dimensions)
         contract.status = "auditing"
         db.commit()
         audit_log.record(db, user_id=user.id, action="audit_dispatch", target=f"contract:{contract_id}", detail=f"task:{task.id}")
         return AuditResponse(contract_id=contract_id, task_id=task.id, status="auditing")
 
-    # 同步：本地无 Redis 时直接执行，行为与 Celery 任务一致（共用 run_audit）。
-    result = run_audit(db, contract)
-    audit_log.record(db, user_id=user.id, action="audit", target=f"contract:{contract_id}", detail=f"risks={result['risk_count']}")
+    result = run_audit(db, contract, dimensions=dimensions)
+    dim_detail = f"risks={result['risk_count']},dims={','.join(dimensions) if dimensions else 'all'}"
+    audit_log.record(db, user_id=user.id, action="audit", target=f"contract:{contract_id}", detail=dim_detail)
     return AuditResponse(
         contract_id=contract_id,
         status="done",

@@ -25,25 +25,21 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-// 全局横线信笺纹理（极淡，铺在页面底）
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  @include paper-texture(32px, 0.5);
-}
+// 全局横线信笺纹理已移除，保持页面底色干净
 #app {
   position: relative;
   z-index: 1;
 }
 
-// —— 排版签名：标题衬线、数据等宽 ——
+// —— 排版签名：一级标题衬线，三级以下无衬线 ——
 h1,
-h2,
-h3 {
+h2 {
   font-family: var(--serif);
+  color: var(--ivory);
+  font-weight: 600;
+}
+h3 {
+  font-family: var(--sans);
   color: var(--ivory);
   font-weight: 600;
 }

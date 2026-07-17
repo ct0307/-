@@ -100,7 +100,7 @@ function goAudit() { router.push('/audit') }
           <el-option label="低风险" value="低风险" />
         </el-select>
       </div>
-      <DemoBadge />
+      <DemoBadge module="history" />
     </div>
 
     <el-card shadow="never">
