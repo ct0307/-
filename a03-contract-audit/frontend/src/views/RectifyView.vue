@@ -100,17 +100,19 @@ async function advance(id: string, current: RectifyStatus) {
       <DemoBadge module="rectify" />
     </div>
 
-    <el-alert
+    <!-- 加载失败内联错误块（统一 el-result 风格） -->
+    <el-result
       v-if="rectify.error"
-      :title="rectify.error"
-      type="error"
-      show-icon
-      :closable="false"
-      style="margin-bottom: 16px"
+      icon="error"
+      title="加载失败"
+      :sub-title="rectify.error"
     >
-      <el-button size="small" @click="rectify.load(true)">重试</el-button>
-    </el-alert>
+      <template #extra>
+        <el-button type="primary" @click="rectify.load(true)">重新加载</el-button>
+      </template>
+    </el-result>
 
+    <template v-else>
     <section class="rk-row">
       <article class="rk-card rk-pending"><span>待处理</span><strong class="mono">{{ rectify.countByStatus.待处理 }}</strong></article>
       <article class="rk-card rk-processing"><span>处理中</span><strong class="mono">{{ rectify.countByStatus.处理中 }}</strong></article>
@@ -168,6 +170,7 @@ async function advance(id: string, current: RectifyStatus) {
         />
       </div>
     </el-card>
+    </template>
   </div>
 </template>
 

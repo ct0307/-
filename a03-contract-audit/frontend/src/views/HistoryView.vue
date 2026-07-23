@@ -242,7 +242,7 @@ function goAudit() { router.push('/audit') }
   line-height: 1.6;
   padding: 6px 8px;
   background: var(--ink-3);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
 }
 .risk-basis,
 .risk-suggest {

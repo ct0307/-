@@ -101,17 +101,19 @@ const activity = computed(() =>
   <div class="dash">
     <div class="dash-note"><DemoBadge module="dashboard" /></div>
 
-    <el-alert
+    <!-- 加载失败内联错误块（统一 el-result 风格） -->
+    <el-result
       v-if="error"
-      :title="error"
-      type="error"
-      show-icon
-      :closable="false"
-      class="dash-error"
+      icon="error"
+      title="看板加载失败"
+      :sub-title="error"
     >
-      <el-button size="small" text @click="loadSummary">重试</el-button>
-    </el-alert>
+      <template #extra>
+        <el-button type="primary" @click="loadSummary">重新加载</el-button>
+      </template>
+    </el-result>
 
+    <template v-else>
     <!-- KPI 行 -->
     <section v-if="loading" class="kpi-row">
       <el-skeleton v-for="i in 4" :key="i" :rows="2" animated class="kpi-card" />
@@ -191,6 +193,7 @@ const activity = computed(() =>
         </el-button>
       </el-card>
     </section>
+    </template>
   </div>
 </template>
 
@@ -267,7 +270,7 @@ const activity = computed(() =>
   color: var(--seal);
   background: var(--seal-soft);
   padding: 2px 10px;
-  border-radius: 20px;
+  border-radius: var(--r-pill);
 }
 
 /* 待办列表 */

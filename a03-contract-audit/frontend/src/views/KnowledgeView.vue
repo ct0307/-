@@ -566,7 +566,7 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
 .chips button {
   padding: 5px 12px;
   border: 1px solid var(--line);
-  border-radius: 20px;
+  border-radius: var(--r-pill);
   background: var(--ink-2);
   color: var(--ivory-dim);
   cursor: pointer;
@@ -656,7 +656,7 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
 .k-chips span {
   font-size: 11px;
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--brass-soft);
   color: var(--brass);
   font-family: var(--mono);

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 侧栏：品牌印章徽标 + 导航（按角色过滤）+ OpenClaw 状态 + 用户卡片 + 折叠按钮。
 // collapsed 由 MainLayout 通过 provide 注入，双方共享同一个 ref。
-import { computed, inject, ref, type Ref } from 'vue'
+import { computed, inject, nextTick, onMounted, ref, watch, type Ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { NAV_ITEMS } from '@/config/nav'
 import { useAuthStore } from '@/stores/auth'
@@ -13,6 +13,7 @@ const auth = useAuthStore()
 
 // 折叠状态：由 MainLayout 注入；fallback 为本地 ref（防止脱离 layout 独用时报错）
 const collapsed = inject<Ref<boolean>>('sidebarCollapsed', ref(false))
+const mobileOpen = inject<Ref<boolean>>('mobileSidebarOpen', ref(false))
 
 function toggleCollapse() {
   collapsed.value = !collapsed.value
@@ -21,6 +22,53 @@ function toggleCollapse() {
 // 按真实登录角色过滤菜单（RBAC）
 const menuItems = computed(() => NAV_ITEMS.filter((n) => auth.hasRole(n.roles)))
 const activeIndex = computed(() => route.path)
+
+// ── 无障碍：roving tabindex + 移动端状态联动 ──
+// el-menu-item 默认 tabindex=-1，Tab 键完全跳过侧栏。
+// 策略：激活项设 0（Tab 可达）；移动端侧栏关闭时全部设 -1（防止 Tab 聚焦屏外元素）。
+// 注意：EP 在路由变化后会重置 tabindex，用 nextTick + setTimeout 双重保障。
+// focusActive=true 时，在设完 tabindex 的同一帧内聚焦激活菜单项
+// （由 AppSidebar 统一负责，避免 MainLayout 跨组件查询与本组件 setTimeout 的时序竞争）
+async function applyRovingTabindex(focusActive = false) {
+  await nextTick()
+  // 用 setTimeout 确保 EP 内部 DOM 更新完成后再设置 tabindex
+  setTimeout(() => {
+    const items = document.querySelectorAll<HTMLElement>('.sidebar .el-menu-item')
+    if (!items.length) return
+    // 移动端且侧栏未展开：全部 -1，不允许 Tab 进入屏外元素
+    if (!mobileOpen.value && window.innerWidth <= 768) {
+      items.forEach((el) => el.setAttribute('tabindex', '-1'))
+      return
+    }
+    let activeEl: HTMLElement | null = null
+    items.forEach((el) => {
+      if (el.classList.contains('is-active')) {
+        el.setAttribute('tabindex', '0')
+        activeEl = el
+      } else {
+        el.setAttribute('tabindex', '-1')
+      }
+    })
+    if (!activeEl) {
+      items[0].setAttribute('tabindex', '0')
+      activeEl = items[0]
+    }
+    // 移动端打开侧栏后聚焦激活项（tabindex 已就绪，无竞争）
+    if (focusActive && activeEl) activeEl.focus()
+  }, 0)
+}
+
+onMounted(() => applyRovingTabindex())
+watch(() => route.path, () => {
+  // 移动端点击导航后自动关闭侧栏
+  if (mobileOpen.value && window.innerWidth <= 768) {
+    mobileOpen.value = false
+  }
+  applyRovingTabindex()
+})
+watch(collapsed, () => applyRovingTabindex())
+// 移动端打开侧栏时，设完 tabindex 后聚焦激活菜单项
+watch(mobileOpen, (open) => applyRovingTabindex(open && window.innerWidth <= 768))
 </script>
 
 <template>

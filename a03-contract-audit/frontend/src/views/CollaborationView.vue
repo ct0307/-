@@ -388,7 +388,7 @@ function goAudit() {
   align-items: center;
   gap: 7px;
   padding: 5px 12px;
-  border-radius: 20px;
+  border-radius: var(--r-pill);
   font-size: 12px;
   font-family: var(--mono);
   color: var(--amber);
@@ -476,7 +476,7 @@ function goAudit() {
 .chip {
   font-size: 12px;
   padding: 3px 9px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   background: var(--ink-3);
   color: var(--ivory-dim);
 }

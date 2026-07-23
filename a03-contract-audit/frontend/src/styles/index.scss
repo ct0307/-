@@ -78,3 +78,14 @@ h3 {
     transition-duration: 0.01ms !important;
   }
 }
+
+// —— 键盘焦点可见性（无障碍 WCAG 2.1 AA）——
+// 鼠标点击不触发 outline，只有键盘 Tab/方向键聚焦才显示金色边框
+:focus:not(:focus-visible) {
+  outline: none;
+}
+:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 3px;
+  border-radius: var(--r-sm);
+}

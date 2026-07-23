@@ -16,13 +16,15 @@ import DemoBadge from '@/components/common/DemoBadge.vue'
 const rules = ref<AuditRule[]>([])
 const templates = ref<ContractTemplate[]>([])
 const loading = ref(false)
+const loadError = ref('')
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     ;[rules.value, templates.value] = await Promise.all([getRules(), getTemplates()])
-  } catch {
-    ElMessage.error('加载失败')
+  } catch (e) {
+    loadError.value = e instanceof Error ? e.message : '规则与模板数据加载失败'
   } finally {
     loading.value = false
   }
@@ -108,7 +110,19 @@ async function submitTpl() {
       </div>
     </div>
 
-    <div class="rules-grid">
+    <!-- 加载失败内联错误块（统一 el-result 风格） -->
+    <el-result
+      v-if="loadError"
+      icon="error"
+      title="加载失败"
+      :sub-title="loadError"
+    >
+      <template #extra>
+        <el-button type="primary" @click="load">重新加载</el-button>
+      </template>
+    </el-result>
+
+    <div v-else class="rules-grid">
       <el-card shadow="never">
         <template #header>
           <div class="panel-head"><span>审查规则库</span><span class="count mono">{{ rules.length }} 条规则</span></div>
@@ -271,7 +285,7 @@ async function submitTpl() {
   color: var(--muted);
   padding: 2px 8px;
   background: var(--ink-3);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
 }
 .tpl-item {
   padding: 12px 4px;

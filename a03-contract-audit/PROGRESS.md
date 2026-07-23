@@ -6,6 +6,58 @@
 
 ---
 
+## 2026-07-23 · 前端无障碍 + 响应式 + 交付质量四轮改进（✅ 已完成）
+
+### 背景
+收到第三方对前端页面的专业评审（59 张截图，1440/2560/390px 多分辨率走查），7 维度评分中无障碍仅 1/5、其余 3/5。核心缺陷：移动端侧栏无 overlay、加载/空/错误态不统一、超宽屏留白、无 focus-visible 规范、硬编码颜色/圆角。据此做四轮迭代改进，每轮均由外部验证脚本复核。
+
+### 第一轮 · 基础改进
+| 文件 | 改动 |
+|---|---|
+| `styles/tokens.scss` | 新增 `--r-xs: 4px`、`--r-pill: 20px` 圆角 token |
+| `styles/index.scss` | 新增全局 `:focus-visible`（金色 outline）+ `:focus:not(:focus-visible)` 重置 |
+| `layouts/MainLayout.vue` | 移动端（≤768px）侧栏改 fixed overlay + 汉堡按钮 + 遮罩；`.content-inner` max-width 1600px 解决超宽屏留白 |
+| `components/layout/AppSidebar.vue` | inject `mobileOpen`；roving tabindex 让 Tab 可进侧栏导航 |
+| `DashboardView/RectifyView/AdminView/RulesView` | 错误态统一为内联 `el-result`（原为 el-alert / ElMessage toast），带"重新加载"按钮 |
+| 11 个文件 | border-radius 硬编码 `20px→var(--r-pill)`、`4px→var(--r-xs)` |
+
+### 第二轮 · 验证报告未通过项
+| 问题 | 文件 | 修复 |
+|---|---|---|
+| 点菜单不自动关闭侧栏 | `AppSidebar.vue` | `watch(route.path)` 移动端导航后关闭 mobileOpen |
+| Escape 无法关闭 | `MainLayout.vue` | 新增 keydown 监听 Escape |
+| 背景可滚动 | `MainLayout.vue` | `watch(mobileOpen)` 切换 `body.overflow` |
+| menu-item focus outline 被 EP 覆盖 | `element-overrides.scss` | `.el-menu-item:focus-visible` + `!important` 恢复 |
+| 错误文案英文 | `client.ts` | 响应拦截器加 HTTP 状态码→中文映射表 |
+
+### 第三轮 · 专业审查发现的缺陷
+- `MainLayout.vue`：`onUnmounted` 补 `body.style.overflow=''` 清理，防卸载时滚动锁残留
+- `element-overrides.scss`：`outline-offset` 负值改 `2px`（负值画在元素内会叠压），删冗余选择器
+- `AppSidebar.vue`：`nextTick + setTimeout` 双重保障，防 EP 路由变化后重置 tabindex
+
+### 第四轮 · 剩余无障碍缺口
+| 问题 | 文件 | 修复 |
+|---|---|---|
+| 侧栏关闭仍能 Tab 到用户卡片（UserSwitcher 固定 tabindex=0） | `MainLayout.vue` | 用 `:inert="isMobile && !mobileOpen"` 一行覆盖侧栏全部后代，替代逐元素枚举 |
+| detail 英文直传（500 时 FastAPI 返回 "Internal Server Error"） | `client.ts` | detail 增加中文字符判断 `/[一-鿿]/`，非中文回退状态码映射 |
+| 汉堡缺 ARIA + 打开后焦点未移入 | `MainLayout.vue` `AppSidebar.vue` | 汉堡加 `aria-expanded`/`aria-controls`；焦点迁移收敛到 AppSidebar，在设完 tabindex 的同一 setTimeout 内聚焦激活项，消除跨组件时序竞争；删重复 watch |
+
+### 验证结论（外部脚本 + 类型检查，逐轮复核）
+- `vue-tsc --noEmit` exit 0、`npm run build` exit 0 ✅
+- 1440/2560/390px 全部 9 业务页正常渲染，0 console error、无横向溢出 ✅
+- 2560px 内容区限制 1600px 居中 ✅
+- 390px：侧栏默认隐藏、汉堡打开、遮罩/Escape/滚动锁/菜单跳转自动关闭全通过 ✅
+- inert 生效：侧栏关闭后连续 Tab 不进入任何屏外元素 ✅
+- 焦点迁移：连续 10 次实测焦点均落到激活菜单项"工作台"（tabindex=0）✅
+- ARIA：`aria-expanded` 随开关 true/false，`aria-controls="app-sidebar"` 正确 ✅
+- 英文 500 错误已转"服务器内部错误" ✅
+- 桌面侧栏可 Tab 到达，焦点轮廓 2px solid 金色 ✅
+
+### 遗留（需求层，非代码）
+- 第 10 个业务页：router 仍 9 个业务子路由，评审称需求为"11 个视图（登录+10 业务）"。属需求范围未确认问题，需先明确第 10 页内容再决定是否新增。
+
+---
+
 ## 2026-07-23 · 端到端审查实测：示例合同 RAG 溯源验证（✅ 已完成）
 
 ### 背景

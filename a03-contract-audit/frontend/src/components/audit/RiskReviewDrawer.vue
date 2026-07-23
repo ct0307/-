@@ -281,7 +281,7 @@ function onEnter(e: KeyboardEvent) {
   font-size: 11px;
   font-weight: 700;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   line-height: 1.6;
 }
 .user .msg-role {
@@ -341,7 +341,7 @@ function onEnter(e: KeyboardEvent) {
   background: var(--brass-soft);
   color: var(--brass);
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   font-family: var(--mono);
   max-width: 200px;
   overflow: hidden;

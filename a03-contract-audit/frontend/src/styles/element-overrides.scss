@@ -104,3 +104,19 @@
 .el-select__wrapper {
   background-color: var(--ink-3);
 }
+
+// —— 键盘焦点可见性（无障碍）——
+// Element Plus 对 .el-menu-item:focus 设置了 outline: none，
+// 需要用更高优先级恢复 focus-visible 金色轮廓。
+.el-menu-item:focus-visible {
+  outline: 2px solid var(--brass) !important;
+  outline-offset: 2px !important;
+  border-radius: var(--r-sm);
+}
+// 其他 EP 组件（按钮、输入框等）的焦点样式
+.el-button:focus-visible,
+.el-input__wrapper:focus-visible,
+.el-select__wrapper:focus-visible {
+  outline: 2px solid var(--brass) !important;
+  outline-offset: 2px;
+}

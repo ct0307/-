@@ -29,7 +29,7 @@ const isLive = computed(() => (props.module ? !MOCK_ENABLED[props.module] : fals
   align-items: center;
   gap: 5px;
   padding: 4px 10px;
-  border-radius: 20px;
+  border-radius: var(--r-pill);
   font-size: 12px;
   color: var(--amber);
   background: var(--amber-soft);

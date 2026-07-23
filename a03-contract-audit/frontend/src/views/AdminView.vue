@@ -12,12 +12,14 @@ const roles = ref<AccessRole[]>([])
 const logs = ref<AuditLogRow[]>([])
 const llmCalls = ref<LlmCallRow[]>([])
 const loading = ref(false)
+const loadError = ref('')
 const activeTab = ref('matrix')
 const keyword = ref('')
 const logDateRange = ref<[Date, Date] | null>(null)
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const [matrix, logRows, callRows] = await Promise.all([
       getAccessMatrix(),
@@ -28,8 +30,8 @@ async function load() {
     roles.value = matrix.roles
     logs.value = logRows
     llmCalls.value = callRows
-  } catch {
-    ElMessage.error('加载失败')
+  } catch (e) {
+    loadError.value = e instanceof Error ? e.message : '权限与审计数据加载失败'
   } finally {
     loading.value = false
   }
@@ -169,7 +171,19 @@ function exportCsv() {
       >导出审计日志</el-button>
     </div>
 
-    <el-tabs v-model="activeTab" class="admin-tabs">
+    <!-- 加载失败内联错误块（统一 el-result 风格） -->
+    <el-result
+      v-if="loadError"
+      icon="error"
+      title="加载失败"
+      :sub-title="loadError"
+    >
+      <template #extra>
+        <el-button type="primary" @click="load">重新加载</el-button>
+      </template>
+    </el-result>
+
+    <el-tabs v-else v-model="activeTab" class="admin-tabs">
       <!-- ── Tab 1：角色权限配置 ── -->
       <el-tab-pane label="角色权限配置" name="matrix">
         <el-card shadow="never">
@@ -441,7 +455,7 @@ function exportCsv() {
 .perm {
   display: inline-block;
   padding: 3px 12px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   font-size: 12px;
   font-family: var(--mono);
 }
