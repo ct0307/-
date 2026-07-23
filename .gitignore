@@ -35,3 +35,8 @@ pnpm-debug.log*
 # Agent/local metadata
 .agents/
 .codex/
+
+# Temp diagnostic scripts / dumps (下划线前缀为临时诊断产物)
+**/_*.py
+**/_*.txt
+.playwright-mcp/

@@ -111,8 +111,20 @@ def audit_contract(
             log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(risks))
         except (LLMError, ValueError) as exc:
             log.warning("audit.agent_fallback", agent=role, error=str(exc)[:120])
-            risks = _mock_audit(role, elements)
-            log.info("audit.agent_done", agent=role, mode="mock", risk_count=len(risks))
+            # 不写假风险数据进台账——用一条系统提示风险标明 Agent 降级，
+            # 让法务知道该 Agent 本次未能审查，需要人工补充。
+            risks = [{
+                "agent": role,
+                "level": "medium",
+                "category": "审查引擎降级",
+                "original_text": "（AI 审查服务暂时不可用，本次结果由系统自动标注）",
+                "basis": f"Agent={role} 审查失败：{str(exc)[:80]}",
+                "suggestion": "请人工对本份合同进行补充审查，或重新触发审查。",
+                "confidence": 0,
+                "disclaimer": DISCLAIMER,
+                "tier": "yellow",
+            }]
+            log.info("audit.agent_done", agent=role, mode="degraded", risk_count=0)
         all_risks.extend(risks)
         shared_context[role] = _summarize_for_context(role, risks, elements)
 

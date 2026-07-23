@@ -21,7 +21,35 @@ def run_audit(db: Session, contract: Contract, dimensions: list[str] | None = No
     db.commit()
 
     text = extract_text(contract.storage_path)
-    # 优先用 parse 时已 LLM 精抽的要素（elements_json），无则实时正则提取。
+    # 前置校验：文本过短说明解析失败或扫描件，审查结论不可信，及早拦截。
+    # 门槛设 200 字：正常合同最短也有甲乙方+标的+签名，200 字以下必然残缺。
+    if len(text) < 200:
+        log.warning("audit_runner.text_too_short", contract_id=contract.id,
+                    text_length=len(text), hint="文本提取失败或文件可能为扫描件")
+        contract.status = "done"
+        db.commit()
+        placeholder = {
+            "agent": "system",
+            "level": "high",
+            "category": "文本解析失败",
+            "original_text": f"（合同文本提取长度仅 {len(text)} 字，内容严重残缺）",
+            "basis": "文件可能为扫描件、图片型 PDF 或文档格式异常，文本层无法提取。",
+            "suggestion": "请转换为文字版 PDF/DOCX 后重新上传，或等待 OCR 功能上线（路线图 P2）。",
+            "confidence": 0,
+            "tier": "red",
+        }
+        db.add(Risk(
+            contract_id=contract.id, agent="system",
+            level="high", category="文本解析失败",
+            original_text=placeholder["original_text"],
+            basis=placeholder["basis"], suggestion=placeholder["suggestion"],
+            confidence=0, tier="red", review_status="pending",
+            rag_sources="[]",
+        ))
+        db.commit()
+        log.info("audit_runner.done", contract_id=contract.id, risk_count=1, conflicts=0)
+        return {"risk_count": 1, "cross_checks": []}
+
     # 避免审查时重复调 LLM，同时保留 has_*/text_length 等正则信号。
     elements = extract_elements(text)  # 先跑正则（信号字段）
     try:

@@ -89,10 +89,29 @@ def _extract_pdf_pymupdf(data: bytes) -> str:
 
 
 def _extract_docx_bytes(data: bytes) -> str:
+    """提取 docx 文本：段落 + 表格内容均读取。
+
+    纯段落抽取会漏掉表格（基金合同/采购合同大量内容在表格中），
+    必须遍历 doc.tables 补全，否则合同主体内容丢失。
+    """
     from docx import Document
 
     doc = Document(io.BytesIO(data))
-    return "\n".join(p.text for p in doc.paragraphs).strip()
+    parts: list[str] = []
+
+    # 1. 段落文本
+    for p in doc.paragraphs:
+        if p.text.strip():
+            parts.append(p.text)
+
+    # 2. 表格文本（行列拼接，单元格间用空格分隔，行间用换行）
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells if c.text.strip()]
+            if cells:
+                parts.append("  ".join(cells))
+
+    return "\n".join(parts).strip()
 
 
 
