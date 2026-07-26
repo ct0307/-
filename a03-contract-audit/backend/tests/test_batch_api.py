@@ -13,6 +13,7 @@ from app.api.v1.endpoints import batches
 from app.core.config import settings
 from app.db.session import Base
 from app.models.models import AuditBatch, AuditBatchItem, Contract, User
+from app.schemas.batch import BatchOut
 from app.tasks import audit_tasks
 from app.tasks.audit_tasks import run_contract_audit
 from app.tasks.celery_app import celery_app
@@ -76,6 +77,46 @@ def test_create_batch_persists_dimensions_for_recovery(monkeypatch, tmp_path):
 
     assert saved is not None
     assert json.loads(saved.dimensions_json) == ["legal", "payment"]
+
+
+def test_completed_batch_item_exposes_contract_review_quality(tmp_path):
+    db = _session()
+    user = _user(db)
+    contract = Contract(
+        filename="scan.pdf",
+        storage_path=str(tmp_path / "scan.pdf"),
+        department=user.department,
+        uploaded_by=user.id,
+        requires_review=True,
+        ocr_confidence=0.42,
+        review_reason="OCR 平均置信度低于 75%",
+    )
+    batch = AuditBatch(
+        owner_id=user.id,
+        department=user.department,
+        idempotency_key="quality-fields",
+        status="done",
+        total=1,
+        completed=1,
+    )
+    db.add_all([contract, batch])
+    db.flush()
+    batch.items.append(
+        AuditBatchItem(
+            contract_id=contract.id,
+            filename=contract.filename,
+            status="done",
+        )
+    )
+    db.commit()
+
+    payload = BatchOut.model_validate(batch).model_dump()
+    item = payload["items"][0]
+
+    assert item["status"] == "done"
+    assert item["requires_review"] is True
+    assert item["ocr_confidence"] == 0.42
+    assert item["review_reason"] == "OCR 平均置信度低于 75%"
 
 
 def test_create_batch_rejects_more_than_two_hundred_files(tmp_path):

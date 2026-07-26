@@ -17,6 +17,9 @@ class BatchItemOut(BaseModel):
     attempts: int
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    requires_review: bool = False
+    ocr_confidence: float | None = None
+    review_reason: str | None = None
 
     model_config = {"from_attributes": True}
 

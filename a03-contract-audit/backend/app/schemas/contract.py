@@ -59,6 +59,18 @@ class AuditResponse(BaseModel):
     risk_count: int | None = None
     cross_checks: list[CrossCheckOut] = []
     task_id: str | None = None
+    requires_review: bool = False
+    ocr_confidence: float | None = None
+    review_reason: str | None = None
+
+
+class ParseResponse(BaseModel):
+    contract_id: int
+    elements: dict
+    text_length: int
+    requires_review: bool = False
+    ocr_confidence: float | None = None
+    review_reason: str | None = None
 
 
 class ContractOut(BaseModel):
@@ -67,6 +79,9 @@ class ContractOut(BaseModel):
     contract_type: str
     status: str
     created_at: datetime
+    requires_review: bool = False
+    ocr_confidence: float | None = None
+    review_reason: str | None = None
 
     model_config = {"from_attributes": True}
 

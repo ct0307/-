@@ -104,6 +104,19 @@ class AuditBatchItem(Base):
     )
 
     batch: Mapped["AuditBatch"] = relationship(back_populates="items")
+    contract: Mapped["Contract"] = relationship(lazy="joined")
+
+    @property
+    def requires_review(self) -> bool:
+        return self.contract.requires_review
+
+    @property
+    def ocr_confidence(self) -> float | None:
+        return self.contract.ocr_confidence
+
+    @property
+    def review_reason(self) -> str | None:
+        return self.contract.review_reason
 
 
 class Risk(Base):

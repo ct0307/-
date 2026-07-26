@@ -154,6 +154,9 @@ def run_contract_audit(
             "risk_count": result["risk_count"],
             "cross_checks": result["cross_checks"],
             "status": "done",
+            "requires_review": bool(result.get("requires_review", False)),
+            "ocr_confidence": result.get("ocr_confidence"),
+            "review_reason": result.get("review_reason"),
         }
     except Exception as exc:  # noqa: BLE001
         db.rollback()

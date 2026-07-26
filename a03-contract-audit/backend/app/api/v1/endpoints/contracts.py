@@ -11,11 +11,23 @@ from app.api.deps import get_current_user, require_roles
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.models import Contract, Risk, User
-from app.schemas.contract import AuditResponse, AuditRequest, ContractOut, CrossCheckOut, HistoryRow, RiskOut
+from app.schemas.contract import (
+    AuditRequest,
+    AuditResponse,
+    ContractOut,
+    CrossCheckOut,
+    HistoryRow,
+    ParseResponse,
+    RiskOut,
+)
 from app.services import audit_log
 from app.services import masking
-from app.services.audit.runner import run_audit
-from app.services.parser.extractor import extract_elements, extract_elements_with_llm, extract_text
+from app.services.audit.runner import apply_parse_quality, run_audit
+from app.services.parser.extractor import (
+    extract_document,
+    extract_elements,
+    extract_elements_with_llm,
+)
 
 router = APIRouter()
 
@@ -140,8 +152,9 @@ def batch_upload_contracts(
 
             # 解析并写入 elements_json
             try:
-                text = extract_text(stored_path)
-                elements = extract_elements(text)
+                parsed = extract_document(stored_path)
+                apply_parse_quality(contract, parsed)
+                elements = extract_elements(parsed.text)
                 contract.elements_json = json.dumps(
                     {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
                     ensure_ascii=False,
@@ -206,12 +219,17 @@ def upload_contract(
     return contract
 
 
-@router.post("/{contract_id}/parse")
-def parse_contract(contract_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict:
+@router.post("/{contract_id}/parse", response_model=ParseResponse)
+def parse_contract(
+    contract_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ParseResponse:
     contract = _get_contract(db, contract_id, user)
-    text = extract_text(contract.storage_path)
+    parsed = extract_document(contract.storage_path)
+    apply_parse_quality(contract, parsed)
     # 精解析：正则 + LLM 语义抽取六要素（供报表/Excel 展示），LLM 失败自动降级正则
-    elements = extract_elements_with_llm(text)
+    elements = extract_elements_with_llm(parsed.text)
     contract.status = "parsed"
     contract.elements_json = json.dumps(
         {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
@@ -219,7 +237,14 @@ def parse_contract(contract_id: int, db: Session = Depends(get_db), user: User =
     )
     db.commit()
     audit_log.record(db, user_id=user.id, action="parse", target=f"contract:{contract_id}")
-    return {"contract_id": contract_id, "elements": elements, "text_length": len(text)}
+    return ParseResponse(
+        contract_id=contract_id,
+        elements=elements,
+        text_length=len(parsed.text),
+        requires_review=contract.requires_review,
+        ocr_confidence=contract.ocr_confidence,
+        review_reason=contract.review_reason,
+    )
 
 
 @router.post("/{contract_id}/audit", response_model=AuditResponse)
@@ -245,9 +270,12 @@ def audit_contract_endpoint(
     audit_log.record(db, user_id=user.id, action="audit", target=f"contract:{contract_id}", detail=dim_detail)
     return AuditResponse(
         contract_id=contract_id,
-        status="done",
+        status=contract.status,
         risk_count=result["risk_count"],
         cross_checks=[_to_cross_out(c) for c in result["cross_checks"]],
+        requires_review=result["requires_review"],
+        ocr_confidence=result["ocr_confidence"],
+        review_reason=result["review_reason"],
     )
 
 
