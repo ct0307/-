@@ -12,6 +12,8 @@ import io
 import re
 
 from app.core.logging import get_logger
+from app.core.config import settings
+from app.services.parser.ocr import OCRResult, ocr_pdf_bytes
 
 log = get_logger("parser")
 
@@ -63,10 +65,45 @@ def _extract_pdf_bytes(data: bytes) -> str:
     if _is_garbled(text):
         log.info("parser.pdf_garbled", hint="检测到字体编码异常，切换 PyMuPDF 重新提取")
         text = _extract_pdf_pymupdf(data)
+        if text and not _is_garbled(text):
+            return text
+        parts = []
+
+    empty_pages = tuple(index for index, part in enumerate(parts) if not part.strip())
+    if text and not empty_pages:
+        return text
 
     if not text:
-        log.warning("parser.pdf_empty", hint="文本层为空，可能是扫描件，需 OCR（路线图 P2）")
-    return text
+        pymupdf_text = _extract_pdf_pymupdf(data)
+        if pymupdf_text and not _is_garbled(pymupdf_text):
+            return pymupdf_text
+        log.warning("parser.pdf_empty", hint="文本层为空，进入离线 OCR")
+
+    page_indices = empty_pages or None
+    result = ocr_pdf_bytes(
+        data,
+        page_indices=page_indices,
+        max_pages=settings.OCR_MAX_PAGES,
+        max_page_pixels=settings.OCR_MAX_PAGE_PIXELS,
+        dpi=settings.OCR_DPI,
+        timeout_seconds=settings.OCR_TIMEOUT_SECONDS,
+        min_confidence=settings.OCR_MIN_CONFIDENCE,
+    )
+    if isinstance(result, str):
+        return "\n".join(part for part in (text, result.strip()) if part).strip()
+
+    if result.requires_review:
+        log.warning(
+            "parser.ocr_review_required",
+            confidence=result.mean_confidence,
+            pages=result.page_count,
+        )
+    if parts and empty_pages and len(result.page_texts) == len(empty_pages):
+        merged = list(parts)
+        for index, page_text in zip(empty_pages, result.page_texts):
+            merged[index] = page_text
+        return "\n".join(part for part in merged if part).strip()
+    return "\n".join(part for part in (text, result.text) if part).strip()
 
 
 def _extract_pdf_pymupdf(data: bytes) -> str:

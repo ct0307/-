@@ -11,10 +11,10 @@
 | 模块 | 说明 |
 |---|---|
 | **合同审查** | 上传→加密存储→文本解析→双 Agent（法务+财务）协同审查→风险清单 |
-| **可解释风险** | 每条风险：原文引用 + 法规依据（RAG 检索）+ 置信度 + 人工复核状态 |
+| **可解释风险** | 每条风险独立检索：原文引用 + 法规来源 + 置信度 + 人工复核状态；证据缺失时强制复核 |
 | **多维报表** | KPI 看板 + 趋势图 + 风险分布 + 合同要素汇总（甲方/合同标的/收付款节点）+ Excel 台账导出 |
 | **RAG 知识库** | 本地 embedding（BAAI/bge-small-zh），41 条预置法规，支持批量文件导入 |
-| **批量处理** | 单次上传 50 份以上合同，逐文件独立加密存储+解析，单文件失败不中断 |
+| **批量处理** | 服务端持久化批次及审查维度，单批 1~200 份，支持幂等提交、失败隔离、启动补投、租约去重和失败项重试 |
 | **智能协同审查** | 法务先行→共享上下文→财务交叉验证→冲突消解→风险分级（绿/黄/红档）|
 | **风险追问 AI** | 绑定合同上下文，对话历史管理，可追问具体条款的谈判空间、行业常规 |
 | **人工审核闭环** | 待复核/已确认/已忽略/需修改→自动生成整改跟踪项 |
@@ -32,11 +32,11 @@
 | 后端 | Python 3.11 · FastAPI · SQLAlchemy · pydantic-settings |
 | 数据库 | SQLite（开发）/ PostgreSQL（生产） |
 | 向量检索 | sentence-transformers（BAAI/bge-small-zh-v1.5，本地离线） |
-| 文档解析 | pdfplumber · python-docx |
+| 文档解析 | pdfplumber · PyMuPDF · python-docx · RapidOCR · ONNX Runtime |
 | 报表 | openpyxl（Excel 台账） |
 | AI 接入 | 统一 LLM Adapter，可切 DeepSeek / Qwen / OpenClaw |
 | 权限 | PyJWT + RBAC + 审计日志 |
-| 部署 | Docker Compose（backend + frontend nginx 双服务）|
+| 部署 | Docker Compose（PostgreSQL + Redis + FastAPI + Celery worker/beat + Nginx）|
 
 ---
 
@@ -53,14 +53,14 @@ cd a03-contract-audit
 cp backend/.env.example backend/.env
 # 编辑 .env，至少设置 LLM_API_KEY
 
-# 3. 一键启动
+# 3. 一键启动（backend 会先执行 alembic upgrade head）
 docker compose up -d
 
 # 前端：http://localhost
 # 后端 API 文档：http://localhost:8000/docs
 ```
 
-> 首次启动会自动下载 embedding 模型（~100MB），之后缓存在 Docker volume 中。
+> embedding 模型在镜像构建阶段下载并固化。OCR 引擎模型随 RapidOCR wheel 交付；真实引擎冒烟和准确率边界见 `docs/evaluation/hard-indicator-matrix.md`。
 
 ### 方式二：本地开发
 
@@ -101,9 +101,17 @@ python -m scripts.seed_demo
 | `LLM_PROVIDER` | `qwen` | `qwen` / `deepseek` / `openclaw` |
 | `LLM_API_KEY` | _(必填)_ | 对应 LLM 服务的 API Key |
 | `LLM_BASE_URL` | `http://localhost:11434/v1` | 私有化模型端点 |
-| `FILE_ENCRYPT_KEY` | _(空=不加密)_ | Fernet 密钥（生产必须设置）|
+| `FILE_ENCRYPT_KEY` | _(空=不加密)_ | Fernet 密钥；生产为空或格式错误时拒绝启动 |
 | `DB_BACKEND` | `sqlite` | `sqlite` / `postgres` |
-| `JWT_SECRET` | `CHANGE_ME` | 生产必须修改 |
+| `JWT_SECRET` | `CHANGE_ME` | 生产必须替换为至少 32 位独立密钥 |
+| `REDIS_URL` | `redis://localhost:6379/0` | Celery broker/result backend |
+| `AUDIT_ASYNC` | `false` | 交付环境必须为 `true` |
+| `OCR_MAX_PAGES` | `100` | 单次 OCR 最大页数 |
+| `OCR_MAX_PAGE_PIXELS` | `16000000` | 单页渲染像素上限 |
+| `OCR_TIMEOUT_SECONDS` | `120` | 单份 PDF OCR 总超时 |
+| `OCR_MIN_CONFIDENCE` | `0.75` | 低于此值标记人工复核 |
+
+生产环境会在进程启动时校验 `DEBUG=false`、PostgreSQL、异步任务、数据库密码、JWT 密钥和 Fernet 密钥；任一项仍为弱默认值时 backend、worker 和迁移命令都会直接失败。
 
 生成加密密钥：
 ```bash
@@ -122,13 +130,16 @@ a03-contract-audit/
 │   │   ├── core/              # 配置、安全、加密、日志
 │   │   ├── db/                # 初始化、热迁移、会话
 │   │   ├── llm/               # LLM Adapter（qwen/deepseek/openclaw）
-│   │   ├── models/            # 11张数据库表
+│   │   ├── models/            # 13张数据库表
 │   │   ├── schemas/           # Pydantic 请求/响应类型
 │   │   └── services/
 │   │       ├── audit/         # 双Agent审查、冲突消解、风险分级
-│   │       ├── parser/        # PDF/Word 解析 + 要素提取（正则）
+│   │       ├── parser/        # PDF/Word 解析 + OCR 适配 + 要素提取
+│   │       ├── batch/         # 批次状态机、进度、租约与重试
 │   │       ├── rag/           # 向量检索（本地embedding）
 │   │       └── report/        # Excel 台账 + 看板聚合
+│   ├── alembic/               # PostgreSQL 全量可回滚迁移
+│   ├── evaluation/            # 要素准确率与算力基准工具
 │   ├── scripts/
 │   │   ├── seed_demo.py       # 演示数据（幂等）
 │   │   └── seed_knowledge_law.py  # 预置法规知识库
@@ -153,9 +164,11 @@ a03-contract-audit/
 
 | 指标 | 目标 | 状态 |
 |---|---|---|
-| 合同要素抽取准确率 | ≥ 90% | 正则+LLM，持续优化 |
-| 批量处理能力 | 50 份以上 | ✅ 支持200份/次 |
-| 风险可解释性 | 原文+依据+建议 | ✅ 每条风险完整三要素 |
-| 人工审核状态流转 | 4态+操作日志 | ✅ 待复核/已确认/已忽略/需修改 |
-| 私有化部署 | 本地/企业内网 | ✅ Docker Compose + 本地embedding |
-| 算力对比 | OpenClaw/DeepSeek/Qwen | ✅ AdminView LLM调用记录+延迟对比 |
+| 合同要素抽取准确率 | ≥ 90% | 评测工具已就绪；待人工冻结金标准实测 |
+| 批量处理能力 | 50 份以上 | 代码与自动化契约已验证；待 50+2 真实文件验收 |
+| 风险可解释性 | 原文+依据+建议 | 风险级独立证据绑定测试通过 |
+| 人工审核状态流转 | 4态+操作日志 | 已实现并有回归测试 |
+| 私有化部署 | 本地/企业内网 | Compose 配置与迁移烟雾测试通过；本机无 Docker，容器未实测 |
+| 算力对比 | OpenClaw vs GPU | 同口径统计工具已就绪；缺两套真实硬件和功率数据，未出结论 |
+
+详细证据、复现命令和阻塞项见 [`docs/evaluation/hard-indicator-matrix.md`](docs/evaluation/hard-indicator-matrix.md)。

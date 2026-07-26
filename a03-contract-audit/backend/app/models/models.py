@@ -4,7 +4,7 @@
 """
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Text, DateTime, ForeignKey, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -33,6 +33,58 @@ class Contract(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     risks: Mapped[list["Risk"]] = relationship(back_populates="contract")
+
+
+class AuditBatch(Base):
+    """异步合同审查批次，状态和进度以数据库为准。"""
+    __tablename__ = "audit_batches"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "idempotency_key", name="uq_audit_batches_owner_idempotency"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    department: Mapped[str] = mapped_column(String(64), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    dimensions_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    completed: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    items: Mapped[list["AuditBatchItem"]] = relationship(
+        back_populates="batch", cascade="all, delete-orphan"
+    )
+
+
+class AuditBatchItem(Base):
+    """批次内单份合同的执行状态和可恢复任务元数据。"""
+    __tablename__ = "audit_batch_items"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "contract_id", name="uq_audit_batch_items_contract"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("audit_batches.id", ondelete="CASCADE"), index=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("contracts.id"), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    batch: Mapped["AuditBatch"] = relationship(back_populates="items")
 
 
 class Risk(Base):

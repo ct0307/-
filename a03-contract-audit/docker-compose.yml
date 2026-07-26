@@ -2,31 +2,115 @@
 # 快速启动：docker compose up -d
 # 访问：http://localhost（前端）| http://localhost:8000/docs（后端 API 文档）
 
+x-backend-common: &backend-common
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  image: a03-contract-audit-backend:local
+  env_file:
+    - ${BACKEND_ENV_FILE:-./backend/.env}
+  environment:
+    APP_ENV: prod
+    DB_BACKEND: postgres
+    POSTGRES_HOST: postgres
+    REDIS_URL: redis://redis:6379/0
+    AUDIT_ASYNC: "true"
+  volumes:
+    - contract_storage:/app/storage
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: a03_postgres
+    env_file:
+      - ${BACKEND_ENV_FILE:-./backend/.env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: a03_redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    <<: *backend-common
     container_name: a03_backend
+    command:
+      - sh
+      - -c
+      - alembic -c alembic.ini upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
-    env_file:
-      - ./backend/.env
-    environment:
-      - APP_ENV=prod
-      - DB_BACKEND=sqlite
-    volumes:
-      # 合同文件存储 + SQLite 数据库持久化
-      - contract_storage:/app/storage
-      # 注：embedding 模型已在镜像构建阶段烤入（见 backend/Dockerfile），
-      # 运行时 HF_HUB_OFFLINE=1 直接读镜像内缓存，不再挂载 hf_cache volume
-      # （空 volume 会遮蔽镜像里的模型，导致离线加载失败）。
-    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/dashboard/summary"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 30s
+
+  worker:
+    <<: *backend-common
+    container_name: a03_worker
+    depends_on:
+      backend:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      - celery
+      - -A
+      - app.tasks.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --concurrency=2
+      - --hostname=worker@%h
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.tasks.celery_app:celery_app inspect ping -d worker@$$HOSTNAME --timeout 5"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  scheduler:
+    <<: *backend-common
+    container_name: a03_scheduler
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      - celery
+      - -A
+      - app.tasks.celery_app:celery_app
+      - beat
+      - --loglevel=INFO
+      - --schedule=/tmp/celerybeat-schedule
 
   frontend:
     build:
@@ -36,9 +120,14 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   contract_storage:
+    driver: local
+  postgres_data:
+    driver: local
+  redis_data:
     driver: local

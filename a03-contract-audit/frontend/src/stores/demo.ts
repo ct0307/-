@@ -55,9 +55,5 @@ export const useDemoStore = defineStore('demo', () => {
     viewRole.value = role
   }
 
-  // OpenClaw 一体机运行状态（演示：脉冲绿点 + 文案）
-  const runtimeOnline = ref(true)
-  const runtimeStatus = ref('OpenClaw 一体机 · 运行中')
-
-  return { viewRole, profile, setViewRole, runtimeOnline, runtimeStatus }
+  return { viewRole, profile, setViewRole }
 })

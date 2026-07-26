@@ -34,7 +34,7 @@ def run_audit(db: Session, contract: Contract, dimensions: list[str] | None = No
             "category": "文本解析失败",
             "original_text": f"（合同文本提取长度仅 {len(text)} 字，内容严重残缺）",
             "basis": "文件可能为扫描件、图片型 PDF 或文档格式异常，文本层无法提取。",
-            "suggestion": "请转换为文字版 PDF/DOCX 后重新上传，或等待 OCR 功能上线（路线图 P2）。",
+            "suggestion": "请检查 OCR 运行时日志并人工核对扫描质量，或转换为文字版 PDF/DOCX 后重新上传。",
             "confidence": 0,
             "tier": "red",
         }

@@ -6,6 +6,35 @@
 
 ---
 
+## 2026-07-26 · 赛题硬指标企业交付化方案 A（🚧 实现完成，外部实测待补）
+
+### 已完成
+
+| 优先级 | 能力 | 企业交付改动 |
+|---|---|---|
+| P1 | 风险证据链 | 每条风险独立检索并清洗来源；无可靠来源或检索失败时强制人工复核 |
+| P1 | 异步批次 | PostgreSQL 持久化批次/批次项/审查维度；Celery 状态机、行锁租约、启动补投、幂等、失败隔离与重试；前端展示真实服务端状态 |
+| P1 | 权限隔离 | 报表 summary/metadata/export/排行统一按部门过滤，business 越权合同返回 403 |
+| P1 | OCR 编排 | 文本 PDF 不触发 OCR；扫描/混合 PDF 定向识别；限制页数、像素、总耗时并标记低置信度复核；真实 RapidOCR/ONNX 引擎冒烟通过 |
+| P1 | 准确率评测 | 冻结 JSONL 协议、字段宏平均、分组统计、错误案例、JSON/CSV 原始结果与数据集哈希 |
+| P1 | 算力评测 | 真实模型三态健康接口；P50/P95/吞吐/成功率/标准差/95% CI；无功率数据固定 `not_measured` |
+| P1 | 数据库交付 | 13 张表全量 Alembic 首迁移；空库升级/回滚烟雾测试；生产禁用 `create_all`、默认演示账号和弱默认安全配置 |
+| P2 | 部署拓扑 | PostgreSQL + Redis + backend + Celery worker + scheduler + frontend；backend 健康前完成迁移，worker/beat 后启动 |
+
+### 验证结论与边界
+
+- 后端全量：`81 passed`；包含真实 RapidOCR/ONNX Runtime 集成、行锁租约、周期补投、维度约束和生产配置 fail-fast，迁移烟雾覆盖空库升级、完整回滚、生产禁用 `create_all` 和禁种演示账号。
+- 前端常规测试：`6 passed, 1 E2E skipped`；E2E 在显式启动前后端后单独执行 `1 passed`。
+- `vue-tsc --noEmit` 与生产构建退出码均为 0；浏览器验证覆盖桌面正常页、审查空状态、运行时接口错误回退和 390px 移动导航，正常路径 0 console error。
+- Compose YAML 结构与服务依赖已解析通过；Git whitespace 检查退出码 0。
+- 本机无 Docker CLI，Compose 尚未容器实测。
+- 旧 SQLite 业务数据不会由 Compose 自动迁移到 PostgreSQL；目标环境仍需执行受控导出/导入、核对和回滚演练。
+- RapidOCR 3.9.2 / ONNX Runtime 1.28.0 已完成官方 wheel 哈希、许可证、22 个解析依赖的 PyPI 漏洞记录和真实中文图片/PDF 冒烟；字符准确率仍缺冻结扫描件真值集。
+- 52 份冻结文件、人工金标准、OpenClaw/GPU 对照机和功率数据均未提供，因此对应硬指标保持“待实测/阻塞”，不生成模拟结论。
+- 详细证据矩阵：`docs/evaluation/hard-indicator-matrix.md`。
+
+---
+
 ## 2026-07-23 · 前端无障碍 + 响应式 + 交付质量四轮改进（✅ 已完成）
 
 ### 背景

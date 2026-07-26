@@ -48,12 +48,19 @@ _STATUS_LABEL = {"pending": "待处理", "confirmed": "已确认", "ignored": "�
 _AGENT_LABEL = {"legal": "法务专家 Agent", "finance": "财务会计 Agent"}
 
 
-def export_risk_ledger(db: Session, contract_ids: list[int] | None = None) -> bytes:
+def export_risk_ledger(
+    db: Session,
+    contract_ids: list[int] | None = None,
+    *,
+    department_scope: str | None = None,
+) -> bytes:
     """生成 Excel 风险台账（openpyxl），返回文件字节流。
 
     contract_ids 为空则导出全部合同的风险。
     """
     q = db.query(Risk, Contract).join(Contract, Risk.contract_id == Contract.id)
+    if department_scope:
+        q = q.filter(Contract.department == department_scope)
     if contract_ids:
         q = q.filter(Contract.id.in_(contract_ids))
     rows = q.order_by(Contract.id, Risk.level).all()
@@ -83,9 +90,12 @@ def export_risk_ledger(db: Session, contract_ids: list[int] | None = None) -> by
     return buf.getvalue()
 
 
-def contracts_metadata(db: Session) -> list[dict]:
+def contracts_metadata(db: Session, *, department_scope: str | None = None) -> list[dict]:
     """合同要素汇总：每份合同的甲方/标的/收付款节点 + 风险统计，供多维报表展示。"""
-    contracts = db.query(Contract).order_by(Contract.id.desc()).all()
+    query = db.query(Contract)
+    if department_scope:
+        query = query.filter(Contract.department == department_scope)
+    contracts = query.order_by(Contract.id.desc()).all()
     result = []
     for c in contracts:
         elems = {}
@@ -151,7 +161,12 @@ def dashboard_summary(db: Session) -> dict:
     }
 
 
-def report_summary(db: Session, range_key: str = "month") -> dict:
+def report_summary(
+    db: Session,
+    range_key: str = "month",
+    *,
+    department_scope: str | None = None,
+) -> dict:
     """多维报表聚合：KPI + 趋势 + 风险分布 + 部门排行 + 高风险类别 Top5。
 
     形状对齐前端 `ReportData`（frontend/src/mock/reports.ts）。
@@ -162,26 +177,49 @@ def report_summary(db: Session, range_key: str = "month") -> dict:
     """
     range_key = range_key if range_key in _RANGE_LABELS else "month"
 
-    total_contracts = db.query(func.count(Contract.id)).scalar() or 0
-    total_risks = db.query(func.count(Risk.id)).scalar() or 0
+    contracts_count_query = db.query(func.count(Contract.id))
+    if department_scope:
+        contracts_count_query = contracts_count_query.filter(Contract.department == department_scope)
+    total_contracts = contracts_count_query.scalar() or 0
+
+    risks_count_query = db.query(func.count(Risk.id))
+    if department_scope:
+        risks_count_query = risks_count_query.join(Contract, Risk.contract_id == Contract.id).filter(
+            Contract.department == department_scope
+        )
+    total_risks = risks_count_query.scalar() or 0
 
     # 风险等级分布（用于 donut + KPI 高风险数）
-    level_rows = dict(db.query(Risk.level, func.count(Risk.id)).group_by(Risk.level).all())
+    level_query = db.query(Risk.level, func.count(Risk.id))
+    if department_scope:
+        level_query = level_query.join(Contract, Risk.contract_id == Contract.id).filter(
+            Contract.department == department_scope
+        )
+    level_rows = dict(level_query.group_by(Risk.level).all())
     high = level_rows.get("high", 0)
     medium = level_rows.get("medium", 0)
     low = level_rows.get("low", 0)
 
     # 合规通过率：无「高风险」合同占比（口径统一——合同下无 high 级风险即视为通过）
+    high_risk_query = db.query(Risk.contract_id)
+    if department_scope:
+        high_risk_query = high_risk_query.join(Contract, Risk.contract_id == Contract.id).filter(
+            Contract.department == department_scope
+        )
     high_risk_contract_ids = {
-        cid for (cid,) in db.query(Risk.contract_id).filter(Risk.level == "high").distinct().all()
+        cid for (cid,) in high_risk_query.filter(Risk.level == "high").distinct().all()
     }
     passed = total_contracts - len(high_risk_contract_ids)
     pass_rate = round(passed / total_contracts * 100, 1) if total_contracts else 0.0
 
     # 部门风险排行：按合同部门聚合风险数
+    dept_query = db.query(Contract.department, func.count(Risk.id)).join(
+        Risk, Risk.contract_id == Contract.id
+    )
+    if department_scope:
+        dept_query = dept_query.filter(Contract.department == department_scope)
     dept_rows = (
-        db.query(Contract.department, func.count(Risk.id))
-        .join(Risk, Risk.contract_id == Contract.id)
+        dept_query
         .group_by(Contract.department)
         .order_by(func.count(Risk.id).desc())
         .all()
@@ -192,8 +230,13 @@ def report_summary(db: Session, range_key: str = "month") -> dict:
     ]
 
     # 高风险条款 Top5：按类别聚合
+    cat_query = db.query(Risk.category, func.count(Risk.id))
+    if department_scope:
+        cat_query = cat_query.join(Contract, Risk.contract_id == Contract.id).filter(
+            Contract.department == department_scope
+        )
     cat_rows = (
-        db.query(Risk.category, func.count(Risk.id))
+        cat_query
         .group_by(Risk.category)
         .order_by(func.count(Risk.id).desc())
         .limit(5)
@@ -204,7 +247,9 @@ def report_summary(db: Session, range_key: str = "month") -> dict:
     # 趋势：按合同真实 created_at 逐日累计（合同级口径，与 KPI 一致）。
     # total=累计审查合同数，risk=累计含高风险合同数，pass=累计通过（无高风险）合同数。
     # 数据点数 = 有合同产生的自然日数；<2 天时 mode=sparse，前端提示"数据积累中"。
-    labels, total_series, pass_series, risk_series = _cumulative_trend(db, high_risk_contract_ids)
+    labels, total_series, pass_series, risk_series = _cumulative_trend(
+        db, high_risk_contract_ids, department_scope=department_scope
+    )
     mode = "real" if len(labels) >= 2 else "sparse"
 
     return {
@@ -232,13 +277,21 @@ def report_summary(db: Session, range_key: str = "month") -> dict:
     }
 
 
-def _cumulative_trend(db: Session, high_risk_contract_ids: set) -> tuple[list, list, list, list]:
+def _cumulative_trend(
+    db: Session,
+    high_risk_contract_ids: set,
+    *,
+    department_scope: str | None = None,
+) -> tuple[list, list, list, list]:
     """按合同 created_at 的自然日聚合，返回 (日期标签, 累计合同数, 累计通过数, 累计高风险数)。
 
     真实时间序列：每个数据点对应一个有合同产生的日期，数值为截至当日的累计量。
     数据稀疏（合同集中在少数几天）时点数就少，是真实反映而非编造。
     """
-    rows = db.query(Contract.id, Contract.created_at).order_by(Contract.created_at).all()
+    query = db.query(Contract.id, Contract.created_at)
+    if department_scope:
+        query = query.filter(Contract.department == department_scope)
+    rows = query.order_by(Contract.created_at).all()
     # 按日期分桶：{date_str: [该日合同数, 该日高风险合同数]}
     buckets: dict[str, list[int]] = {}
     for cid, created in rows:

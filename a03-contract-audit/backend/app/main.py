@@ -24,6 +24,11 @@ log = get_logger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    if settings.AUDIT_ASYNC:
+        from app.tasks.audit_tasks import recover_orphaned_batch_items
+
+        recovered = recover_orphaned_batch_items()
+        log.info("audit_recovery.backend_startup", recovered=recovered)
     log.info("app.startup", env=settings.APP_ENV, llm_provider=settings.LLM_PROVIDER)
     yield
     log.info("app.shutdown")

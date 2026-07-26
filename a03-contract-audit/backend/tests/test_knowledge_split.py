@@ -53,7 +53,7 @@ def test_single_article_falls_back_to_paragraph():
 
 def test_paragraph_split():
     """非法规文本按空行分段。"""
-    text = "风险规则：违约金过低。建议不低于合同金额10%。\n\n付款条件应明确验收标准和时限。"
+    text = "风险规则：违约金过低。建议不低于合同金额10%。\n\n付款条件应明确验收标准、验收时限以及逾期处理责任。"
     result = _smart_split(text)
     assert result.mode == "paragraph"
     assert len(result.chunks) == 2

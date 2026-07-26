@@ -1,10 +1,10 @@
 <script setup lang="ts">
 // 合同合规审查（真实接口核心闭环）：上传→解析→审查→复核→生成整改。
 // 闭环逻辑迁移自 WorkbenchView，数据落 audit-session store。
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type UploadRawFile } from 'element-plus'
 import { getLookups } from '@/api/admin'
-import { batchUploadContracts, auditContract, type BatchUploadResult } from '@/api/contract'
 
 // 用户选文件后立即显示名称（不等后端返回），上传完成后由 session.filename 接管
 const pendingFilename = ref('')
@@ -13,13 +13,18 @@ import { useAuditSessionStore } from '@/stores/audit-session'
 import { useRectifyStore } from '@/stores/rectify'
 import { useNotifyStore } from '@/stores/notify'
 import { useAuthStore } from '@/stores/auth'
+import { useBatchStore } from '@/stores/batch'
 import RiskReviewDrawer from '@/components/audit/RiskReviewDrawer.vue'
 import AnnotationModal from '@/components/audit/AnnotationModal.vue'
+import { auditProgressDisplay, type AuditUiState } from '@/utils/audit-progress'
 
 const session = useAuditSessionStore()
 const rectify = useRectifyStore()
 const notify = useNotifyStore()
 const auth = useAuthStore()
+const batchStore = useBatchStore()
+const route = useRoute()
+const router = useRouter()
 
 const department = ref('采购中心') // 保留兼容（批量上传可能引用），实际展示改用 auth.department
 const contractType = ref('软件开发外包合同')
@@ -45,6 +50,19 @@ onMounted(async () => {
     // 静默降级：保持内置默认值，不打断用户流程
   }
 })
+
+onMounted(async () => {
+  const batchId = Number(route.query.batch)
+  if (!Number.isInteger(batchId) || batchId <= 0) return
+  batchOpen.value = true
+  try {
+    await batchStore.resume(batchId)
+  } catch {
+    ElMessage.error(batchStore.error || '批次状态恢复失败')
+  }
+})
+
+onBeforeUnmount(() => batchStore.stopPolling())
 
 // 审查维度：勾选项传给后端，LLM 按维度聚焦输出
 const dimensions = ref([
@@ -75,41 +93,8 @@ async function onFile(file: UploadRawFile) {
   }
 }
 
-// —— 审查进度模拟（方案A：纯前端，无需后端改动）——
-const auditProgress = ref(0)
-const auditProgressLabel = ref('')
-const auditState = ref<'idle' | 'running' | 'done' | 'failed'>('idle')
-
-// 四阶段：目标百分比 + 标签 + 模拟持续时间（ms）
-const _AUDIT_STEPS = [
-  { pct: 15, label: '解析合同文本…',   ms: 800 },
-  { pct: 55, label: '法务 Agent 分析中…', ms: 3000 },
-  { pct: 85, label: '财务 Agent 审查中…', ms: 2500 },
-  { pct: 99, label: '生成风险报告…',   ms: 1500 },
-]
-
-let _progressTimer: ReturnType<typeof setInterval> | null = null
-
-function _startProgress() {
-  auditProgress.value = 0
-  auditState.value = 'running'
-  auditProgressLabel.value = '准备中…'
-  let idx = 0
-  let stepStart = Date.now()
-  _progressTimer = setInterval(() => {
-    if (idx >= _AUDIT_STEPS.length) return
-    const s = _AUDIT_STEPS[idx]
-    const prev = idx === 0 ? 0 : _AUDIT_STEPS[idx - 1].pct
-    const frac = Math.min((Date.now() - stepStart) / s.ms, 1)
-    auditProgress.value = Math.round(prev + (s.pct - prev) * frac)
-    auditProgressLabel.value = s.label
-    if (frac >= 1) { idx++; stepStart = Date.now() }
-  }, 60)
-}
-
-function _clearProgress() {
-  if (_progressTimer) { clearInterval(_progressTimer); _progressTimer = null }
-}
+const auditState = ref<AuditUiState>('idle')
+const auditDisplay = computed(() => auditProgressDisplay(auditState.value))
 
 // —— 触发审查（真接口）——
 async function onAudit() {
@@ -117,12 +102,9 @@ async function onAudit() {
     ElMessage.warning('请先上传合同')
     return
   }
-  _startProgress()
+  auditState.value = 'running'
   try {
     await session.runAudit(dimensions.value.filter(d => d.on).map(d => d.key))
-    _clearProgress()
-    auditProgress.value = 100
-    auditProgressLabel.value = '审查完成'
     auditState.value = 'done'
     const n = session.riskCount
     ElMessage.success(`审查完成，检出 ${n} 条风险`)
@@ -130,9 +112,6 @@ async function onAudit() {
       notify.push('alert', '高风险预警', `${session.filename} 检出 ${session.levelCounts.high} 项高风险条款。`)
     }
   } catch {
-    _clearProgress()
-    auditProgress.value = 0
-    auditProgressLabel.value = '审查失败，请重试'
     auditState.value = 'failed'
     ElMessage.error('审查失败（需 legal / finance 角色）')
   }
@@ -155,9 +134,6 @@ async function cancelUpload() {
 
 function onAbort() {
   session.abortAudit()
-  _clearProgress()
-  auditProgress.value = 0
-  auditProgressLabel.value = '已中止'
   auditState.value = 'idle'
   ElMessage.info('审查已中止')
 }
@@ -267,15 +243,33 @@ const onboardSteps = [
 // —— 批量上传 ——
 const batchOpen = ref(false)
 
-interface BatchItem {
+interface PendingBatchItem {
   file: File
-  status: 'pending' | 'uploading' | 'success' | 'failed'
-  contractId?: number
-  error?: string
 }
 
-const batchItems = ref<BatchItem[]>([])
-const batchUploading = ref(false)
+const batchItems = ref<PendingBatchItem[]>([])
+const batchRows = computed(() => {
+  if (batchStore.batch) return batchStore.batch.items
+  return batchItems.value.map((item, index) => ({
+    id: -index - 1,
+    contract_id: 0,
+    filename: item.file.name,
+    status: 'pending' as const,
+    error: null,
+    attempts: 0,
+    started_at: null,
+    finished_at: null,
+  }))
+})
+
+const batchStatusLabel: Record<string, string> = {
+  pending: '待上传',
+  queued: '等待处理',
+  parsing: '解析中',
+  auditing: '审查中',
+  done: '已完成',
+  failed: '失败',
+}
 
 function onBatchFileChange(uploadFile: { raw: File }) {
   if (batchItems.value.length >= 200) {
@@ -283,7 +277,7 @@ function onBatchFileChange(uploadFile: { raw: File }) {
     return
   }
   if (!batchItems.value.find((i) => i.file.name === uploadFile.raw.name)) {
-    batchItems.value.push({ file: uploadFile.raw, status: 'pending' })
+    batchItems.value.push({ file: uploadFile.raw })
   }
 }
 
@@ -292,53 +286,42 @@ function removeBatchItem(idx: number) {
 }
 
 async function startBatchUpload() {
-  const pending = batchItems.value.filter((i) => i.status === 'pending')
-  if (!pending.length) return
-  batchUploading.value = true
-  pending.forEach((i) => (i.status = 'uploading'))
+  if (!batchItems.value.length) return
   try {
-    const results: BatchUploadResult[] = await batchUploadContracts(
-      pending.map((i) => i.file),
+    const created = await batchStore.create(
+      batchItems.value.map((i) => i.file),
       contractType.value,
+      dimensions.value.filter((item) => item.on).map((item) => item.key),
     )
-    results.forEach((r, idx) => {
-      const item = pending[idx]
-      if (!item) return
-      item.status = r.status
-      item.contractId = r.contract_id
-      item.error = r.error
+    batchItems.value = []
+    await router.replace({
+      query: { ...route.query, batch: String(created.id) },
     })
-    const ok = results.filter((r) => r.status === 'success').length
-    ElMessage.success(`批量上传完成：${ok}/${results.length} 份成功`)
+    ElMessage.success(`批次 #${created.id} 已提交，共 ${created.total} 份合同`)
   } catch {
-    pending.forEach((i) => (i.status = 'failed'))
-    ElMessage.error('批量上传失败，请检查后端连接')
-  } finally {
-    batchUploading.value = false
+    ElMessage.error(batchStore.error || '批次提交失败，请检查后端连接')
   }
 }
 
-// A6：批量上传成功后一键触发全部审查
-const batchAuditing = ref(false)
-const batchSuccessIds = computed(() =>
-  batchItems.value.filter((i) => i.status === 'success' && i.contractId).map((i) => i.contractId as number),
-)
-
-async function startBatchAudit() {
-  if (!batchSuccessIds.value.length) return
-  batchAuditing.value = true
-  let done = 0
-  for (const cid of batchSuccessIds.value) {
-    try { await auditContract(cid) } catch { /* 单份失败不中断 */ }
-    done++
+async function retryFailedBatch() {
+  try {
+    const result = await batchStore.retry()
+    if (result) ElMessage.success(`已重新提交 ${result.retried} 个失败任务`)
+  } catch {
+    ElMessage.error(batchStore.error || '失败任务重试失败')
   }
-  batchAuditing.value = false
-  ElMessage.success(`已触发 ${done} 份合同审查，可在审查页查看结果`)
+}
+
+async function resetBatch() {
+  batchStore.reset()
+  batchItems.value = []
+  const query = { ...route.query }
+  delete query.batch
+  await router.replace({ query })
 }
 
 function closeBatch() {
   batchOpen.value = false
-  batchItems.value = []
 }
 
 
@@ -434,17 +417,19 @@ function closeBatch() {
           <el-icon><MagicStick /></el-icon>启动合规审查
         </el-button>
 
-        <!-- 审查进度条：运行中/完成/失败三态 -->
+        <!-- 同步接口没有服务端阶段百分比：运行中只展示不定进度，完成后才显示 100%。 -->
         <div v-if="auditState !== 'idle'" class="audit-progress-wrap">
           <div class="audit-progress-head">
-            <span class="audit-progress-label">{{ auditProgressLabel }}</span>
-            <span class="audit-progress-pct mono">{{ auditProgress }}%</span>
+            <span class="audit-progress-label">{{ auditDisplay.label }}</span>
+            <span v-if="auditDisplay.percentage !== null" class="audit-progress-pct mono">
+              {{ auditDisplay.percentage }}%
+            </span>
           </div>
           <div class="audit-progress-track">
             <div
               class="audit-progress-fill"
-              :class="auditState"
-              :style="{ width: `${auditProgress}%` }"
+              :class="[auditState, { indeterminate: auditDisplay.indeterminate }]"
+              :style="auditDisplay.percentage === null ? undefined : { width: `${auditDisplay.percentage}%` }"
             />
           </div>
         </div>
@@ -560,41 +545,67 @@ function closeBatch() {
         <div class="el-upload__text">拖拽合同文件到此，或<em>点击选择</em><p class="upload-hint">支持50份以上批量处理 · PDF / Word / TXT</p></div>
       </el-upload>
 
-      <div v-if="batchItems.length" class="batch-list">
-        <div v-for="(item, i) in batchItems" :key="i" class="batch-item" :class="{ 'failed-item': item.status === 'failed' }">
-          <span class="batch-name mono">{{ item.file.name }}</span>
-          <el-tag v-if="item.status === 'pending'" size="small" effect="plain" class="batch-tag">待上传</el-tag>
-          <el-tag v-else-if="item.status === 'uploading'" type="warning" size="small" effect="light" class="batch-tag">上传中…</el-tag>
-          <el-tag v-else-if="item.status === 'success'" type="success" size="small" effect="light" class="batch-tag">✓ #{{ item.contractId }}</el-tag>
-          <el-tag v-else type="danger" size="small" effect="dark" class="batch-tag">✗ {{ item.error || '失败' }}</el-tag>
+      <div v-if="batchRows.length" class="batch-list">
+        <div v-for="(item, i) in batchRows" :key="item.id" class="batch-item" :class="{ 'failed-item': item.status === 'failed' }">
+          <span class="batch-name mono" :title="item.error || item.filename">{{ item.filename }}</span>
+          <el-tag
+            v-if="item.status === 'done'"
+            type="success"
+            size="small"
+            effect="light"
+            class="batch-tag"
+          >{{ batchStatusLabel[item.status] }}</el-tag>
+          <el-tag
+            v-else-if="item.status === 'failed'"
+            type="danger"
+            size="small"
+            effect="dark"
+            class="batch-tag batch-error"
+          >{{ item.error || batchStatusLabel[item.status] }}</el-tag>
+          <el-tag
+            v-else
+            :type="item.status === 'pending' || item.status === 'queued' ? 'info' : 'warning'"
+            size="small"
+            effect="light"
+            class="batch-tag"
+          >{{ batchStatusLabel[item.status] }}</el-tag>
           <el-button v-if="item.status === 'pending'" size="small" :icon="'Delete'" circle plain
             @click="removeBatchItem(i)" />
         </div>
-        <div class="batch-summary mono">
-          共 {{ batchItems.length }} 份 ·
-          成功 {{ batchItems.filter(i => i.status === 'success').length }} ·
-          失败 {{ batchItems.filter(i => i.status === 'failed').length }}
+        <div v-if="batchStore.batch" class="batch-progress">
+          <el-progress :percentage="batchStore.progress" :stroke-width="6" />
+          <div class="batch-summary mono">
+            批次 #{{ batchStore.batch.id }} · 共 {{ batchStore.batch.total }} 份 ·
+            已处理 {{ batchStore.batch.completed }} · 失败 {{ batchStore.batch.failed }}
+          </div>
+        </div>
+        <div v-else class="batch-summary mono">
+          已选择 {{ batchItems.length }} 份，提交后由服务端异步处理
         </div>
       </div>
 
       <template #footer>
         <el-button @click="closeBatch">关闭</el-button>
-        <!-- A6：上传成功后一键触发全部审查 -->
         <el-button
-          v-if="batchSuccessIds.length"
+          v-if="batchStore.batch && batchStore.isTerminal"
+          @click="resetBatch"
+        >新建批次</el-button>
+        <el-button
+          v-if="batchStore.batch?.failed"
           type="warning"
-          :loading="batchAuditing"
-          @click="startBatchAudit"
+          :loading="batchStore.loading"
+          @click="retryFailedBatch"
         >
-          一键触发全部审查（{{ batchSuccessIds.length }} 份）
+          重试失败项（{{ batchStore.batch.failed }}）
         </el-button>
         <el-button
+          v-if="!batchStore.batch"
           type="primary"
-          :loading="batchUploading"
-          :disabled="!batchItems.filter(i => i.status === 'pending').length"
+          :loading="batchStore.loading"
+          :disabled="!batchItems.length"
           @click="startBatchUpload"
         >
-          开始上传（{{ batchItems.filter(i => i.status === 'pending').length }} 份）
+          提交审查（{{ batchItems.length }} 份）
         </el-button>
       </template>
     </el-dialog>
@@ -724,11 +735,26 @@ function closeBatch() {
 .audit-progress-fill {
   height: 100%;
   border-radius: 3px;
-  transition: width 0.06s linear;
+  transition: width 0.2s ease;
   background: var(--brass);
+}
+.audit-progress-fill.indeterminate {
+  width: 36%;
+  animation: audit-indeterminate 1.2s ease-in-out infinite;
 }
 .audit-progress-fill.done   { background: var(--sage); }
 .audit-progress-fill.failed { background: var(--seal); }
+@keyframes audit-indeterminate {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(310%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .audit-progress-fill.indeterminate {
+    width: 100%;
+    animation: none;
+    opacity: 0.55;
+  }
+}
 .result-head {
   display: flex;
   align-items: center;
@@ -977,7 +1003,16 @@ function closeBatch() {
   white-space: nowrap;
 }
 .batch-tag { flex: none; }
+.batch-error {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .failed-item { background: var(--seal-soft) !important; }
+.batch-progress {
+  padding: 8px 2px 2px;
+}
 .batch-summary {
   font-size: 12px;
   color: var(--muted);

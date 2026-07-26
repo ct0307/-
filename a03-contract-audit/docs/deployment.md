@@ -15,7 +15,7 @@
 ### 前置条件
 
 - Docker Desktop ≥ 24.0（含 Docker Compose v2）
-- 至少 2GB 可用内存（embedding 模型需约 500MB）
+- 至少 8GB 可用内存；模型推理资源按所选模型另行评估
 
 ### 步骤
 
@@ -26,10 +26,10 @@ cd a03-contract-audit
 
 # 2. 配置环境变量
 cp backend/.env.example backend/.env
-vim backend/.env   # 最少设置 LLM_API_KEY 和 JWT_SECRET
+vim backend/.env   # 至少设置数据库密码、JWT_SECRET、FILE_ENCRYPT_KEY 和模型端点
 
-# 3. 启动
-docker compose up -d
+# 3. 构建并启动；backend 启动前自动执行 alembic upgrade head
+docker compose up -d --build
 
 # 4. 查看状态
 docker compose ps
@@ -51,8 +51,12 @@ docker compose exec backend python -m scripts.seed_demo
 
 | 服务 | 镜像基础 | 端口 | 数据持久化 |
 |---|---|---|---|
-| `a03_backend` | python:3.11-slim | 8000 | `contract_storage` volume（合同文件 + SQLite DB）|
-| `a03_frontend` | nginx:alpine | 80 | 无（静态文件由镜像打包）|
+| `postgres` | postgres:16-alpine | 内网 | `postgres_data` |
+| `redis` | redis:7-alpine | 内网 | `redis_data`（AOF）|
+| `backend` | python:3.11-slim | 8000 | `contract_storage`（加密合同文件）|
+| `worker` | 与 backend 相同 | 无 | 共享 `contract_storage` |
+| `scheduler` | 与 backend 相同 | 无 | Celery Beat，每 60 秒触发孤儿任务恢复 |
+| `frontend` | nginx:alpine | 80 | 无 |
 
 ### 常用命令
 
@@ -66,11 +70,20 @@ docker compose up -d --build
 # 查看后端日志
 docker compose logs -f backend
 
+# 查看 worker 日志
+docker compose logs -f worker
+
+# 查看周期恢复调度日志
+docker compose logs -f scheduler
+
 # 进入后端容器
 docker compose exec backend bash
 
-# 备份数据
-docker cp a03_backend:/app/storage ./backup_$(date +%Y%m%d)
+# 备份 PostgreSQL（示例文件名按实际日期填写）
+docker compose exec -T postgres pg_dump -U a03 -d a03_contract > backup.sql
+
+# 验证迁移状态
+docker compose exec backend alembic current
 ```
 
 ---
@@ -151,8 +164,8 @@ LLM_MODEL=qwen2.5:14b
 # 生产必须修改，不能使用默认值
 JWT_SECRET=your-strong-secret-here
 
-# 合同文件加密密钥（留空则明文存储，生产建议开启）
-FILE_ENCRYPT_KEY=
+# 合同文件加密密钥（生产强制，空值或无效值会拒绝启动）
+FILE_ENCRYPT_KEY=<fernet_key>
 
 # 生成命令：
 # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -170,8 +183,19 @@ DB_BACKEND=postgres
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_USER=a03
-POSTGRES_PASSWORD=a03pass
+POSTGRES_PASSWORD=<至少12位独立数据库密码>
 POSTGRES_DB=a03_contract
+
+# 异步批次
+REDIS_URL=redis://redis:6379/0
+AUDIT_ASYNC=true
+
+# OCR 资源门槛
+OCR_MAX_PAGES=100
+OCR_MAX_PAGE_PIXELS=16000000
+OCR_DPI=180
+OCR_TIMEOUT_SECONDS=120
+OCR_MIN_CONFIDENCE=0.75
 ```
 
 ---
@@ -220,15 +244,19 @@ APP_ENV=prod
 DEBUG=False
 ```
 
-### 2. 数据库迁移（切换到 PostgreSQL）
+### 2. 数据库迁移
 
 ```bash
-# 当前：SQLite 开发期，支持自动补列（_DEV_COLUMNS 机制）
-# 生产：使用 Alembic 迁移（路线图 P3）
-
-# 临时方案：导出 SQLite → 导入 PostgreSQL
-python -m scripts.migrate_sqlite_to_postgres  # 待实现
+# 在 backend 目录或 backend 容器内执行
+alembic -c alembic.ini upgrade head
+alembic -c alembic.ini current
 ```
+
+生产应用不会执行 `create_all`，也不会自动灌入演示账号。首次上线前应通过受控脚本或管理流程创建管理员；`scripts.seed_demo` 仅限竞赛演示环境。
+
+生产配置采用 fail-fast：`DEBUG=true`、SQLite、同步审查、默认数据库密码、弱 JWT 密钥或无效 Fernet 密钥都会阻止 backend、worker 和 Alembic 启动，避免服务以不安全配置进入健康状态。
+
+批次创建会持久化原始审查维度。backend 启动、Celery worker 就绪时会立即扫描，scheduler 还会每 60 秒扫描未发布的 `queued` 项及租约过期项并重新投递；数据库行锁和有效租约负责拦截重复执行。失败重试默认沿用原批次维度，避免改变审查口径。
 
 ### 3. 模型私有化
 
@@ -270,4 +298,15 @@ server {
 | embedding 模型下载慢 | 配置 HuggingFace 镜像：`HF_ENDPOINT=https://hf-mirror.com` |
 | LLM 调用超时 | 调大 `LLM_TIMEOUT`；检查 API Key 和网络连通性 |
 | 前端 502 | 确认 backend 服务已启动：`curl http://localhost:8000/api/v1/dashboard/summary` |
-| 合同解析为空 | 扫描件 PDF 无文本层，需接入 OCR（路线图 P2）|
+| 合同解析为空 | 检查日志中的 `parser.pdf_empty` / `parser.ocr_*`；未安装 OCR 引擎时会明确失败，不会静默判定无风险 |
+| worker 无任务 | 检查 `REDIS_URL`、`AUDIT_ASYNC=true` 与 `docker compose logs worker` |
+| 数据表缺失 | 执行 `alembic current`，确认位于 `20260726_01 (head)` |
+
+## 当前验证边界
+
+- Alembic 已在临时 SQLite 完成空库升级和完整回滚测试。
+- Compose YAML 已做结构解析，但当前开发机没有 Docker CLI，尚未完成容器级启动验证。
+- Compose 不会自动搬迁旧 `storage/a03_dev.db` 数据；已有 SQLite 业务数据的环境必须先冻结写入，执行受控导出、PostgreSQL 导入、数量/哈希核对和回滚演练。
+- RapidOCR 3.9.2 / ONNX Runtime 1.28.0 已完成 wheel 完整性、许可证、传递依赖漏洞审计和真实图片/PDF 冒烟；详见 `evaluation/ocr-dependency-audit.md`。
+- OCR 字符准确率仍缺冻结扫描件真值集，真实引擎冒烟不能替代准确率验收。
+- 生产密钥、真实模型端点、PostgreSQL 备份恢复和 TLS 需在目标环境完成验收。

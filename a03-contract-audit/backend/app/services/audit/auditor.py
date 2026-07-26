@@ -27,6 +27,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.llm.base import LLMError
 from app.llm.factory import get_llm_adapter
+from app.services.audit.evidence import bind_risk_evidence
 from app.services.rag.retriever import retrieve
 
 if TYPE_CHECKING:
@@ -160,10 +161,22 @@ _DIM_LABELS: dict[str, str] = {
     "payment":     "金额与付款条款",
     "breach":      "违约责任分析",
     "ip":          "知识产权条款",
-    "nda":         "保密条款审查",
+    "confidentiality": "保密条款审查",
     "termination": "终止与解除条款",
     "dispute":     "争议解决条款",
 }
+_DIM_ALIASES = {"nda": "confidentiality"}
+
+
+def _dimension_instruction(dimensions: list[str] | None) -> str:
+    if not dimensions:
+        return "本次执行全量审查。"
+    normalized = [_DIM_ALIASES.get(key, key) for key in dimensions]
+    unknown = sorted(set(normalized) - set(_DIM_LABELS))
+    if unknown:
+        raise ValueError(f"不支持的审查维度: {', '.join(unknown)}")
+    labels = list(dict.fromkeys(_DIM_LABELS[key] for key in normalized))
+    return "本次仅审查以下维度：" + "、".join(labels) + "。不得输出其他维度的风险。"
 
 
 def _agent_audit(
@@ -180,22 +193,22 @@ def _agent_audit(
     db/contract_id 可选，仅用于写 LLM 调用日志，不影响审查主链路。
     """
     cfg = _AGENTS[role]
+    dimension_instruction = _dimension_instruction(dimensions)
 
     # 该角色关注维度的定向 RAG 依据
     seen: set[str] = set()
     basis_lines: list[str] = []
-    rag_items: list[dict] = []   # 结构化来源列表，供溯源展示（不影响 basis 字符串格式）
     for topic in cfg["topics"]:
         for item in retrieve(topic, top_k=2):
             key = item["source"] + item["content"][:20]
             if key not in seen:
                 seen.add(key)
                 basis_lines.append(f"- {item['content']}（依据：{item['source']}）")
-                rag_items.append({"content": item["content"], "source": item["source"], "score": item["score"]})
     basis_block = "\n".join(basis_lines) if basis_lines else "（无检索到的依据，请基于通用合同合规常识判断并说明）"
 
     system_prompt = (
         f"你是{cfg['name']}，专门从以下维度审查企业合同的合规风险：{cfg['focus']}。\n"
+        f"{dimension_instruction}\n"
         "严格遵守：\n"
         "1. 只依据给定资料判断，禁止编造法规或依据；\n"
         "2. 只输出属于你职责维度的风险，不越界评价其他维度；\n"
@@ -232,10 +245,8 @@ def _agent_audit(
     _record_llm_call(db, contract_id, agent=role, resp=resp, mode="llm")
     raw = _parse_risk_json(resp.text)
     normalized = [_normalize(r, role) for r in raw]
-    # 注入结构化 RAG 来源（每条风险共享同一次检索来源，供前端溯源展示）
-    for r in normalized:
-        r["rag_sources"] = rag_items
-    return normalized
+    # 主题级检索仅作为模型上下文；正式证据必须按单条风险重新检索和绑定。
+    return [bind_risk_evidence(r) for r in normalized]
 
 
 def _parse_risk_json(text: str) -> list[dict]:

@@ -1,6 +1,9 @@
-# 架构测试骨架
+"""应用存活接口契约。"""
+from app.main import health
 
 
-def test_health_placeholder():
-    """占位：后端接口就绪后补真实测试。"""
-    assert True
+def test_health_returns_application_status():
+    result = health()
+
+    assert result["status"] == "ok"
+    assert result["app"]

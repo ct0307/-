@@ -3,7 +3,10 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from cryptography.fernet import Fernet
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
 
 # 项目 backend 目录（config.py 位于 backend/app/core/config.py，上溯 3 层）
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -39,6 +42,13 @@ class Settings(BaseSettings):
     STORAGE_DIR: str = "storage"
     MAX_UPLOAD_MB: int = 50
 
+    # OCR 资源门槛：防止超大扫描件耗尽 worker 内存或长期占用执行槽。
+    OCR_MAX_PAGES: int = 100
+    OCR_MAX_PAGE_PIXELS: int = 16_000_000
+    OCR_DPI: int = 180
+    OCR_TIMEOUT_SECONDS: float = 120.0
+    OCR_MIN_CONFIDENCE: float = 0.75
+
     # 合同文件加密存储（企业数据安全硬约束）。
     # 留空则不加密（开发/演示期快速启动）；生产部署必须通过 .env 设置32字节Fernet密钥。
     # 生成命令：python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -67,6 +77,30 @@ class Settings(BaseSettings):
     # 向量维度（需与所用 embedding 模型一致）
     EMBED_DIM: int = 512  # bge-small-zh=512，bge-base-zh=768，bge-large-zh=1024
 
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        if self.APP_ENV != "prod":
+            return self
+
+        errors: list[str] = []
+        if self.DEBUG:
+            errors.append("DEBUG 必须为 false")
+        if self.DB_BACKEND != "postgres":
+            errors.append("DB_BACKEND 必须为 postgres")
+        if not self.AUDIT_ASYNC:
+            errors.append("AUDIT_ASYNC 必须为 true")
+        if self.POSTGRES_PASSWORD == "a03pass" or len(self.POSTGRES_PASSWORD) < 12:
+            errors.append("POSTGRES_PASSWORD 必须替换为至少 12 位的独立密钥")
+        if self.JWT_SECRET == "CHANGE_ME_IN_PRODUCTION" or len(self.JWT_SECRET) < 32:
+            errors.append("JWT_SECRET 必须替换为至少 32 位的独立密钥")
+        try:
+            Fernet(self.FILE_ENCRYPT_KEY.encode())
+        except (TypeError, ValueError):
+            errors.append("FILE_ENCRYPT_KEY 必须是有效的 Fernet 密钥")
+        if errors:
+            raise ValueError("生产配置不安全: " + "; ".join(errors))
+        return self
+
     def _abs(self, p: str) -> str:
         """相对路径按 BASE_DIR 解析为绝对路径；已是绝对路径则原样返回。"""
         return p if os.path.isabs(p) else str(BASE_DIR / p)
@@ -83,10 +117,14 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         if self.DB_BACKEND == "sqlite":
             return f"sqlite:///{self.sqlite_abs_path}"
-        return (
-            f"postgresql+psycopg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
-            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-        )
+        return URL.create(
+            drivername="postgresql+psycopg",
+            username=self.POSTGRES_USER,
+            password=self.POSTGRES_PASSWORD,
+            host=self.POSTGRES_HOST,
+            port=self.POSTGRES_PORT,
+            database=self.POSTGRES_DB,
+        ).render_as_string(hide_password=False)
 
 
 @lru_cache

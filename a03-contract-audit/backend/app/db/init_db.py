@@ -27,11 +27,13 @@ _SEED_USERS = [
 
 
 def init_db() -> None:
-    # 确保存储目录存在（SQLite 文件与合同文件都放这里）
+    # 生产 PostgreSQL 必须由 Alembic 管理，应用进程不得绕过迁移直接建表。
     os.makedirs(settings.storage_path, exist_ok=True)
-    Base.metadata.create_all(bind=engine)
-    _migrate_dev_columns()
-    _seed_users()
+    if settings.DB_BACKEND == "sqlite":
+        Base.metadata.create_all(bind=engine)
+        _migrate_dev_columns()
+    if settings.APP_ENV != "prod":
+        _seed_users()
     log.info("db.init", backend=settings.DB_BACKEND, tables=list(Base.metadata.tables.keys()))
 
 
@@ -44,6 +46,7 @@ _DEV_COLUMNS = {
     ],
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
     "contracts": [("elements_json", "TEXT DEFAULT '{}'")],
+    "audit_batches": [("dimensions_json", "TEXT DEFAULT '[]'")],
 }
 
 

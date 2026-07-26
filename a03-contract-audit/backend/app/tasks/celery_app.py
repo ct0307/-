@@ -16,4 +16,10 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     timezone="Asia/Shanghai",
+    beat_schedule={
+        "recover-orphaned-audit-items": {
+            "task": "audit.recover_orphans",
+            "schedule": 60.0,
+        },
+    },
 )
