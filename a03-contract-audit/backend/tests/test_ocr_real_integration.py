@@ -51,7 +51,6 @@ def test_real_rapidocr_recognizes_image_and_scanned_pdf():
     image_text, image_confidence = engine.recognize(png)
     pdf_result = ocr_pdf_bytes(
         _scan_pdf(png),
-        engine=engine,
         dpi=180,
         min_confidence=0.0,
     )

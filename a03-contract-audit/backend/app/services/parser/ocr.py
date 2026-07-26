@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
+import subprocess
+import sys
 import time
 from typing import Callable, Protocol, runtime_checkable
 
@@ -30,6 +33,15 @@ class OCRResult:
     mean_confidence: float
     page_texts: tuple[str, ...] = ()
     requires_review: bool = False
+
+
+_WORKER_RESULT_PREFIX = b"A03_OCR_RESULT_V1="
+_ERROR_TYPES: dict[str, type[OCRError]] = {
+    "OCRError": OCRError,
+    "OCRUnavailable": OCRUnavailable,
+    "OCRLimitExceeded": OCRLimitExceeded,
+    "OCRTimeout": OCRTimeout,
+}
 
 
 @runtime_checkable
@@ -85,10 +97,57 @@ def _recognize(engine: EngineLike, image: bytes) -> tuple[str, float]:
     return engine(image)
 
 
-def ocr_pdf_bytes(
+def _communicate_with_timeout(
+    process: subprocess.Popen[bytes], data: bytes, *, timeout_seconds: float
+) -> tuple[bytes, bytes]:
+    try:
+        return process.communicate(input=data, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        process.terminate()
+        try:
+            process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+        raise OCRTimeout(f"OCR 处理超过 {timeout_seconds:g} 秒") from exc
+
+
+def _parse_worker_result(stdout: bytes) -> OCRResult:
+    line = next(
+        (
+            line
+            for line in reversed(stdout.splitlines())
+            if line.startswith(_WORKER_RESULT_PREFIX)
+        ),
+        None,
+    )
+    if line is None:
+        raise OCRError("OCR 子进程响应协议无效")
+    try:
+        payload = json.loads(line[len(_WORKER_RESULT_PREFIX):].decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise TypeError("响应不是对象")
+        if not payload.get("ok"):
+            error_type = _ERROR_TYPES.get(str(payload.get("error_type")), OCRError)
+            raise error_type(str(payload.get("message") or "OCR 子进程失败"))
+        result = payload["result"]
+        return OCRResult(
+            text=str(result["text"]),
+            page_count=int(result["page_count"]),
+            mean_confidence=float(result["mean_confidence"]),
+            page_texts=tuple(str(value) for value in result.get("page_texts", [])),
+            requires_review=bool(result["requires_review"]),
+        )
+    except OCRError:
+        raise
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise OCRError("OCR 子进程响应协议无效") from exc
+
+
+def _ocr_pdf_bytes_in_process(
     data: bytes,
     *,
-    engine: EngineLike | None = None,
+    engine: EngineLike,
     page_indices: tuple[int, ...] | list[int] | None = None,
     max_pages: int = 100,
     max_page_pixels: int = 16_000_000,
@@ -96,7 +155,7 @@ def ocr_pdf_bytes(
     timeout_seconds: float = 120.0,
     min_confidence: float = 0.75,
 ) -> OCRResult:
-    """渲染并识别 PDF 页面；页索引从 0 开始。"""
+    """在当前进程渲染并识别 PDF 页面；页索引从 0 开始。"""
     if max_pages < 1 or max_page_pixels < 1 or dpi < 36 or timeout_seconds <= 0:
         raise ValueError("OCR 资源限制参数无效")
 
@@ -115,7 +174,6 @@ def ocr_pdf_bytes(
         if len(set(selected)) != len(selected) or any(i < 0 or i >= document.page_count for i in selected):
             raise OCRLimitExceeded("OCR 页索引无效或重复")
 
-        active_engine = engine or RapidOCREngine()
         page_texts: list[str] = []
         confidences: list[float] = []
         scale = dpi / 72.0
@@ -130,7 +188,7 @@ def ocr_pdf_bytes(
                     f"第 {index + 1} 页像素 {pixel_count} 超过上限 {max_page_pixels}"
                 )
             pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-            text, confidence = _recognize(active_engine, pixmap.tobytes("png"))
+            text, confidence = _recognize(engine, pixmap.tobytes("png"))
             page_texts.append(text.strip())
             confidences.append(max(0.0, min(1.0, float(confidence))))
             if time.monotonic() - started_at > timeout_seconds:
@@ -147,3 +205,70 @@ def ocr_pdf_bytes(
         page_texts=tuple(page_texts),
         requires_review=not combined or mean_confidence < min_confidence,
     )
+
+
+def ocr_pdf_bytes(
+    data: bytes,
+    *,
+    engine: EngineLike | None = None,
+    page_indices: tuple[int, ...] | list[int] | None = None,
+    max_pages: int = 100,
+    max_page_pixels: int = 16_000_000,
+    dpi: int = 180,
+    timeout_seconds: float = 120.0,
+    min_confidence: float = 0.75,
+) -> OCRResult:
+    """识别 PDF；生产引擎在可强制终止的子进程中运行。"""
+    if max_pages < 1 or max_page_pixels < 1 or dpi < 36 or timeout_seconds <= 0:
+        raise ValueError("OCR 资源限制参数无效")
+
+    if engine is not None:
+        return _ocr_pdf_bytes_in_process(
+            data,
+            engine=engine,
+            page_indices=page_indices,
+            max_pages=max_pages,
+            max_page_pixels=max_page_pixels,
+            dpi=dpi,
+            timeout_seconds=timeout_seconds,
+            min_confidence=min_confidence,
+        )
+
+    command = [
+        sys.executable,
+        "-m",
+        "app.services.parser.ocr_worker",
+        "--max-pages",
+        str(max_pages),
+        "--max-page-pixels",
+        str(max_page_pixels),
+        "--dpi",
+        str(dpi),
+        "--timeout-seconds",
+        str(timeout_seconds),
+        "--min-confidence",
+        str(min_confidence),
+    ]
+    if page_indices is not None:
+        command.extend(["--page-indices", ",".join(str(value) for value in page_indices)])
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise OCRUnavailable(f"OCR 子进程启动失败: {exc}") from exc
+
+    stdout, stderr = _communicate_with_timeout(
+        process,
+        data,
+        timeout_seconds=timeout_seconds,
+    )
+    if process.returncode not in (0, None) and _WORKER_RESULT_PREFIX not in stdout:
+        detail = stderr.decode("utf-8", errors="replace")[-1000:]
+        raise OCRUnavailable(
+            f"OCR 子进程启动或执行失败: {detail or process.returncode}"
+        )
+    return _parse_worker_result(stdout)
