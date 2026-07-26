@@ -60,7 +60,7 @@ docker compose up -d
 # 后端 API 文档：http://localhost:8000/docs
 ```
 
-> 首次启动会自动下载 embedding 模型（~100MB），之后缓存在 Docker volume 中。
+> Docker 构建阶段会预下载 embedding 模型并烤入镜像，运行时强制只读本地缓存，不访问 Hugging Face。
 
 ### 方式二：本地开发
 

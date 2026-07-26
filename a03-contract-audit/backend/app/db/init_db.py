@@ -44,6 +44,17 @@ _DEV_COLUMNS = {
     ],
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
     "contracts": [("elements_json", "TEXT DEFAULT '{}'")],
+    "knowledge_chunks": [
+        ("article_number", "VARCHAR(64)"),
+        ("version", "VARCHAR(64)"),
+        ("effective_date", "DATE"),
+        ("expiry_date", "DATE"),
+        ("applicable_contract_types", "TEXT DEFAULT '[]'"),
+        ("applicable_dimensions", "TEXT DEFAULT '[]'"),
+        ("embedding_model", "VARCHAR(255)"),
+        ("embedding_dimension", "INTEGER"),
+        ("content_hash", "VARCHAR(64)"),
+    ],
 }
 
 
