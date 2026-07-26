@@ -6,6 +6,36 @@
 
 ---
 
+## 2026-07-26 · OCR 质量闭环与强制超时（✅ 代码验收完成，外部实测待补）
+
+### 已完成
+
+| 优先级 | 能力 | 本轮改动 |
+|---|---|---|
+| P1 | 结构化解析质量 | `DocumentParseResult` 贯通原生/OCR/混合 PDF，保留 `extract_text()` 兼容接口 |
+| P1 | 强制超时 | 生产 RapidOCR 改为独立 Python 子进程，stdin/stdout 传输版本化协议；父进程按 `terminate → kill → wait` 强制回收 |
+| P1 | 持久化与迁移 | `contracts` 增加来源、置信度、复核标记和原因；第二个 Alembic revision 支持旧数据增量升级及完整回滚 |
+| P1 | 审查质量门 | 低置信度和短文本合同进入 `review_required`；幂等生成红色系统风险；批次机器终态仍为 `done` |
+| P1 | API 与前端 | 合同、解析、审查和批次响应暴露质量字段；单合同显示复核告警和置信度，批次行显示“需人工复核” |
+
+### 新鲜验证证据
+
+- 后端全量：`91 passed, 6 warnings in 10.95s`。警告为 SWIG 弃用提示和 jieba 对 `pkg_resources` 的既有弃用提示，零失败。
+- 迁移聚焦：`pytest tests/test_hard_indicator_smoke.py -q` 为 `8 passed`，覆盖空库 metadata parity、`20260726_01 → head` 旧合同增量升级和 `head → base` 完整回滚。
+- OCR/质量聚焦：解析器 `10 passed`；进程超时、解析器和真实 RapidOCR 联合 `13 passed`；审查质量、证据链和批次联合 `21 passed`；质量 API 与批次回归 `24 passed`。
+- 前端全量：`8 passed, 2 skipped`；两个 E2E 仅在未设置 `E2E_BASE_URL` 时按设计跳过。显式启动 Vite 后，低置信度 OCR 渲染 E2E `1 passed`。
+- `npm.cmd run type-check`、`npm.cmd run build`、`git diff --check` 均退出 0；生产构建成功转换 2348 个模块。
+- Browser 实测：`/audit` 上传→解析→审查后唯一显示“扫描件需人工复核”、`42.3%`、“待人工复核”和系统风险；390×844 下侧栏完全隐藏、无横向溢出，控制台 0 warn/error。
+- Compose YAML 服务集合保持为 `backend,frontend,postgres,redis,scheduler,worker`，未新增服务或依赖。
+
+### 外部验收边界
+
+- 冻结扫描件字符准确率仍为“待实测”，真实引擎冒烟和质量闭环不能替代准确率结论。
+- 50 有效 + 2 异常批次吞吐仍需冻结文件和 Compose 验收环境，API 上限 200 不等于吞吐达标。
+- 当前机器无 Docker，未声称容器启动或 Linux terminate/kill 路径已实机通过。
+
+---
+
 ## 2026-07-26 · 赛题硬指标企业交付化方案 A（🚧 实现完成，外部实测待补）
 
 ### 已完成
@@ -23,8 +53,8 @@
 
 ### 验证结论与边界
 
-- 后端全量：`81 passed`；包含真实 RapidOCR/ONNX Runtime 集成、行锁租约、周期补投、维度约束和生产配置 fail-fast，迁移烟雾覆盖空库升级、完整回滚、生产禁用 `create_all` 和禁种演示账号。
-- 前端常规测试：`6 passed, 1 E2E skipped`；E2E 在显式启动前后端后单独执行 `1 passed`。
+- 后端全量：`91 passed, 6 warnings`；包含真实 RapidOCR/ONNX Runtime 集成、强制进程超时、OCR 质量闭环、行锁租约、周期补投、维度约束和生产配置 fail-fast，迁移烟雾覆盖空库升级、旧数据增量升级、完整回滚、生产禁用 `create_all` 和禁种演示账号。
+- 前端常规测试：`8 passed, 2 E2E skipped`；低置信度 OCR E2E 在显式启动前端后单独执行 `1 passed`。
 - `vue-tsc --noEmit` 与生产构建退出码均为 0；浏览器验证覆盖桌面正常页、审查空状态、运行时接口错误回退和 390px 移动导航，正常路径 0 console error。
 - Compose YAML 结构与服务依赖已解析通过；Git whitespace 检查退出码 0。
 - 本机无 Docker CLI，Compose 尚未容器实测。
