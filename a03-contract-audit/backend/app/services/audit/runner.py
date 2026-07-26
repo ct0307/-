@@ -10,9 +10,20 @@ from sqlalchemy.orm import Session
 from app.core.logging import get_logger
 from app.models.models import Contract, Risk
 from app.services.audit.auditor import audit_contract
-from app.services.parser.extractor import extract_elements, extract_text
+from app.services.parser.extractor import (
+    DocumentParseResult,
+    extract_document,
+    extract_elements,
+)
 
 log = get_logger("audit_runner")
+
+
+def apply_parse_quality(contract: Contract, parsed: DocumentParseResult) -> None:
+    contract.parse_source = parsed.source
+    contract.ocr_confidence = parsed.ocr_confidence
+    contract.requires_review = parsed.requires_review
+    contract.review_reason = parsed.review_reason
 
 
 def run_audit(db: Session, contract: Contract, dimensions: list[str] | None = None) -> dict:
@@ -20,14 +31,25 @@ def run_audit(db: Session, contract: Contract, dimensions: list[str] | None = No
     contract.status = "auditing"
     db.commit()
 
-    text = extract_text(contract.storage_path)
+    parsed = extract_document(contract.storage_path)
+    apply_parse_quality(contract, parsed)
+    text = parsed.text
+    cross_checks: list[dict] = []
+    risk_count = 0
+
+    if len(text) < 200:
+        contract.requires_review = True
+        if not contract.review_reason:
+            contract.review_reason = "合同文本长度不足 200 字"
+
+    # 幂等：无论走短文本还是正常审查，重跑都先清理旧风险。
+    db.query(Risk).filter(Risk.contract_id == contract.id).delete()
+
     # 前置校验：文本过短说明解析失败或扫描件，审查结论不可信，及早拦截。
     # 门槛设 200 字：正常合同最短也有甲乙方+标的+签名，200 字以下必然残缺。
     if len(text) < 200:
         log.warning("audit_runner.text_too_short", contract_id=contract.id,
                     text_length=len(text), hint="文本提取失败或文件可能为扫描件")
-        contract.status = "done"
-        db.commit()
         placeholder = {
             "agent": "system",
             "level": "high",
@@ -46,47 +68,72 @@ def run_audit(db: Session, contract: Contract, dimensions: list[str] | None = No
             confidence=0, tier="red", review_status="pending",
             rag_sources="[]",
         ))
-        db.commit()
-        log.info("audit_runner.done", contract_id=contract.id, risk_count=1, conflicts=0)
-        return {"risk_count": 1, "cross_checks": []}
+        risk_count = 1
+    else:
+        # 避免审查时重复调 LLM，同时保留 has_*/text_length 等正则信号。
+        elements = extract_elements(text)  # 先跑正则（信号字段）
+        try:
+            saved = json.loads(contract.elements_json or "{}")
+            if any(saved.get(k) for k in ("party_a", "subject", "payment_terms")):
+                elements.update({k: v for k, v in saved.items() if v and isinstance(v, str)})
+        except (ValueError, AttributeError):
+            pass  # elements_json 损坏时静默降级
+        result = audit_contract(
+            elements, text,
+            db=db, contract_id=contract.id,
+            dimensions=dimensions or [],
+            contract_type=contract.contract_type or "",
+        )
+        risks = result["risks"]
+        cross_checks = result["cross_checks"]
 
-    # 避免审查时重复调 LLM，同时保留 has_*/text_length 等正则信号。
-    elements = extract_elements(text)  # 先跑正则（信号字段）
-    try:
-        saved = json.loads(contract.elements_json or "{}")
-        if any(saved.get(k) for k in ("party_a", "subject", "payment_terms")):
-            elements.update({k: v for k, v in saved.items() if v and isinstance(v, str)})
-    except (ValueError, AttributeError):
-        pass  # elements_json 损坏时静默降级
-    result = audit_contract(
-        elements, text,
-        db=db, contract_id=contract.id,
-        dimensions=dimensions or [],
-        contract_type=contract.contract_type or "",
-    )
-    risks = result["risks"]
-    cross_checks = result["cross_checks"]
+        for risk in risks:
+            db.add(Risk(
+                contract_id=contract.id,
+                agent=risk.get("agent", "legal"),
+                level=risk["level"],
+                category=risk["category"],
+                original_text=risk["original_text"],
+                basis=risk["basis"],
+                suggestion=risk["suggestion"],
+                confidence=risk["confidence"],
+                tier=risk.get("tier", "yellow"),
+                review_status="pending",
+                rag_sources=json.dumps(risk.get("rag_sources", []), ensure_ascii=False),
+            ))
+        risk_count = len(risks)
 
-    # 幂等：重跑先清旧风险
-    db.query(Risk).filter(Risk.contract_id == contract.id).delete()
-    for r in risks:
+    if parsed.requires_review and parsed.source in {"ocr", "mixed"}:
         db.add(Risk(
             contract_id=contract.id,
-            agent=r.get("agent", "legal"),
-            level=r["level"],
-            category=r["category"],
-            original_text=r["original_text"],
-            basis=r["basis"],
-            suggestion=r["suggestion"],
-            confidence=r["confidence"],
-            tier=r.get("tier", "yellow"),
+            agent="system",
+            level="high",
+            category="扫描件识别质量不足",
+            original_text=f"OCR 平均置信度：{(parsed.ocr_confidence or 0) * 100:.1f}%",
+            basis=parsed.review_reason or "OCR 结果未达到自动采信门槛。",
+            suggestion="请对照合同原件完成人工复核后再采信自动审查结论。",
+            confidence=int(round((parsed.ocr_confidence or 0) * 100)),
+            tier="red",
             review_status="pending",
-            rag_sources=json.dumps(r.get("rag_sources", []), ensure_ascii=False),
+            rag_sources="[]",
         ))
-    contract.status = "done"
+        risk_count += 1
+
+    contract.status = "review_required" if contract.requires_review else "done"
     db.commit()
-    log.info("audit_runner.done", contract_id=contract.id, risk_count=len(risks), conflicts=len(cross_checks))
-    return {"risk_count": len(risks), "cross_checks": cross_checks}
+    log.info(
+        "audit_runner.done",
+        contract_id=contract.id,
+        risk_count=risk_count,
+        conflicts=len(cross_checks),
+    )
+    return {
+        "risk_count": risk_count,
+        "cross_checks": cross_checks,
+        "requires_review": contract.requires_review,
+        "ocr_confidence": contract.ocr_confidence,
+        "review_reason": contract.review_reason,
+    }
 
 
 def cross_checks_json(cross_checks: list[dict]) -> str:
