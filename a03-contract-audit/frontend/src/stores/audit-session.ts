@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { CrossCheckOut, RiskOut } from '@/api/types'
+import type { AuditResult, CrossCheckOut, ParseResult, RiskOut } from '@/api/types'
 import {
   auditContract,
   getRisks,
@@ -16,6 +16,9 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   const elements = ref<Record<string, unknown> | null>(null)
   const risks = ref<RiskOut[]>([])
   const crossChecks = ref<CrossCheckOut[]>([])
+  const requiresReview = ref(false)
+  const ocrConfidence = ref<number | null>(null)
+  const reviewReason = ref('')
   const busy = ref(false)
   // 0 未上传 / 1 已解析 / 2 已审查
   const step = ref(0)
@@ -28,12 +31,21 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     low: risks.value.filter((r) => r.level === 'low').length,
   }))
 
+  function applyQuality(source: ParseResult | AuditResult) {
+    requiresReview.value = source.requires_review ?? false
+    ocrConfidence.value = source.ocr_confidence ?? null
+    reviewReason.value = source.review_reason ?? ''
+  }
+
   function reset() {
     contractId.value = null
     filename.value = ''
     elements.value = null
     risks.value = []
     crossChecks.value = []
+    requiresReview.value = false
+    ocrConfidence.value = null
+    reviewReason.value = ''
     step.value = 0
   }
 
@@ -46,6 +58,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
       filename.value = c.filename
       const parsed = await parseContract(c.id)
       elements.value = parsed.elements
+      applyQuality(parsed)
       risks.value = []
       step.value = 1
       return c
@@ -62,6 +75,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     _auditAbort = new AbortController()
     try {
       const res = await auditContract(contractId.value, dimensions, _auditAbort.signal)
+      applyQuality(res)
       crossChecks.value = res.cross_checks ?? []
       risks.value = await getRisks(contractId.value)
       step.value = 2
@@ -90,6 +104,9 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     elements,
     risks,
     crossChecks,
+    requiresReview,
+    ocrConfidence,
+    reviewReason,
     busy,
     step,
     riskCount,

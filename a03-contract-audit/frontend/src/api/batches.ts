@@ -12,6 +12,9 @@ export interface AuditBatchItem {
   attempts: number
   started_at: string | null
   finished_at: string | null
+  requires_review?: boolean
+  ocr_confidence?: number | null
+  review_reason?: string | null
 }
 
 export interface AuditBatch {

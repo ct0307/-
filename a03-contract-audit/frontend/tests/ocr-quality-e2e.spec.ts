@@ -1,0 +1,125 @@
+import { expect, test } from '@playwright/test'
+
+const baseUrl = process.env.E2E_BASE_URL
+test.skip(!baseUrl, '需要显式启动 frontend 后设置 E2E_BASE_URL')
+
+const parseResult = {
+  contract_id: 1,
+  elements: {},
+  text_length: 480,
+  requires_review: true,
+  ocr_confidence: 0.423,
+  review_reason: 'OCR 平均置信度低于 75%',
+}
+
+const auditResult = {
+  contract_id: 1,
+  status: 'review_required',
+  risk_count: 1,
+  cross_checks: [],
+  ...parseResult,
+}
+
+const risks = [{
+  id: 1,
+  agent: 'system',
+  level: 'high',
+  category: '扫描件识别质量不足',
+  original_text: 'OCR 平均置信度：42.3%',
+  basis: parseResult.review_reason,
+  suggestion: '请人工复核',
+  confidence: 42,
+  tier: 'red',
+  review_status: 'pending',
+  rag_sources: [],
+}]
+
+test('renders low-confidence OCR review state without mobile overflow', async ({ page }) => {
+  await page.route('**/api/v1/**', async (route) => {
+    const url = new URL(route.request().url())
+    const path = url.pathname
+    let body: unknown
+
+    if (path.endsWith('/auth/login')) {
+      body = {
+        access_token: 'test-token',
+        token_type: 'bearer',
+        role: 'legal',
+        username: 'legal',
+        department: '法务部',
+      }
+    } else if (path.endsWith('/runtime/status')) {
+      body = {
+        status: 'online',
+        checked_at: '2026-07-26T10:00:00Z',
+        provider: 'qwen',
+        model: 'qwen2.5:14b',
+        endpoint: null,
+        detail: null,
+      }
+    } else if (path.includes('/admin/lookups/')) {
+      body = []
+    } else if (path.endsWith('/contracts/upload')) {
+      body = {
+        id: 1,
+        filename: 'scan.pdf',
+        contract_type: '软件开发外包合同',
+        status: 'uploaded',
+        created_at: '2026-07-26T10:00:00Z',
+        requires_review: false,
+        ocr_confidence: null,
+        review_reason: null,
+      }
+    } else if (path.endsWith('/contracts/1/parse')) {
+      body = parseResult
+    } else if (path.endsWith('/contracts/1/audit')) {
+      body = auditResult
+    } else if (path.endsWith('/contracts/1/risks')) {
+      body = risks
+    } else {
+      body = []
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(body),
+    })
+  })
+
+  await page.goto(`${baseUrl}/login`)
+  await page.locator('input[name="username"]').fill('legal')
+  await page.locator('input[name="password"]').fill('legal123')
+  await page.getByRole('button', { name: '登 录' }).click()
+  await expect(page).toHaveURL(/\/dashboard$/)
+  await page.goto(`${baseUrl}/audit`)
+  await page.waitForLoadState('networkidle')
+
+  await page.locator('input[type="file"]').first().setInputFiles({
+    name: 'scan.pdf',
+    mimeType: 'application/pdf',
+    buffer: Buffer.from('%PDF-1.4 mocked scan'),
+  })
+  await page.getByRole('button', { name: '启动合规审查' }).click()
+
+  const reviewAlert = page.getByRole('alert').filter({ hasText: '扫描件需人工复核' })
+  await expect(reviewAlert).toContainText('扫描件需人工复核')
+  await expect(reviewAlert).toContainText('42.3%')
+  await expect(page.getByText('待人工复核', { exact: true })).toBeVisible()
+  await expect(page.getByText('扫描件识别质量不足')).toBeVisible()
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.waitForTimeout(350)
+  const closedSidebarRight = await page.locator('#app-sidebar').evaluate(
+    (element) => element.getBoundingClientRect().right,
+  )
+  expect(closedSidebarRight).toBeLessThanOrEqual(0)
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth,
+  )
+  expect(overflow).toBeLessThanOrEqual(0)
+  await page.screenshot({
+    path: test.info().outputPath('ocr-review-mobile.png'),
+    fullPage: true,
+  })
+})

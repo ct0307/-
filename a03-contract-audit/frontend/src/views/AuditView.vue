@@ -2,6 +2,7 @@
 // 合同合规审查（真实接口核心闭环）：上传→解析→审查→复核→生成整改。
 // 闭环逻辑迁移自 WorkbenchView，数据落 audit-session store。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { WarningFilled } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type UploadRawFile } from 'element-plus'
 import { getLookups } from '@/api/admin'
@@ -17,6 +18,7 @@ import { useBatchStore } from '@/stores/batch'
 import RiskReviewDrawer from '@/components/audit/RiskReviewDrawer.vue'
 import AnnotationModal from '@/components/audit/AnnotationModal.vue'
 import { auditProgressDisplay, type AuditUiState } from '@/utils/audit-progress'
+import { formatOcrConfidence, reviewStatusLabel } from '@/utils/ocr-quality'
 
 const session = useAuditSessionStore()
 const rectify = useRectifyStore()
@@ -259,6 +261,9 @@ const batchRows = computed(() => {
     attempts: 0,
     started_at: null,
     finished_at: null,
+    requires_review: false,
+    ocr_confidence: null,
+    review_reason: null,
   }))
 })
 
@@ -466,9 +471,21 @@ function closeBatch() {
             <el-button :icon="'Document'" @click="annotationOpen = true">查看合同全文批注</el-button>
           </div>
 
+          <div v-if="session.requiresReview" class="ocr-review-alert" role="alert">
+            <el-icon><WarningFilled /></el-icon>
+            <div>
+              <strong>扫描件需人工复核</strong>
+              <p>
+                {{ session.reviewReason || 'OCR 结果未达到自动采信门槛' }}
+                · OCR 置信度 {{ formatOcrConfidence(session.ocrConfidence) }}
+              </p>
+            </div>
+          </div>
+
           <div class="result-kpis">
             <div class="kpi-mini">
-              <span>审查状态</span><strong class="mono">已完成</strong>
+              <span>审查状态</span>
+              <strong class="mono">{{ session.requiresReview ? '待人工复核' : '已完成' }}</strong>
             </div>
             <div class="kpi-mini">
               <span>风险数量</span><strong class="mono">{{ session.riskCount }}</strong>
@@ -549,7 +566,14 @@ function closeBatch() {
         <div v-for="(item, i) in batchRows" :key="item.id" class="batch-item" :class="{ 'failed-item': item.status === 'failed' }">
           <span class="batch-name mono" :title="item.error || item.filename">{{ item.filename }}</span>
           <el-tag
-            v-if="item.status === 'done'"
+            v-if="item.requires_review"
+            type="warning"
+            size="small"
+            effect="dark"
+            class="batch-tag"
+          >{{ reviewStatusLabel(item) }}</el-tag>
+          <el-tag
+            v-else-if="item.status === 'done'"
             type="success"
             size="small"
             effect="light"
@@ -1009,6 +1033,37 @@ function closeBatch() {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ocr-review-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 16px 0 0;
+  padding: 12px 14px;
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-top: 1px solid var(--amber);
+  border-bottom: 1px solid var(--amber);
+}
+.ocr-review-alert > .el-icon {
+  flex: none;
+  margin-top: 2px;
+  font-size: 18px;
+}
+.ocr-review-alert > div {
+  min-width: 0;
+}
+.ocr-review-alert strong {
+  display: block;
+  color: var(--ivory);
+  font-size: 14px;
+}
+.ocr-review-alert p {
+  margin: 3px 0 0;
+  color: var(--ivory-dim);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
 .failed-item { background: var(--seal-soft) !important; }
 .batch-progress {
   padding: 8px 2px 2px;
@@ -1018,5 +1073,14 @@ function closeBatch() {
   color: var(--muted);
   text-align: right;
   padding-top: 4px;
+}
+@media (max-width: 640px) {
+  .ocr-review-alert {
+    align-items: flex-start;
+    padding: 12px;
+  }
+  .ocr-review-alert p {
+    max-width: 100%;
+  }
 }
 </style>

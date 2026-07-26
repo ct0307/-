@@ -14,12 +14,18 @@ export interface ContractOut {
   contract_type: string
   status: string
   created_at: string
+  requires_review?: boolean
+  ocr_confidence?: number | null
+  review_reason?: string | null
 }
 
 export interface ParseResult {
   contract_id: number
   elements: Record<string, unknown>
   text_length: number
+  requires_review?: boolean
+  ocr_confidence?: number | null
+  review_reason?: string | null
 }
 
 // 交叉验证 / 冲突消解项（后端审查态动态结果，不落库，随 audit 响应返回）
@@ -40,11 +46,14 @@ export interface AuditResult {
   task_id?: string
   status: string
   cross_checks?: CrossCheckOut[]
+  requires_review?: boolean
+  ocr_confidence?: number | null
+  review_reason?: string | null
 }
 
 export interface RiskOut {
   id: number
-  agent: 'legal' | 'finance'
+  agent: 'legal' | 'finance' | 'system'
   level: 'high' | 'medium' | 'low'
   category: string
   original_text: string
