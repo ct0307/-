@@ -1,10 +1,12 @@
 import pytest
+from types import SimpleNamespace
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Query, Session
 
 from app.db.session import Base
 from app.models.models import Contract, Risk
 from app.services.audit import runner
+from app.services.audit.auditor import _record_llm_call
 from app.services.audit.runner import run_audit
 from app.services.parser.extractor import DocumentParseResult
 
@@ -106,3 +108,84 @@ def test_short_native_text_requires_review_without_duplicate_parse_risk(
     assert contract.status == "review_required"
     assert result["requires_review"] is True
     assert [risk.category for risk in risks].count("文本解析失败") == 1
+
+
+def test_run_audit_locks_contract_and_commits_once(monkeypatch, db: Session):
+    contract = _contract(db, "atomic.txt")
+    parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    monkeypatch.setattr(
+        runner,
+        "audit_contract",
+        lambda *_args, **_kwargs: {"risks": [], "cross_checks": []},
+    )
+
+    lock_calls = 0
+    original_with_for_update = Query.with_for_update
+
+    def track_with_for_update(query, *args, **kwargs):
+        nonlocal lock_calls
+        lock_calls += 1
+        return original_with_for_update(query, *args, **kwargs)
+
+    commits = 0
+    original_commit = db.commit
+
+    def track_commit():
+        nonlocal commits
+        commits += 1
+        return original_commit()
+
+    monkeypatch.setattr(Query, "with_for_update", track_with_for_update)
+    monkeypatch.setattr(db, "commit", track_commit)
+
+    run_audit(db, contract)
+
+    assert lock_calls == 1
+    assert commits == 1
+
+
+def test_run_audit_restores_previous_status_after_failure(monkeypatch, db: Session):
+    contract = _contract(db, "broken.pdf")
+    contract.status = "parsed"
+    db.commit()
+    monkeypatch.setattr(
+        runner,
+        "extract_document",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("parse failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="parse failed"):
+        run_audit(db, contract)
+
+    db.refresh(contract)
+    assert contract.status == "parsed"
+
+
+def test_llm_call_log_joins_caller_transaction_without_committing():
+    class FakeSession:
+        def __init__(self):
+            self.flushed = False
+            self.committed = False
+
+        def add(self, _row):
+            pass
+
+        def flush(self):
+            self.flushed = True
+
+        def commit(self):
+            self.committed = True
+
+    db = FakeSession()
+    response = SimpleNamespace(
+        model="test-model",
+        prompt_tokens=10,
+        completion_tokens=5,
+        latency_ms=20,
+    )
+
+    _record_llm_call(db, 1, "legal", response)
+
+    assert db.flushed is True
+    assert db.committed is False

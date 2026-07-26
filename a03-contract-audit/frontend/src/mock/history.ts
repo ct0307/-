@@ -7,7 +7,7 @@ export interface HistoryRow {
   time: string
   level: '高风险' | '中风险' | '低风险'
   riskCount: number
-  status: '合规' | '待整改' | '已整改'
+  status: '合规' | '待整改' | '已整改' | '待人工复核'
 }
 
 export const HISTORY_ROWS: HistoryRow[] = [

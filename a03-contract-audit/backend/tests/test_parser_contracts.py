@@ -148,6 +148,19 @@ def test_ocr_marks_low_confidence_for_manual_review():
     assert result.requires_review is True
 
 
+def test_ocr_marks_review_when_any_page_is_below_confidence_threshold():
+    confidences = iter((0.9, 0.6))
+
+    result = ocr_pdf_bytes(
+        _blank_pdf(2),
+        engine=lambda _image: ("识别文本", next(confidences)),
+        min_confidence=0.75,
+    )
+
+    assert result.mean_confidence == pytest.approx(0.75)
+    assert result.requires_review is True
+
+
 def test_ocr_only_renders_requested_pages():
     recognized: list[bytes] = []
 

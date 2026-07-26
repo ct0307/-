@@ -27,9 +27,44 @@ def apply_parse_quality(contract: Contract, parsed: DocumentParseResult) -> None
 
 
 def run_audit(db: Session, contract: Contract, dimensions: list[str] | None = None) -> dict:
-    """对单份合同执行审查并落库。dimensions 为空/None 时全量审查。"""
-    contract.status = "auditing"
-    db.commit()
+    """串行、原子地执行单份合同审查；失败时保留进入审查前的状态。"""
+    contract_id = contract.id
+    locked_contract = (
+        db.query(Contract)
+        .filter(Contract.id == contract_id)
+        .with_for_update()
+        .populate_existing()
+        .one()
+    )
+    previous_status = locked_contract.status
+    locked_contract.status = "auditing"
+    try:
+        result = _run_audit_locked(db, locked_contract, dimensions)
+        db.commit()
+        return result
+    except BaseException:
+        db.rollback()
+        try:
+            restored_contract = (
+                db.query(Contract).filter(Contract.id == contract_id).one()
+            )
+            if restored_contract.status != previous_status:
+                restored_contract.status = previous_status
+                db.commit()
+        except BaseException as restore_exc:
+            db.rollback()
+            log.error(
+                "audit_runner.status_restore_failed",
+                contract_id=contract_id,
+                error=str(restore_exc)[:240],
+            )
+        raise
+
+
+def _run_audit_locked(
+    db: Session, contract: Contract, dimensions: list[str] | None = None
+) -> dict:
+    """在调用方持有合同锁和事务时执行审查。"""
 
     parsed = extract_document(contract.storage_path)
     apply_parse_quality(contract, parsed)
@@ -120,7 +155,6 @@ def run_audit(db: Session, contract: Contract, dimensions: list[str] | None = No
         risk_count += 1
 
     contract.status = "review_required" if contract.requires_review else "done"
-    db.commit()
     log.info(
         "audit_runner.done",
         contract_id=contract.id,

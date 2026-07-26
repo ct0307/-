@@ -7,6 +7,18 @@ from app.models.models import Contract, User
 from app.services.parser.extractor import DocumentParseResult
 
 
+def test_history_status_prioritizes_manual_review():
+    contract = Contract(
+        filename="scan.pdf",
+        storage_path="/scan.pdf",
+        department="法务部",
+        uploaded_by=1,
+        status="review_required",
+    )
+
+    assert contracts._derive_status(contract, []) == "待人工复核"
+
+
 def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

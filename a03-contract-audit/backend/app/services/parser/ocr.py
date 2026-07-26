@@ -103,13 +103,32 @@ def _communicate_with_timeout(
     try:
         return process.communicate(input=data, timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
+        _terminate_and_reap(process)
+        raise OCRTimeout(f"OCR 处理超过 {timeout_seconds:g} 秒") from exc
+    except BaseException:
+        _terminate_and_reap(process)
+        raise
+
+
+def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
+    """尽力终止并回收子进程，且不覆盖调用方正在处理的原始异常。"""
+    if process.poll() is not None:
+        return
+    try:
         process.terminate()
         try:
             process.communicate(timeout=2)
+            return
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()
-        raise OCRTimeout(f"OCR 处理超过 {timeout_seconds:g} 秒") from exc
+            pass
+        except BaseException:
+            if process.poll() is not None:
+                return
+        process.kill()
+        process.communicate()
+    except BaseException:
+        # 回收是异常清理路径，不能用清理失败覆盖原始 OCR/管道异常。
+        return
 
 
 def _parse_worker_result(stdout: bytes) -> OCRResult:
@@ -203,7 +222,10 @@ def _ocr_pdf_bytes_in_process(
         page_count=len(page_texts),
         mean_confidence=mean_confidence,
         page_texts=tuple(page_texts),
-        requires_review=not combined or mean_confidence < min_confidence,
+        requires_review=(
+            not combined
+            or any(confidence < min_confidence for confidence in confidences)
+        ),
     )
 
 

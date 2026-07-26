@@ -84,7 +84,7 @@ def _record_llm_call(
             latency_ms=resp.latency_ms,
             mode=mode,
         ))
-        db.commit()
+        db.flush()
     except Exception as exc:  # 不让日志写入失败影响审查主链路
         log.warning("audit.llm_log_failed", error=str(exc)[:120])
 

@@ -123,3 +123,74 @@ test('renders low-confidence OCR review state without mobile overflow', async ({
     fullPage: true,
   })
 })
+
+test('filters review-required contracts in history without mobile overflow', async ({ page }) => {
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    let body: unknown = []
+
+    if (path.endsWith('/auth/login')) {
+      body = {
+        access_token: 'test-token',
+        token_type: 'bearer',
+        role: 'legal',
+        username: 'legal',
+        department: '法务部',
+      }
+    } else if (path.endsWith('/runtime/status')) {
+      body = {
+        status: 'online',
+        checked_at: '2026-07-26T10:00:00Z',
+        provider: 'qwen',
+        model: 'qwen2.5:14b',
+        endpoint: null,
+        detail: null,
+      }
+    } else if (path.endsWith('/contracts')) {
+      body = [
+        {
+          id: 'C0001', name: '低置信度扫描合同', type: '采购合同',
+          submitter: '测试用户', time: '2026-07-26 10:00', level: '高风险',
+          riskCount: 1, status: '待人工复核',
+        },
+        {
+          id: 'C0002', name: '正常文本合同', type: '采购合同',
+          submitter: '测试用户', time: '2026-07-26 09:00', level: '低风险',
+          riskCount: 0, status: '合规',
+        },
+      ]
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(body),
+    })
+  })
+
+  await page.goto(`${baseUrl}/login`)
+  await page.locator('input[name="username"]').fill('legal')
+  await page.locator('input[name="password"]').fill('legal123')
+  await page.getByRole('button', { name: '登 录' }).click()
+  await expect(page).toHaveURL(/\/dashboard$/)
+  await page.goto(`${baseUrl}/history`)
+  await expect(page.getByText('低置信度扫描合同')).toBeVisible()
+  await expect(page.getByText('正常文本合同')).toBeVisible()
+
+  await page.locator('.filters .el-select').nth(1).click()
+  await page.getByRole('option', { name: '待人工复核' }).click()
+
+  await expect(page.getByText('低置信度扫描合同')).toBeVisible()
+  await expect(page.getByText('正常文本合同')).toBeHidden()
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.waitForTimeout(350)
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth,
+  )
+  expect(overflow).toBeLessThanOrEqual(0)
+  await page.screenshot({
+    path: test.info().outputPath('history-review-mobile.png'),
+    fullPage: true,
+  })
+})

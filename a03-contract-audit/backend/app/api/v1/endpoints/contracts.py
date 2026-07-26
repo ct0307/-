@@ -45,8 +45,10 @@ def _dept_accessible(contract, user) -> bool:
     return True
 
 
-# 审查状态推导：pending/to_modify → 待整改；done + 全处理 → 已整改；其余 → 合规
+# 审查状态推导：人工复核优先；其次是整改状态；其余为合规。
 def _derive_status(contract: Contract, risks: list) -> str:
+    if contract.status == "review_required" or contract.requires_review:
+        return "待人工复核"
     if not risks:
         return "合规"
     if any(r.review_status in ("pending", "to_modify") for r in risks):

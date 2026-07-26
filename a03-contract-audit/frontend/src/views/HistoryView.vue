@@ -15,6 +15,7 @@ const rows = ref<HistoryRow[]>([])
 const loading = ref(false)
 const keyword = ref('')
 const levelFilter = ref('全部')
+const statusFilter = ref('全部')
 const page = ref(1)
 const pageSize = 8
 
@@ -35,7 +36,8 @@ const filtered = computed(() => {
   return rows.value.filter((r) => {
     const kwOk = !kw || r.name.includes(kw) || r.id.includes(kw)
     const lvOk = levelFilter.value === '全部' || r.level === levelFilter.value
-    return kwOk && lvOk
+    const statusOk = statusFilter.value === '全部' || r.status === statusFilter.value
+    return kwOk && lvOk && statusOk
   })
 })
 const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize))
@@ -45,10 +47,11 @@ const levelType: Record<string, 'danger' | 'warning' | 'info'> = {
   中风险: 'warning',
   低风险: 'info',
 }
-const statusType: Record<string, 'success' | 'warning' | 'info'> = {
+const statusType: Record<string, 'success' | 'warning' | 'info' | 'danger'> = {
   合规: 'success',
   待整改: 'warning',
   已整改: 'info',
+  待人工复核: 'danger',
 }
 
 // ── 点击行查看风险详情 ──
@@ -89,7 +92,7 @@ function goAudit() { router.push('/audit') }
 </script>
 
 <template>
-  <div v-loading="loading">
+  <div v-loading="loading" class="history-page">
     <div class="toolbar">
       <div class="filters">
         <el-input v-model="keyword" placeholder="搜索合同名称 / 编号" :prefix-icon="'Search'" style="width: 240px" clearable @input="page = 1" />
@@ -99,41 +102,50 @@ function goAudit() { router.push('/audit') }
           <el-option label="中风险" value="中风险" />
           <el-option label="低风险" value="低风险" />
         </el-select>
+        <el-select v-model="statusFilter" style="width: 140px" @change="page = 1">
+          <el-option label="全部合规状态" value="全部" />
+          <el-option label="待人工复核" value="待人工复核" />
+          <el-option label="待整改" value="待整改" />
+          <el-option label="已整改" value="已整改" />
+          <el-option label="合规" value="合规" />
+        </el-select>
       </div>
       <DemoBadge module="history" />
     </div>
 
-    <el-card shadow="never">
-      <el-table
-        :data="paged"
-        style="width: 100%; cursor: pointer"
-        empty-text="无匹配记录"
-        @row-click="onRowClick"
-      >
-        <el-table-column prop="id" label="编号" width="120">
-          <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
-        </el-table-column>
-        <el-table-column prop="name" label="合同名称" min-width="200" />
-        <el-table-column prop="type" label="类型" width="150" />
-        <el-table-column prop="submitter" label="提交人" width="90" />
-        <el-table-column prop="time" label="审查时间" width="150">
-          <template #default="{ row }"><span class="mono">{{ row.time }}</span></template>
-        </el-table-column>
-        <el-table-column label="风险等级" width="100">
-          <template #default="{ row }"><el-tag :type="levelType[row.level]" size="small">{{ row.level }}</el-tag></template>
-        </el-table-column>
-        <el-table-column prop="riskCount" label="风险条款" width="90" align="center">
-          <template #default="{ row }"><span class="mono">{{ row.riskCount }}</span></template>
-        </el-table-column>
-        <el-table-column label="合规状态" width="100">
-          <template #default="{ row }"><el-tag :type="statusType[row.status]" size="small" effect="plain">{{ row.status }}</el-tag></template>
-        </el-table-column>
-        <el-table-column width="44" align="center">
-          <template #default>
-            <el-icon class="row-arrow"><ArrowRight /></el-icon>
-          </template>
-        </el-table-column>
-      </el-table>
+    <el-card shadow="never" class="history-card">
+      <div class="history-table-scroll">
+        <el-table
+          :data="paged"
+          style="width: 100%; cursor: pointer"
+          empty-text="无匹配记录"
+          @row-click="onRowClick"
+        >
+          <el-table-column prop="id" label="编号" width="120">
+            <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
+          </el-table-column>
+          <el-table-column prop="name" label="合同名称" min-width="200" />
+          <el-table-column prop="type" label="类型" width="150" />
+          <el-table-column prop="submitter" label="提交人" width="90" />
+          <el-table-column prop="time" label="审查时间" width="150">
+            <template #default="{ row }"><span class="mono">{{ row.time }}</span></template>
+          </el-table-column>
+          <el-table-column label="风险等级" width="100">
+            <template #default="{ row }"><el-tag :type="levelType[row.level]" size="small">{{ row.level }}</el-tag></template>
+          </el-table-column>
+          <el-table-column prop="riskCount" label="风险条款" width="90" align="center">
+            <template #default="{ row }"><span class="mono">{{ row.riskCount }}</span></template>
+          </el-table-column>
+          <el-table-column label="合规状态" width="100">
+            <template #default="{ row }"><el-tag :type="statusType[row.status]" size="small" effect="plain">{{ row.status }}</el-tag></template>
+          </el-table-column>
+          <el-table-column width="44" align="center">
+            <template #default>
+              <el-icon class="row-arrow"><ArrowRight /></el-icon>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
 
       <div class="table-footer">
         <span class="count mono">共 {{ filtered.length }} 条记录</span>
@@ -186,15 +198,37 @@ function goAudit() { router.push('/audit') }
 </template>
 
 <style scoped>
+.history-page,
+.history-card {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+.history-page {
+  overflow-x: hidden;
+}
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 16px;
 }
 .filters {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
+}
+.history-table-scroll {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+:deep(.history-card .el-card__body) {
+  min-width: 0;
+  overflow: hidden;
 }
 .table-footer {
   display: flex;
