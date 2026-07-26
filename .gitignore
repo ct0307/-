@@ -40,3 +40,4 @@ pnpm-debug.log*
 **/_*.py
 **/_*.txt
 .playwright-mcp/
+.worktrees/
