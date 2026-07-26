@@ -10,12 +10,23 @@
 """
 import io
 import re
+from dataclasses import dataclass
+from typing import Literal
 
 from app.core.logging import get_logger
 from app.core.config import settings
 from app.services.parser.ocr import OCRResult, ocr_pdf_bytes
 
 log = get_logger("parser")
+
+
+@dataclass(frozen=True)
+class DocumentParseResult:
+    text: str
+    source: Literal["native", "ocr", "mixed"]
+    ocr_confidence: float | None = None
+    requires_review: bool = False
+    review_reason: str | None = None
 
 
 def _read_decrypted(file_path: str) -> bytes:
@@ -26,17 +37,22 @@ def _read_decrypted(file_path: str) -> bytes:
     return decrypt_bytes(raw)
 
 
-def extract_text(file_path: str) -> str:
-    """按扩展名抽取合同纯文本。自动处理加密/明文两种存储模式。"""
+def extract_document(file_path: str) -> DocumentParseResult:
+    """按扩展名抽取合同文本及解析质量。"""
     data = _read_decrypted(file_path)
     lower = file_path.lower()
     if lower.endswith(".pdf"):
-        return _extract_pdf_bytes(data)
+        return _extract_pdf_result(data)
     if lower.endswith(".docx"):
-        return _extract_docx_bytes(data)
+        return DocumentParseResult(_extract_docx_bytes(data), "native")
     if lower.endswith(".txt"):
-        return data.decode("utf-8", errors="ignore")
+        return DocumentParseResult(data.decode("utf-8", errors="ignore"), "native")
     raise ValueError(f"不支持的文件类型: {file_path}")
+
+
+def extract_text(file_path: str) -> str:
+    """按扩展名抽取合同纯文本。自动处理加密/明文两种存储模式。"""
+    return extract_document(file_path).text
 
 
 def _is_garbled(text: str) -> bool:
@@ -47,7 +63,7 @@ def _is_garbled(text: str) -> bool:
     return cjk / len(text) < 0.10
 
 
-def _extract_pdf_bytes(data: bytes) -> str:
+def _extract_pdf_result(data: bytes) -> DocumentParseResult:
     """PDF 文本提取：pdfplumber 优先，乱码时降级到 PyMuPDF。"""
     import pdfplumber
 
@@ -66,17 +82,17 @@ def _extract_pdf_bytes(data: bytes) -> str:
         log.info("parser.pdf_garbled", hint="检测到字体编码异常，切换 PyMuPDF 重新提取")
         text = _extract_pdf_pymupdf(data)
         if text and not _is_garbled(text):
-            return text
+            return DocumentParseResult(text, "native")
         parts = []
 
     empty_pages = tuple(index for index, part in enumerate(parts) if not part.strip())
     if text and not empty_pages:
-        return text
+        return DocumentParseResult(text, "native")
 
     if not text:
         pymupdf_text = _extract_pdf_pymupdf(data)
         if pymupdf_text and not _is_garbled(pymupdf_text):
-            return pymupdf_text
+            return DocumentParseResult(pymupdf_text, "native")
         log.warning("parser.pdf_empty", hint="文本层为空，进入离线 OCR")
 
     page_indices = empty_pages or None
@@ -90,7 +106,9 @@ def _extract_pdf_bytes(data: bytes) -> str:
         min_confidence=settings.OCR_MIN_CONFIDENCE,
     )
     if isinstance(result, str):
-        return "\n".join(part for part in (text, result.strip()) if part).strip()
+        merged_text = "\n".join(part for part in (text, result.strip()) if part).strip()
+        source = "mixed" if text or any(part.strip() for part in parts) else "ocr"
+        return DocumentParseResult(merged_text, source)
 
     if result.requires_review:
         log.warning(
@@ -102,8 +120,31 @@ def _extract_pdf_bytes(data: bytes) -> str:
         merged = list(parts)
         for index, page_text in zip(empty_pages, result.page_texts):
             merged[index] = page_text
-        return "\n".join(part for part in merged if part).strip()
-    return "\n".join(part for part in (text, result.text) if part).strip()
+        merged_text = "\n".join(part for part in merged if part).strip()
+    else:
+        merged_text = "\n".join(part for part in (text, result.text) if part).strip()
+
+    source = "mixed" if text or any(part.strip() for part in parts) else "ocr"
+    review_reason = None
+    if result.requires_review:
+        threshold = int(settings.OCR_MIN_CONFIDENCE * 100)
+        review_reason = (
+            f"OCR 平均置信度低于 {threshold}%"
+            if result.text
+            else "OCR 未识别出有效文本"
+        )
+    return DocumentParseResult(
+        text=merged_text,
+        source=source,
+        ocr_confidence=result.mean_confidence,
+        requires_review=result.requires_review,
+        review_reason=review_reason,
+    )
+
+
+def _extract_pdf_bytes(data: bytes) -> str:
+    """兼容旧调用方，仅返回 PDF 文本。"""
+    return _extract_pdf_result(data).text
 
 
 def _extract_pdf_pymupdf(data: bytes) -> str:

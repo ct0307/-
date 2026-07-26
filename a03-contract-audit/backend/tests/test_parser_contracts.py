@@ -6,6 +6,7 @@ import pdfplumber
 import pytest
 
 from app.services.parser import extractor
+from app.services.parser.extractor import DocumentParseResult
 from app.services.parser.ocr import OCRLimitExceeded, OCRResult, OCRTimeout, ocr_pdf_bytes
 
 
@@ -16,6 +17,55 @@ class _EmptyPage:
 
 class _EmptyPdf:
     pages = [_EmptyPage()]
+
+
+def test_text_pdf_returns_native_parse_result(monkeypatch):
+    class TextPage:
+        def extract_text(self) -> str:
+            return "甲方：测试公司\n乙方：交付公司\n" + "合同正文" * 60
+
+    monkeypatch.setattr(
+        pdfplumber,
+        "open",
+        lambda _: nullcontext(type("Pdf", (), {"pages": [TextPage()]})()),
+    )
+
+    result = extractor._extract_pdf_result(b"text-pdf")
+
+    assert isinstance(result, DocumentParseResult)
+    assert result.source == "native"
+    assert result.ocr_confidence is None
+    assert result.requires_review is False
+
+
+def test_mixed_pdf_preserves_low_ocr_confidence(monkeypatch):
+    class TextPage:
+        def extract_text(self) -> str:
+            return "正常文字页" * 60
+
+    monkeypatch.setattr(
+        pdfplumber,
+        "open",
+        lambda _: nullcontext(type("Pdf", (), {"pages": [TextPage(), _EmptyPage()]})()),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "ocr_pdf_bytes",
+        lambda *_args, **_kwargs: OCRResult(
+            text="低置信度扫描页",
+            page_count=1,
+            mean_confidence=0.41,
+            page_texts=("低置信度扫描页",),
+            requires_review=True,
+        ),
+    )
+
+    result = extractor._extract_pdf_result(b"mixed-pdf")
+
+    assert result.source == "mixed"
+    assert result.ocr_confidence == 0.41
+    assert result.requires_review is True
+    assert result.review_reason == "OCR 平均置信度低于 75%"
 
 
 def test_scanned_pdf_uses_ocr_when_text_extractors_are_empty(monkeypatch):
