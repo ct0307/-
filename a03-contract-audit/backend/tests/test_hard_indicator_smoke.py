@@ -19,11 +19,16 @@ from app.models import models  # noqa: F401
 from app.db import init_db as init_db_module
 
 
-def _run_alembic(backend_dir: Path, database: Path, command: str) -> None:
+def _run_alembic(
+    backend_dir: Path,
+    database: Path,
+    command: str,
+    target: str,
+) -> None:
     env = os.environ.copy()
     env.update({"DB_BACKEND": "sqlite", "SQLITE_PATH": database.as_posix()})
     completed = subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini", command, "head" if command == "upgrade" else "base"],
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", command, target],
         cwd=backend_dir,
         env=env,
         capture_output=True,
@@ -37,15 +42,47 @@ def test_fresh_database_migration_matches_orm_metadata(tmp_path: Path):
     backend_dir = Path(__file__).resolve().parents[1]
     database = tmp_path / "migration-smoke.db"
 
-    _run_alembic(backend_dir, database, "upgrade")
+    _run_alembic(backend_dir, database, "upgrade", "head")
 
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     migrated_tables = set(inspect(engine).get_table_names()) - {"alembic_version"}
     assert migrated_tables == set(Base.metadata.tables)
 
-    _run_alembic(backend_dir, database, "downgrade")
+    _run_alembic(backend_dir, database, "downgrade", "base")
     remaining_tables = set(inspect(engine).get_table_names()) - {"alembic_version"}
     assert remaining_tables == set()
+    engine.dispose()
+
+
+def test_ocr_quality_migration_preserves_existing_contract(tmp_path: Path):
+    backend_dir = Path(__file__).resolve().parents[1]
+    database = tmp_path / "incremental.db"
+    _run_alembic(backend_dir, database, "upgrade", "20260726_01")
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (id, username, password_hash, role, department) "
+            "VALUES (1, 'legacy', 'hash', 'legal', '法务部')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO contracts "
+            "(id, filename, storage_path, contract_type, department, status, uploaded_by, elements_json) "
+            "VALUES (1, 'legacy.pdf', '/legacy.pdf', '', '法务部', 'done', 1, '{}')"
+        )
+
+    _run_alembic(backend_dir, database, "upgrade", "head")
+
+    with engine.connect() as connection:
+        row = connection.exec_driver_sql(
+            "SELECT parse_source, ocr_confidence, requires_review, review_reason "
+            "FROM contracts WHERE id=1"
+        ).mappings().one()
+    assert row == {
+        "parse_source": "native",
+        "ocr_confidence": None,
+        "requires_review": 0,
+        "review_reason": None,
+    }
     engine.dispose()
 
 
