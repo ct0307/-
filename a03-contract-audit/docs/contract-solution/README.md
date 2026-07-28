@@ -34,6 +34,7 @@ AI 输出定位为合同审查辅助意见，不构成自动法律裁决，也�
 ```powershell
 $env:NODE_PATH='C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules\.pnpm\sharp@0.34.5\node_modules'
 & 'C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' docs/contract-solution/scripts/generate_diagrams.js
+$env:NODE_PATH='C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
 & 'C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' docs/contract-solution/scripts/build_docx.js
 powershell -NoProfile -ExecutionPolicy Bypass -File docs/contract-solution/scripts/update_word_fields.ps1
 ```
