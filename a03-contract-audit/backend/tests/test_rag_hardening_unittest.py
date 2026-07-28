@@ -1,7 +1,9 @@
 import asyncio
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from datetime import date
@@ -9,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 from app.api.v1.endpoints import knowledge
@@ -55,7 +57,10 @@ class RagHardeningTests(unittest.TestCase):
         retriever._bm25_cache = None
 
     def test_vector_search_rejects_below_similarity_threshold(self):
-        docs = [(1, "无关内容", "来源", json.dumps([0.0, 1.0]))]
+        docs = [(
+            1, "无关内容", "来源", json.dumps([0.0, 1.0]), "law", None, None,
+            None, None, "[]", "[]", retriever.settings.LOCAL_EMBED_MODEL, 2,
+        )]
         adapter = _FakeEmbeddingAdapter([[1.0, 0.0]])
 
         with patch.object(retriever, "get_embedding_adapter", return_value=adapter):
@@ -64,11 +69,28 @@ class RagHardeningTests(unittest.TestCase):
         self.assertEqual(result, {})
 
     def test_vector_search_skips_dimension_mismatch(self):
-        docs = [(1, "旧模型向量", "来源", json.dumps([1.0, 0.0, 0.0]))]
+        docs = [(
+            1, "旧模型向量", "来源", json.dumps([1.0, 0.0, 0.0]), "law", None, None,
+            None, None, "[]", "[]", retriever.settings.LOCAL_EMBED_MODEL, 3,
+        )]
         adapter = _FakeEmbeddingAdapter([[1.0, 0.0]])
 
         with patch.object(retriever, "get_embedding_adapter", return_value=adapter):
             result = retriever._vector_search("查询", docs)
+
+        self.assertEqual(result, {})
+
+    def test_vector_search_skips_embedding_model_mismatch(self):
+        docs = [(
+            1, "旧模型向量", "来源", json.dumps([1.0, 0.0]), "law", None, None,
+            None, None, "[]", "[]", "stale-model", 2,
+        )]
+        adapter = _FakeEmbeddingAdapter([[1.0, 0.0]])
+
+        with patch.object(retriever, "get_embedding_adapter", return_value=adapter):
+            with patch.object(retriever.settings, "EMBED_BACKEND", "local"):
+                with patch.object(retriever.settings, "LOCAL_EMBED_MODEL", "current-model"):
+                    result = retriever._vector_search("查询", docs)
 
         self.assertEqual(result, {})
 
@@ -117,6 +139,43 @@ class RagHardeningTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("20260726_rag_metadata", result.stdout)
+
+    def test_alembic_upgrades_and_downgrades_fresh_database(self):
+        backend_dir = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "migration-smoke.db"
+            env = os.environ.copy()
+            env.update({"DB_BACKEND": "sqlite", "SQLITE_PATH": database.as_posix()})
+
+            upgrade = subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+                cwd=backend_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
+
+            engine = create_engine(f"sqlite:///{database.as_posix()}")
+            migrated_tables = set(inspect(engine).get_table_names()) - {"alembic_version"}
+            self.assertEqual(migrated_tables, set(KnowledgeChunk.metadata.tables))
+            engine.dispose()
+
+            downgrade = subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "downgrade", "base"],
+                cwd=backend_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(downgrade.returncode, 0, downgrade.stdout + downgrade.stderr)
+
+            engine = create_engine(f"sqlite:///{database.as_posix()}")
+            remaining_tables = set(inspect(engine).get_table_names()) - {"alembic_version"}
+            self.assertEqual(remaining_tables, set())
+            engine.dispose()
 
     def test_filter_docs_applies_contract_dimension_category_and_date(self):
         docs = [

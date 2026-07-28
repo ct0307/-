@@ -1,7 +1,7 @@
 """add RAG knowledge metadata
 
 Revision ID: 20260726_rag_metadata
-Revises:
+Revises: 20260726_00
 Create Date: 2026-07-26
 """
 from alembic import op
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 
 
 revision = "20260726_rag_metadata"
-down_revision = None
+down_revision = "20260726_00"
 branch_labels = None
 depends_on = None
 

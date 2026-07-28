@@ -221,7 +221,15 @@ def _vector_search(query: str, vec_docs: list[tuple]) -> dict[int, int]:
 
     valid_docs: list[tuple] = []
     valid_vectors: list[np.ndarray] = []
+    expected_model = _configured_embedding_model()
     for doc in vec_docs:
+        stored_model = _doc_value(doc, 11)
+        if stored_model != expected_model:
+            log.warning(
+                "rag.embedding_model_mismatch",
+                chunk_id=doc[0], stored_model=stored_model, query_model=expected_model,
+            )
+            continue
         vector = _parse_stored_vector(doc[3])
         if vector is None:
             log.warning("rag.invalid_stored_vector", chunk_id=doc[0])
@@ -278,6 +286,12 @@ def _validate_vectors(vectors: list[list[float]], expected_count: int) -> int:
     if len(dimensions) != 1:
         raise LLMError("embedding 返回向量维度不一致")
     return dimensions.pop()
+
+
+def _configured_embedding_model() -> str:
+    if settings.EMBED_BACKEND.lower() == "local":
+        return settings.LOCAL_EMBED_MODEL
+    return settings.EMBED_MODEL
 
 
 def _bm25_search(query: str, docs: list[tuple]) -> dict[int, int]:
@@ -396,11 +410,7 @@ def prepare_documents(chunks: list[dict]) -> list[KnowledgeChunk]:
     adapter = get_embedding_adapter()
     vectors = adapter.embed([chunk["content"] for chunk in chunks])
     dimension = _validate_vectors(vectors, len(chunks))
-    embedding_model = (
-        settings.LOCAL_EMBED_MODEL
-        if settings.EMBED_BACKEND.lower() == "local"
-        else settings.EMBED_MODEL
-    )
+    embedding_model = _configured_embedding_model()
     return [
         _knowledge_row(
             chunk,
