@@ -1,0 +1,15 @@
+{
+  "name": "contract-solution-document",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "generate:diagrams": "node scripts/generate_diagrams.js",
+    "build:docx": "node scripts/build_docx.js",
+    "build": "npm run generate:diagrams && npm run build:docx",
+    "validate:screenshots": "node scripts/validate_screenshots.js"
+  },
+  "dependencies": {
+    "docx": "9.6.1",
+    "sharp": "0.34.5"
+  }
+}
