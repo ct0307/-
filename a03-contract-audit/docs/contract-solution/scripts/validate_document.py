@@ -89,7 +89,7 @@ def validate_docx(path: Path) -> dict[str, int]:
         page_margin = section.find("w:pgMar", NS) if section is not None else None
         if page_size is None or page_size.get(W + "w") != "11906" or page_size.get(W + "h") != "16838":
             fail("页面尺寸不是 A4")
-        expected_margins = {"top": "1440", "bottom": "1440", "left": "1474", "right": "1474"}
+        expected_margins = {"top": "1080", "bottom": "1080", "left": "1080", "right": "1080"}
         if page_margin is None or any(page_margin.get(W + key) != value for key, value in expected_margins.items()):
             fail("页边距与设计令牌不一致")
 

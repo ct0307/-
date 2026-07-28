@@ -33,12 +33,12 @@ const OUTPUT_PATH = path.join(ROOT, "契鉴_项目详细方案.docx");
 const PAGE = {
   width: 11906,
   height: 16838,
-  marginTop: 1440,
-  marginBottom: 1440,
-  marginLeft: 1474,
-  marginRight: 1474,
-  header: 720,
-  footer: 720,
+  marginTop: 1080,
+  marginBottom: 1080,
+  marginLeft: 1080,
+  marginRight: 1080,
+  header: 560,
+  footer: 560,
 };
 
 const CONTENT_WIDTH_DXA = PAGE.width - PAGE.marginLeft - PAGE.marginRight;
@@ -58,14 +58,14 @@ const COLOR = {
 
 // narrative_proposal + A4/project-palette named overrides.
 const STYLE = {
-  bodySize: 21,
-  bodyAfter: 160,
-  bodyLine: 320,
+  bodySize: 19,
+  bodyAfter: 60,
+  bodyLine: 250,
   h1Size: 32,
   h2Size: 28,
   h3Size: 24,
   tableSize: 17,
-  captionSize: 18,
+  captionSize: 17,
 };
 
 const KEEP_AS_TABLE = new Set([
@@ -107,7 +107,7 @@ function pngDimensions(buffer) {
 }
 
 function fitImage(width, height) {
-  const maxWidth = 570;
+  const maxWidth = 540;
   const maxHeight = 610;
   const scale = Math.min(maxWidth / width, maxHeight / height, 1);
   return { width: Math.round(width * scale), height: Math.round(height * scale) };
@@ -282,7 +282,7 @@ function tableParagraph(value, bold = false) {
   return new Paragraph({
     children: inlineRuns(value, { size: STYLE.tableSize, bold }),
     alignment: AlignmentType.LEFT,
-    spacing: { before: 0, after: 0, line: 280 },
+    spacing: { before: 0, after: 0, line: 260 },
   });
 }
 
@@ -296,7 +296,7 @@ function makeTable(block) {
     children: cells.map((cell, index) => new TableCell({
       width: { size: widths[index], type: WidthType.DXA },
       verticalAlign: VerticalAlign.CENTER,
-      margins: { top: 90, bottom: 90, left: 120, right: 120 },
+      margins: { top: 70, bottom: 70, left: 100, right: 100 },
       shading: header ? { type: ShadingType.CLEAR, fill: COLOR.tableHeader } : undefined,
       children: [tableParagraph(cell, header)],
     })),
@@ -306,7 +306,7 @@ function makeTable(block) {
     width: { size: TABLE_WIDTH_DXA, type: WidthType.DXA },
     indent: { size: TABLE_INDENT_DXA, type: WidthType.DXA },
     columnWidths: widths,
-    margins: { top: 90, bottom: 90, left: 120, right: 120 },
+    margins: { top: 70, bottom: 70, left: 100, right: 100 },
     layout: TableLayoutType.FIXED,
     borders,
   });
@@ -325,7 +325,7 @@ function tableAsGroupedItems(block) {
         new TextRun({ text: label, bold: true, color: COLOR.primary, font: eastAsiaFont(), size: STYLE.bodySize }),
         new TextRun({ text: details ? `｜${details}` : "", color: COLOR.text, font: eastAsiaFont(), size: STYLE.bodySize }),
       ],
-      spacing: { before: 0, after: 100, line: 290 },
+      spacing: { before: 0, after: 40, line: 250 },
       indent: { left: 260, hanging: 0 },
       border: { left: { style: BorderStyle.SINGLE, color: COLOR.border, size: 8, space: 8 } },
     }));
@@ -347,7 +347,7 @@ function coverChildren() {
     new Paragraph({ spacing: { before: 180, after: 0 }, alignment: centered, children: [new TextRun({ text: "2026 年 7 月", color: COLOR.muted, font: eastAsiaFont(), size: 20 })] }),
     new Paragraph({ children: [new PageBreak()] }),
     new Paragraph({ alignment: centered, spacing: { before: 80, after: 260 }, children: [new TextRun({ text: "目录", bold: true, color: COLOR.primary, font: headingFont(), size: 34 })] }),
-    new TableOfContents("目录", { hyperlink: true, headingStyleRange: "1-3" }),
+    new TableOfContents("目录", { hyperlink: true, headingStyleRange: "1-2" }),
     new Paragraph({ children: [new PageBreak()] }),
   ];
 }
@@ -391,24 +391,28 @@ function blockToWord(block, stats) {
     if (block.level === 1) stats.chapters += 1;
     return [new Paragraph({
       heading: headingMap[block.level],
-      pageBreakBefore: block.level === 1,
       keepNext: true,
       children: [new Bookmark({ id: bookmarkId, children: [new TextRun({ text: block.text })] })],
     })];
   }
   if (block.type === "paragraph") {
+    const isSourceEntry = /^\[S\d{2}\]\s/.test(block.text);
     return [new Paragraph({
-      children: inlineRuns(block.text),
+      children: inlineRuns(block.text, { size: isSourceEntry ? 17 : STYLE.bodySize }),
       alignment: AlignmentType.JUSTIFIED,
       widowControl: true,
-      spacing: { before: 0, after: STYLE.bodyAfter, line: STYLE.bodyLine },
+      spacing: {
+        before: 0,
+        after: isSourceEntry ? 30 : STYLE.bodyAfter,
+        line: isSourceEntry ? 220 : STYLE.bodyLine,
+      },
     })];
   }
   if (block.type === "list") {
     return [new Paragraph({
       children: inlineRuns(block.text),
       numbering: { reference: block.ordered ? "numbered-list" : "bullet-list", level: 0 },
-      spacing: { before: 0, after: 80, line: 290 },
+      spacing: { before: 0, after: 30, line: 250 },
     })];
   }
   if (block.type === "table") {
@@ -500,7 +504,7 @@ function documentStyles() {
         next: "Normal",
         quickFormat: true,
         run: { font: headingFont(), size: STYLE.h1Size, bold: true, color: COLOR.primary },
-        paragraph: { spacing: { before: 360, after: 200 }, keepNext: true, outlineLevel: 0 },
+        paragraph: { spacing: { before: 260, after: 140 }, keepNext: true, outlineLevel: 0 },
       },
       {
         id: "Heading2",
@@ -509,7 +513,7 @@ function documentStyles() {
         next: "Normal",
         quickFormat: true,
         run: { font: headingFont(), size: STYLE.h2Size, bold: true, color: COLOR.primary },
-        paragraph: { spacing: { before: 240, after: 120 }, keepNext: true, outlineLevel: 1 },
+        paragraph: { spacing: { before: 180, after: 80 }, keepNext: true, outlineLevel: 1 },
       },
       {
         id: "Heading3",
@@ -518,7 +522,7 @@ function documentStyles() {
         next: "Normal",
         quickFormat: true,
         run: { font: headingFont(), size: STYLE.h3Size, bold: true, color: COLOR.secondary },
-        paragraph: { spacing: { before: 160, after: 80 }, keepNext: true, outlineLevel: 2 },
+        paragraph: { spacing: { before: 120, after: 60 }, keepNext: true, outlineLevel: 2 },
       },
       {
         id: "Caption",
@@ -528,6 +532,22 @@ function documentStyles() {
         quickFormat: true,
         run: { font: eastAsiaFont(), size: STYLE.captionSize, color: COLOR.muted },
         paragraph: { spacing: { before: 0, after: 180, line: 260 }, alignment: AlignmentType.CENTER },
+      },
+      {
+        id: "TOC1",
+        name: "toc 1",
+        basedOn: "Normal",
+        next: "Normal",
+        run: { font: eastAsiaFont(), size: 17, color: COLOR.text },
+        paragraph: { spacing: { before: 0, after: 0, line: 200 }, keepLines: true },
+      },
+      {
+        id: "TOC2",
+        name: "toc 2",
+        basedOn: "Normal",
+        next: "Normal",
+        run: { font: eastAsiaFont(), size: 16, color: COLOR.muted },
+        paragraph: { indent: { left: 260 }, spacing: { before: 0, after: 0, line: 190 }, keepLines: true },
       },
     ],
   };
@@ -544,7 +564,7 @@ function numbering() {
           text: "•",
           alignment: AlignmentType.LEFT,
           style: {
-            paragraph: { indent: { left: 540, hanging: 280 }, spacing: { after: 80, line: 290 } },
+            paragraph: { indent: { left: 500, hanging: 260 }, spacing: { after: 30, line: 250 } },
             run: { font: eastAsiaFont(), size: STYLE.bodySize, color: COLOR.primary },
           },
         }],
@@ -557,7 +577,7 @@ function numbering() {
           text: "%1.",
           alignment: AlignmentType.LEFT,
           style: {
-            paragraph: { indent: { left: 540, hanging: 280 }, spacing: { after: 80, line: 290 } },
+            paragraph: { indent: { left: 500, hanging: 260 }, spacing: { after: 30, line: 250 } },
             run: { font: eastAsiaFont(), size: STYLE.bodySize, color: COLOR.primary },
           },
         }],
