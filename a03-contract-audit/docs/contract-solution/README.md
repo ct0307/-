@@ -29,22 +29,25 @@ AI 输出定位为合同审查辅助意见，不构成自动法律裁决，也�
 
 ## 构建流程
 
-构建脚本完成后，在项目根目录执行：
+首次使用时，在项目根目录安装本目录锁定的构建依赖。安装前应核对 npm 来源、审阅 lockfile，并执行 `npm audit`：
 
 ```powershell
-$env:NODE_PATH='C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules\.pnpm\sharp@0.34.5\node_modules'
-& 'C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' docs/contract-solution/scripts/generate_diagrams.js
-$env:NODE_PATH='C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
-& 'C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' docs/contract-solution/scripts/build_docx.js
+npm --prefix docs/contract-solution install
+npm --prefix docs/contract-solution audit
+```
+
+生成图表和 DOCX：
+
+```powershell
+npm --prefix docs/contract-solution run build
 powershell -NoProfile -ExecutionPolicy Bypass -File docs/contract-solution/scripts/update_word_fields.ps1
 ```
 
 ## 验证流程
 
 ```powershell
-$env:NODE_PATH='C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules\.pnpm\sharp@0.34.5\node_modules'
-& 'C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' docs/contract-solution/scripts/validate_screenshots.js
-& 'C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' docs/contract-solution/scripts/validate_document.py docs/contract-solution/契鉴_项目详细方案.docx docs/contract-solution/契鉴_项目详细方案.pdf
+npm --prefix docs/contract-solution run validate:screenshots
+python docs/contract-solution/scripts/validate_document.py docs/contract-solution/契鉴_项目详细方案.docx docs/contract-solution/契鉴_项目详细方案.pdf
 ```
 
 验收门槛为：17 个一级章节、正文 2.5 万至 3.5 万中文字符、40 至 50 页、20 至 30 张有效图片、10 至 15 张表；禁用进度表述、空标题、缺图、断链和无来源关键结论均为 0。
