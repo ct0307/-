@@ -41,6 +41,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs/contract-solution/scrip
 ## 验证流程
 
 ```powershell
+$env:NODE_PATH='C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules\.pnpm\sharp@0.34.5\node_modules'
+& 'C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' docs/contract-solution/scripts/validate_screenshots.js
 & 'C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' docs/contract-solution/scripts/validate_document.py docs/contract-solution/契鉴_项目详细方案.docx docs/contract-solution/契鉴_项目详细方案.pdf
 ```
 
