@@ -8,12 +8,16 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles
+from app.core.config import settings
 from app.db.session import get_db
 from app.llm.base import LLMError
 from app.models.models import KnowledgeChunk, User
 from app.schemas.contract import KnowledgeImport
 from app.services import audit_log
-from app.services.rag.retriever import index_documents
+from app.services.rag.retriever import (
+    build_documents_without_embeddings,
+    prepare_documents,
+)
 
 router = APIRouter()
 
@@ -155,6 +159,12 @@ def _split_paragraph(text: str) -> list[str]:
             continue
         buf = ""
         for sent in re.split(r"(?<=[。；;])", para):
+            if len(sent) > _MAX_CHUNK_CHARS:
+                if buf.strip():
+                    chunks.append(buf.strip())
+                    buf = ""
+                chunks.extend(_hard_split(sent))
+                continue
             if len(buf) + len(sent) > _MAX_CHUNK_CHARS and buf:
                 chunks.append(buf)
                 buf = ""
@@ -162,6 +172,26 @@ def _split_paragraph(text: str) -> list[str]:
         if buf.strip():
             chunks.append(buf.strip())
     return chunks
+
+
+def _hard_split(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
+    """无句界长文本按字符硬切；法规续片重复条文前缀以保留定位。"""
+    stripped = text.strip()
+    if len(stripped) <= limit:
+        return [stripped] if stripped else []
+    prefix_match = re.match(
+        r"^(?P<prefix>(?:【[^\n]{1,40}】\n)?第[一二三四五六七八九十百千零两\d]{1,7}条\s*)",
+        stripped,
+    )
+    prefix = prefix_match.group("prefix") if prefix_match else ""
+    chunks = [stripped[:limit]]
+    remaining = stripped[limit:]
+    continuation_limit = max(1, limit - len(prefix))
+    while remaining:
+        body = remaining[:continuation_limit]
+        chunks.append(f"{prefix}{body}" if prefix else body)
+        remaining = remaining[continuation_limit:]
+    return [chunk.strip() for chunk in chunks if chunk.strip()]
 
 
 class SplitResult:
@@ -248,6 +278,11 @@ async def _extract_file_text(file: UploadFile) -> str:
     txt ：utf-8 / gbk / utf-8-sig 三编码兜底。
     """
     raw = await file.read()
+    if len(raw) > settings.MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            f"文件超过 {settings.MAX_UPLOAD_MB}MB 上限",
+        )
     fname = (file.filename or "").lower()
 
     if fname.endswith(".txt"):
@@ -373,15 +408,34 @@ def _detect_category(text: str, split_mode: str) -> str:
 def _do_index(chunks: list[dict], db: Session) -> int:
     """切片向量化入库，embedding 不可用时降级写空向量。"""
     try:
-        return index_documents(chunks, db=db)
+        rows = prepare_documents(chunks)
     except LLMError:
-        for c in chunks:
-            db.add(KnowledgeChunk(
-                category=c["category"], source=c["source"],
-                content=c["content"], embedding="",
-            ))
+        rows = build_documents_without_embeddings(chunks)
+    try:
+        for row in rows:
+            db.add(row)
         db.commit()
-        return len(chunks)
+    except Exception:
+        db.rollback()
+        raise
+    return len(rows)
+
+
+def _replace_source_chunks(db: Session, source: str, chunks: list[dict]) -> tuple[int, int]:
+    """先完整准备新行，再用单次事务替换来源；失败时旧知识可回滚。"""
+    try:
+        rows = prepare_documents(chunks)
+    except LLMError:
+        rows = build_documents_without_embeddings(chunks)
+    try:
+        deleted = db.query(KnowledgeChunk).filter(KnowledgeChunk.source == source).delete()
+        for row in rows:
+            db.add(row)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return deleted, len(rows)
 
 
 @router.post("/import")
@@ -394,7 +448,11 @@ def import_knowledge(
     if not split.chunks:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "内容为空，无可导入切片")
 
-    chunks = [{"category": payload.category, "source": payload.source, "content": p} for p in split.chunks]
+    metadata = payload.model_dump(exclude={"category", "source", "content"})
+    chunks = [
+        {"category": payload.category, "source": payload.source, "content": p, **metadata}
+        for p in split.chunks
+    ]
     kept, skipped = _dedup_chunks(chunks, db)
     count = _do_index(kept, db) if kept else 0
 
@@ -442,16 +500,14 @@ async def import_knowledge_file(
 
     source = file.filename or "未命名文件"
 
-    # 覆盖模式：先删除同 source 的全部旧切片
-    deleted = 0
-    if overwrite:
-        deleted = db.query(KnowledgeChunk).filter(KnowledgeChunk.source == source).delete()
-        db.commit()
-
     chunks = [{"category": final_category, "source": source, "content": p} for p in split.chunks]
-    # 覆盖模式下旧数据已删，无需去重；追加模式正常去重
-    kept, skipped = (chunks, 0) if overwrite else _dedup_chunks(chunks, db)
-    count = _do_index(kept, db) if kept else 0
+    if overwrite:
+        kept, skipped = chunks, 0
+        deleted, count = _replace_source_chunks(db, source, kept)
+    else:
+        deleted = 0
+        kept, skipped = _dedup_chunks(chunks, db)
+        count = _do_index(kept, db) if kept else 0
 
     # 重叠预警：通过条文编号对比（精确），兜底用同分类条数阈值
     overlap_warning = _check_article_overlap(split.chunks, final_category, source, db)

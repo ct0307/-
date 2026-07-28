@@ -63,6 +63,43 @@
 - 52 份冻结文件、人工金标准、OpenClaw/GPU 对照机和功率数据均未提供，因此对应硬指标保持“待实测/阻塞”，不生成模拟结论。
 - 详细证据矩阵：`docs/evaluation/hard-indicator-matrix.md`。
 
+## 2026-07-27 · RAG 可靠性与可验证证据链加固（✅ 已完成）
+## 2026-07-27 · RAG 可靠性与可验证证据链加固（✅ 已完成）
+
+### 核心改进
+
+| 范围 | 改进 |
+|---|---|
+| 逐风险证据闭环 | Agent 先生成候选风险，再按“风险分类 + 原文”逐条检索；正式 `basis` 只取该风险的可靠来源，无来源时改为人工复核提示并将置信度封顶 50 |
+| 检索可靠性 | 向量路增加最低余弦阈值；损坏/异维向量按条跳过；Embedding 数量和维度整批校验；单路 Top-N 真正生效 |
+| 适用性过滤 | `retrieve()` 支持合同类型、审查维度、知识分类和有效期过滤；用户选定维度会跳过无关 Agent |
+| 引用真实性 | 兜底内容统一标记为 `fallback_rule` 内置审查规则，不再冒充民法典条文；旧知识可从正文自动提取“第X条” |
+| 知识治理 | 增加条文号、版本、生效/失效日期、适用合同类型/维度、Embedding 模型/维度和正文哈希 9 个字段 |
+| 数据一致性 | 覆盖导入改为“先准备全部新行，再单事务删除+写入”；异常回滚并保留旧知识；BM25 缓存改用 ID+正文 SHA-256 指纹 |
+| 输入与部署 | 无标点长文本硬切至 ≤380 字并保留条文前缀；知识文件应用上传大小限制；本地 Embedding 运行时 `local_files_only=True`，禁止隐式联网 |
+| 迁移 | SQLite 启动补列；补齐 Alembic 配置、环境和可回滚版本 `20260726_rag_metadata` |
+
+### 主要文件
+
+- `backend/app/services/rag/retriever.py`
+- `backend/app/services/audit/auditor.py`
+- `backend/app/api/v1/endpoints/knowledge.py`
+- `backend/app/llm/adapters/local_embedding.py`
+- `backend/app/models/models.py`
+- `backend/app/db/init_db.py`
+- `backend/alembic.ini`、`backend/alembic/`
+- `backend/tests/test_rag_hardening_unittest.py`
+- `backend/tests/test_rag_grounding.py`
+
+### 验证
+
+- 新增标准库测试：16/16 通过；原有无夹具测试：23/23 通过，共 39 项。
+- `compileall` 通过；FastAPI 应用导入成功，注册 36 条路由。
+- Alembic `history` 正确识别迁移 head；旧表临时库实际执行 `upgrade head` 成功，9 个字段齐全。
+- 现有数据库只读复制后迁移：知识仍为 973 条，正文汇总 SHA-256 前后一致，973 条向量仍全部 512 维。
+- Embedding 不可用的真实副本检索在 BM25 模式下返回 3 条违约责任相关依据；运行时没有 Hugging Face 网络重试。
+- 未安装、升级或降级任何依赖；未修改源数据库。
+
 ---
 
 ## 2026-07-23 · 前端无障碍 + 响应式 + 交付质量四轮改进（✅ 已完成）

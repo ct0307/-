@@ -302,6 +302,31 @@ server {
 | worker 无任务 | 检查 `REDIS_URL`、`AUDIT_ASYNC=true` 与 `docker compose logs worker` |
 | 数据表缺失 | 执行 `alembic current`，确认位于 `20260726_01 (head)` |
 
+## SQLite 迁移到 PostgreSQL
+
+迁移必须安排维护窗口，先停止 backend、worker 和 scheduler，确保 SQLite 不再写入。保留 SQLite 文件和上传文件目录的只读备份，目标 PostgreSQL 必须是已执行 Alembic 且业务表为空的新库。
+
+```powershell
+# 1. 备份源库；按实际路径调整
+Copy-Item -LiteralPath backend/storage/a03_dev.db -Destination backup/a03_dev.db
+
+# 2. 在目标 PostgreSQL 建立最新结构
+$env:DB_BACKEND = 'postgres'
+alembic -c backend/alembic.ini upgrade head
+
+# 3. 只读统计源库，不写目标库
+Set-Location backend
+python -m scripts.migrate_sqlite_to_postgres --sqlite-path storage/a03_dev.db
+
+# 4. 目标 URL 通过环境变量传入，避免密码进入命令历史
+$env:A03_POSTGRES_URL = 'postgresql+psycopg://user:password@host:5432/a03_contract'
+python -m scripts.migrate_sqlite_to_postgres `
+  --sqlite-path storage/a03_dev.db `
+  --execute
+```
+
+脚本在单一目标事务中按外键依赖顺序导入，逐表输出并核对源/目标行数，同时校准 PostgreSQL 自增序列。目标表非空、结构缺失、写入失败或数量不一致时，事务整体回滚；修复原因后可对空目标库重试。成功后先以只读方式抽查合同、风险、知识库和审计日志，再恢复服务。上传文件不在数据库脚本范围内，必须单独复制并保持 `storage_path` 可解析；确认验收前不要删除 SQLite 和文件备份。
+
 ## 当前验证边界
 
 - Alembic 已在临时 SQLite 完成空库升级和完整回滚测试。

@@ -2,10 +2,11 @@
 
 企业交付要点：合同敏感数据、完整审核链、审计日志留痕。
 """
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -150,6 +151,15 @@ class KnowledgeChunk(Base):
     source: Mapped[str] = mapped_column(String(255), default="")   # 来源（法规名/文件名）
     content: Mapped[str] = mapped_column(Text)                     # 切片正文
     embedding: Mapped[str] = mapped_column(Text, default="")       # JSON 序列化的向量
+    article_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    applicable_contract_types: Mapped[str] = mapped_column(Text, default="[]")
+    applicable_dimensions: Mapped[str] = mapped_column(Text, default="[]")
+    embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    embedding_dimension: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

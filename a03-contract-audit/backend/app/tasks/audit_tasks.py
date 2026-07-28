@@ -163,6 +163,7 @@ def run_contract_audit(
         log.error("audit_task.failed", contract_id=contract_id, error=str(exc))
         item = db.query(AuditBatchItem).filter(AuditBatchItem.id == batch_item_id).first() if batch_item_id else None
         retries = int(getattr(self.request, "retries", 0))
+        contract = db.query(Contract).filter(Contract.id == contract_id).first()
         if item:
             if item.status not in {"done", "failed"}:
                 item.status = transition_item(item.status, "failed")
@@ -174,7 +175,9 @@ def run_contract_audit(
                 item.attempts = decision.attempts
             else:
                 item.finished_at = datetime.now(timezone.utc)
-            db.commit()
+        if retries >= self.max_retries and contract:
+            contract.status = "audit_failed"
+        db.commit()
         if retries < self.max_retries:
             raise self.retry(exc=exc, countdown=10)
         raise

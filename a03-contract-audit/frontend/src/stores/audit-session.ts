@@ -3,11 +3,13 @@ import { computed, ref } from 'vue'
 import type { AuditResult, CrossCheckOut, ParseResult, RiskOut } from '@/api/types'
 import {
   auditContract,
+  getAuditStatus,
   getRisks,
   parseContract,
   updateRiskStatus,
   uploadContract,
 } from '@/api/contract'
+import { waitForAuditTerminal } from '@/utils/audit-progress'
 
 // 审查会话状态：承接 上传→解析→审查→复核 真实闭环，供 AuditView 及子组件共享。
 export const useAuditSessionStore = defineStore('auditSession', () => {
@@ -74,7 +76,13 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     busy.value = true
     _auditAbort = new AbortController()
     try {
-      const res = await auditContract(contractId.value, dimensions, _auditAbort.signal)
+      const initial = await auditContract(contractId.value, dimensions, _auditAbort.signal)
+      const res = initial.status === 'auditing'
+        ? await waitForAuditTerminal(
+            (signal) => getAuditStatus(contractId.value!, signal),
+            { signal: _auditAbort.signal },
+          )
+        : initial
       applyQuality(res)
       crossChecks.value = res.cross_checks ?? []
       risks.value = await getRisks(contractId.value)

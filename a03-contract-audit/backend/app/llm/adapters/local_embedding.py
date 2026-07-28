@@ -2,7 +2,7 @@
 
 优势：
 - 完全本地化，合同数据不出企业（企业安全硬约束）
-- 首次调用自动下载模型到 ~/.cache/huggingface；之后离线可用
+- 模型由镜像构建或运维脚本预下载到缓存；运行时只读本地，禁止隐式联网
 - CPU 可跑，bge-small-zh 推理约 5-20ms/batch（生产足够）
 
 模型选择（config LOCAL_EMBED_MODEL）：
@@ -38,7 +38,11 @@ class LocalEmbeddingAdapter(LLMAdapter):
                 "sentence-transformers 未安装，请执行：pip install sentence-transformers"
             ) from exc
         log.info("embed.load_model", model=self.model_name)
-        self._model = SentenceTransformer(self.model_name)
+        try:
+            self._model = SentenceTransformer(self.model_name, local_files_only=True)
+        except Exception as exc:
+            log.error("embed.load_model_failed", model=self.model_name, error=str(exc)[:200])
+            raise LLMError(f"本地 embedding 模型加载失败：{exc}") from exc
         log.info("embed.model_ready", model=self.model_name, dim=self._model.get_sentence_embedding_dimension())
         return self._model
 

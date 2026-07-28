@@ -45,8 +45,25 @@ _DEV_COLUMNS = {
         ("rag_sources", "TEXT DEFAULT '[]'"),   # RAG 检索溯源：结构化来源列表
     ],
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
-    "contracts": [("elements_json", "TEXT DEFAULT '{}'")],
+    "contracts": [
+        ("elements_json", "TEXT DEFAULT '{}'"),
+        ("parse_source", "VARCHAR(16) DEFAULT 'native' NOT NULL"),
+        ("ocr_confidence", "FLOAT"),
+        ("requires_review", "BOOLEAN DEFAULT 0 NOT NULL"),
+        ("review_reason", "VARCHAR(255)"),
+    ],
     "audit_batches": [("dimensions_json", "TEXT DEFAULT '[]'")],
+    "knowledge_chunks": [
+        ("article_number", "VARCHAR(64)"),
+        ("version", "VARCHAR(64)"),
+        ("effective_date", "DATE"),
+        ("expiry_date", "DATE"),
+        ("applicable_contract_types", "TEXT DEFAULT '[]'"),
+        ("applicable_dimensions", "TEXT DEFAULT '[]'"),
+        ("embedding_model", "VARCHAR(255)"),
+        ("embedding_dimension", "INTEGER"),
+        ("content_hash", "VARCHAR(64)"),
+    ],
 }
 
 

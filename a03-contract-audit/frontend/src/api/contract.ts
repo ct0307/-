@@ -28,6 +28,10 @@ export function auditContract(id: number, dimensions?: string[], signal?: AbortS
   return client.post(`/contracts/${id}/audit`, body, { signal, timeout: 180_000 })
 }
 
+export function getAuditStatus(id: number, signal?: AbortSignal): Promise<AuditResult> {
+  return client.get(`/contracts/${id}/audit-status`, { signal })
+}
+
 export function getRisks(id: number): Promise<RiskOut[]> {
   return client.get(`/contracts/${id}/risks`)
 }

@@ -281,6 +281,24 @@ def audit_contract_endpoint(
     )
 
 
+@router.get("/{contract_id}/audit-status", response_model=AuditResponse)
+def get_contract_audit_status(
+    contract_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> AuditResponse:
+    contract = _get_contract(db, contract_id, user)
+    risk_count = db.query(Risk).filter(Risk.contract_id == contract_id).count()
+    return AuditResponse(
+        contract_id=contract_id,
+        status=contract.status,
+        risk_count=risk_count,
+        requires_review=contract.requires_review,
+        ocr_confidence=contract.ocr_confidence,
+        review_reason=contract.review_reason,
+    )
+
+
 def _to_cross_out(c: dict) -> CrossCheckOut:
     """把 auditor 的冲突项 dict（键含保留字 from/to）映射到 schema。"""
     return CrossCheckOut(

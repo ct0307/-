@@ -1,8 +1,8 @@
 """Pydantic 请求/响应模型。骨架：仅示例核心结构。"""
 import json
-from datetime import datetime
+from datetime import date, datetime
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class RiskOut(BaseModel):
@@ -95,6 +95,12 @@ class KnowledgeImport(BaseModel):
     category: str = "rule"      # law/rule/template
     source: str = ""            # 来源（法规名/文件名）
     content: str                # 正文，服务端按段落切片
+    article_number: str | None = None
+    version: str | None = None
+    effective_date: date | None = None
+    expiry_date: date | None = None
+    applicable_contract_types: list[str] = Field(default_factory=list)
+    applicable_dimensions: list[str] = Field(default_factory=list)
 
 
 class AuditRuleOut(BaseModel):
