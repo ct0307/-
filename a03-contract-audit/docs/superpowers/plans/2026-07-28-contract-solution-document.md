@@ -354,7 +354,7 @@ async function renderDiagram({ name, width, height, title, bodySvg }) {
 Run:
 
 ```powershell
-$env:NODE_PATH='C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
+$env:NODE_PATH='C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules\.pnpm\sharp@0.34.5\node_modules'
 & 'C:\Users\chentao\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' docs/contract-solution/scripts/generate_diagrams.js
 Get-ChildItem docs/contract-solution/assets/diagrams/*.png | Measure-Object
 ```
