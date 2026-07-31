@@ -35,3 +35,8 @@ logs/
 .vscode/
 .idea/
 .DS_Store
+
+# 本地 Agent 规划与根目录交付副本
+.planning/
+/契鉴_项目详细方案.docx
+/契鉴_项目详细方案.pdf

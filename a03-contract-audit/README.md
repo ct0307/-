@@ -2,7 +2,31 @@
 
 > 浙江省职业技能大赛 · 外包赛道 · A03 赛题 · 海康-南湖研究院命题
 
-企业级合同合规审查工作台。面向法务、财务、管理层，将 AI 审查能力包装为**双 Agent 协同 + 可解释 RAG + 人工复核闭环 + 多维报表**，支持私有化部署，合同数据不出企业。
+企业级合同合规审查工作台。面向法务、财务、管理层，将 AI 审查能力包装为**双 Agent 协同 + 可解释 RAG + 人工复核闭环 + 多维报表**。系统支持私有化部署，本地 Embedding 全程离线运行；使用私有化 LLM 时，合同数据无需离开企业环境。
+
+## 当前进度
+
+> 更新于 2026-07-31。详细改动与验证记录见 [PROGRESS.md](./PROGRESS.md)。
+
+| 范围 | 状态 | 最新结果 |
+|---|---|---|
+| 核心业务闭环 | ✅ 已完成 | 上传、加密、解析、双 Agent 审查、人工复核、整改与报表已贯通 |
+| RAG 证据链 | ✅ 已加固 | 逐风险检索可靠依据，无可靠来源时转人工复核并将置信度封顶 50 |
+| 知识库 | ✅ 能力已验证 | 本机演示库曾验证 973 条、512 维向量；数据库不随源码分发，新环境需运行种子与法规导入脚本 |
+| 自动化验证 | ✅ 本轮通过 | 后端 125 passed/1 skipped；前端 11 passed/3 skipped；类型检查与生产构建通过 |
+| 前端质量 | ✅ 已验证 | 自动化覆盖核心状态；历史浏览器走查覆盖 9 个业务页及 390/1440/2560px |
+| 参赛交付材料 | 🚧 部分完成 | 项目详细方案已定稿；概要、PPT、测试报告/用例、团队过程材料和演示视频待制作 |
+
+## 当前交付材料
+
+| 材料 | 状态 | 说明 |
+|---|---|---|
+| [项目详细方案（Word）](./docs/contract-solution/契鉴_项目详细方案.docx) | ✅ 已完成 | 49 页，17 章，正文 34,316 个中文字符，含 23 张图片和 15 张表 |
+| [项目详细方案（PDF）](./docs/contract-solution/契鉴_项目详细方案.pdf) | ✅ 已完成 | 已刷新目录和页码，可直接阅读、汇报或打印 |
+| 项目概要介绍 | ⏳ 待制作 | 从详细方案提炼 2～3 页图文速览 |
+| 项目简介 PPT | ⏳ 待制作 | 用于进度汇报与答辩展示 |
+| 测试报告与测试用例 | ⏳ 待整理 | 汇总已有自动化测试、端到端验证和准确率证据 |
+| 演示视频 | ⏳ 待制作 | 录制 3～5 分钟核心业务闭环 |
 
 ---
 
@@ -11,9 +35,9 @@
 | 模块 | 说明 |
 |---|---|
 | **合同审查** | 上传→加密存储→文本解析→双 Agent（法务+财务）协同审查→风险清单 |
-| **可解释风险** | 每条风险独立检索：原文引用 + 法规来源 + 置信度 + 人工复核状态；证据缺失时强制复核 |
+| **可解释风险** | 每条风险独立检索：原文引用 + 可靠法规来源 + 置信度 + 人工复核状态；证据缺失时强制复核 |
 | **多维报表** | KPI 看板 + 趋势图 + 风险分布 + 合同要素汇总（甲方/合同标的/收付款节点）+ Excel 台账导出 |
-| **RAG 知识库** | 本地 embedding（BAAI/bge-small-zh），41 条预置法规，支持批量文件导入 |
+| **RAG 知识库** | 本地 Embedding + BM25 混合检索与 RRF 融合；本机演示库曾验证 973 条，支持批量导入、适用性过滤和版本治理 |
 | **批量处理** | 服务端持久化批次及审查维度，单批 1~200 份，支持幂等提交、失败隔离、启动补投、租约去重和失败项重试 |
 | **智能协同审查** | 法务先行→共享上下文→财务交叉验证→冲突消解→风险分级（绿/黄/红档）|
 | **风险追问 AI** | 绑定合同上下文，对话历史管理，可追问具体条款的谈判空间、行业常规 |
@@ -31,12 +55,12 @@
 | 前端 | Vue 3 · TypeScript · Vite · Element Plus · ECharts ≥ 6.1 · Pinia |
 | 后端 | Python 3.11 · FastAPI · SQLAlchemy · pydantic-settings |
 | 数据库 | SQLite（开发）/ PostgreSQL（生产） |
-| 向量检索 | sentence-transformers（BAAI/bge-small-zh-v1.5，本地离线） |
-| 文档解析 | pdfplumber · PyMuPDF · python-docx · RapidOCR · ONNX Runtime |
+| RAG 检索 | sentence-transformers（BAAI/bge-small-zh-v1.5，本地离线）+ BM25 + RRF 融合 |
+| 文档解析 | pdfplumber · PyMuPDF · python-docx · RapidOCR · ONNX Runtime · 正则与 LLM 要素精抽 |
 | 报表 | openpyxl（Excel 台账） |
 | AI 接入 | 统一 LLM Adapter，可切 DeepSeek / Qwen / OpenClaw |
 | 权限 | PyJWT + RBAC + 审计日志 |
-| 部署 | Docker Compose（PostgreSQL + Redis + FastAPI + Celery worker/beat + Nginx）|
+| 部署与迁移 | Docker Compose（PostgreSQL + Redis + FastAPI + Celery worker/beat + Nginx）· Alembic |
 
 ---
 
@@ -126,17 +150,17 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 a03-contract-audit/
 ├── backend/
 │   ├── app/
-│   │   ├── api/v1/endpoints/  # 25条路由端点
+│   │   ├── api/v1/endpoints/  # 40条 /api/ 路由
 │   │   ├── core/              # 配置、安全、加密、日志
-│   │   ├── db/                # 初始化、热迁移、会话
+│   │   ├── db/                # 初始化、SQLite启动补列、会话
 │   │   ├── llm/               # LLM Adapter（qwen/deepseek/openclaw）
 │   │   ├── models/            # 13张数据库表
 │   │   ├── schemas/           # Pydantic 请求/响应类型
 │   │   └── services/
 │   │       ├── audit/         # 双Agent审查、冲突消解、风险分级
-│   │       ├── parser/        # PDF/Word 解析 + OCR 适配 + 要素提取
+│   │       ├── parser/        # PDF/Word 解析 + OCR + 正则/LLM 要素提取
 │   │       ├── batch/         # 批次状态机、进度、租约与重试
-│   │       ├── rag/           # 向量检索（本地embedding）
+│   │       ├── rag/           # 本地向量 + BM25 + RRF 混合检索
 │   │       └── report/        # Excel 台账 + 看板聚合
 │   ├── alembic/               # PostgreSQL 全量可回滚迁移
 │   ├── evaluation/            # 要素准确率与算力基准工具
@@ -153,9 +177,11 @@ a03-contract-audit/
 │       ├── stores/            # Pinia（auth/audit-session/notify/rectify）
 │       └── views/             # 10个页面视图
 ├── docs/
+│   ├── contract-solution/     # 项目详细方案源稿、DOCX/PDF与构建脚本
 │   └── deployment.md          # 部署详细文档
 ├── docker-compose.yml
-└── PROGRESS.md                # 开发进度日志
+├── README.md                  # 项目说明与交付材料索引
+└── PROGRESS.md                # 开发与交付进度日志
 ```
 
 ---
