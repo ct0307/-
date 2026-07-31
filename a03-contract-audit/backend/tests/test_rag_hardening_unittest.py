@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.api.v1.endpoints import knowledge
 from app.api.v1.endpoints.knowledge import _MAX_CHUNK_CHARS, _smart_split
+from app.db import init_db
 from app.llm.base import LLMError
 from app.llm.adapters.local_embedding import LocalEmbeddingAdapter
 from app.models.models import KnowledgeChunk
@@ -55,6 +56,26 @@ class _FakeUpload:
 class RagHardeningTests(unittest.TestCase):
     def tearDown(self):
         retriever._bm25_cache = None
+
+    def test_knowledge_scope_defaults_to_unclassified(self):
+        engine = create_engine("sqlite:///:memory:")
+        KnowledgeChunk.__table__.create(engine)
+        db = sessionmaker(bind=engine)()
+        try:
+            chunk = KnowledgeChunk(category="law", source="unknown", content="text")
+            db.add(chunk)
+            db.flush()
+
+            self.assertEqual(chunk.scope_mode, "unclassified")
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_dev_schema_contains_scope_mode_backfill(self):
+        columns = dict(init_db._DEV_COLUMNS["knowledge_chunks"])
+
+        self.assertIn("scope_mode", columns)
+        self.assertIn("unclassified", columns["scope_mode"])
 
     def test_vector_search_rejects_below_similarity_threshold(self):
         docs = [(

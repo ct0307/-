@@ -157,6 +157,9 @@ class KnowledgeChunk(Base):
     expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     applicable_contract_types: Mapped[str] = mapped_column(Text, default="[]")
     applicable_dimensions: Mapped[str] = mapped_column(Text, default="[]")
+    scope_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unclassified", server_default="unclassified"
+    )
     embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     embedding_dimension: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)

@@ -60,6 +60,7 @@ _DEV_COLUMNS = {
         ("expiry_date", "DATE"),
         ("applicable_contract_types", "TEXT DEFAULT '[]'"),
         ("applicable_dimensions", "TEXT DEFAULT '[]'"),
+        ("scope_mode", "VARCHAR(16) DEFAULT 'unclassified' NOT NULL"),
         ("embedding_model", "VARCHAR(255)"),
         ("embedding_dimension", "INTEGER"),
         ("content_hash", "VARCHAR(64)"),
