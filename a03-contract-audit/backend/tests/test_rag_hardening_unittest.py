@@ -11,7 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
-from sqlalchemy import create_engine, inspect
+from pydantic import ValidationError
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from app.api.v1.endpoints import knowledge
@@ -20,7 +21,9 @@ from app.db import init_db
 from app.llm.base import LLMError
 from app.llm.adapters.local_embedding import LocalEmbeddingAdapter
 from app.models.models import KnowledgeChunk
+from app.schemas.contract import KnowledgeImport
 from app.services.rag import retriever
+from scripts import seed_demo
 
 
 class _FakeEmbeddingAdapter:
@@ -127,6 +130,71 @@ class RagHardeningTests(unittest.TestCase):
         self.assertEqual(db.added, [])
         self.assertEqual(db.commits, 0)
 
+    def test_prepare_documents_defaults_to_unclassified_scope(self):
+        adapter = _FakeEmbeddingAdapter([[1.0, 0.0]])
+
+        with patch.object(retriever, "get_embedding_adapter", return_value=adapter):
+            rows = retriever.prepare_documents([{"content": "legacy knowledge"}])
+
+        self.assertEqual(rows[0].scope_mode, "unclassified")
+
+    def test_prepare_documents_rejects_scoped_without_targets_before_embedding(self):
+        with patch.object(retriever, "get_embedding_adapter") as get_adapter:
+            with self.assertRaisesRegex(ValueError, "contract type or audit dimension"):
+                retriever.prepare_documents([
+                    {"content": "invalid scoped knowledge", "scope_mode": "scoped"}
+                ])
+
+        get_adapter.assert_not_called()
+
+    def test_knowledge_import_schema_rejects_invalid_scope_combination(self):
+        with self.assertRaises(ValidationError):
+            KnowledgeImport(content="invalid scoped knowledge", scope_mode="scoped")
+
+    def test_file_scope_form_parses_json_lists_and_rejects_empty_scoped_target(self):
+        parsed = knowledge._parse_scope_form("scoped", '["采购合同"]', '["payment"]')
+        self.assertEqual(parsed["applicable_contract_types"], ["采购合同"])
+        self.assertEqual(parsed["applicable_dimensions"], ["payment"])
+
+        with self.assertRaises(HTTPException) as context:
+            knowledge._parse_scope_form("scoped", "[]", "[]")
+
+        self.assertEqual(context.exception.status_code, 422)
+
+    def test_controlled_seed_scope_metadata_is_explicit(self):
+        civil_code = retriever.controlled_seed_scope("law", "《民法典》第577条")
+        software = retriever.controlled_seed_scope(
+            "template", "软件开发外包合同标准知识产权条款"
+        )
+        purchase = retriever.controlled_seed_scope("template", "采购合同标准付款条款")
+        unknown = retriever.controlled_seed_scope("law", "未知旧法规")
+
+        self.assertEqual(civil_code["scope_mode"], "global")
+        self.assertEqual(software["scope_mode"], "scoped")
+        self.assertIn("软件开发外包合同", software["applicable_contract_types"])
+        self.assertEqual(purchase["scope_mode"], "scoped")
+        self.assertIn("采购合同", purchase["applicable_contract_types"])
+        self.assertEqual(unknown["scope_mode"], "unclassified")
+
+    def test_demo_seed_persists_explicit_knowledge_scope(self):
+        engine = create_engine("sqlite:///:memory:")
+        KnowledgeChunk.__table__.create(engine)
+        db = sessionmaker(bind=engine)()
+        try:
+            seed_demo.seed_knowledge(db)
+            civil_code = db.query(KnowledgeChunk).filter(
+                KnowledgeChunk.source == "《民法典》第577条"
+            ).one()
+            software_case = db.query(KnowledgeChunk).filter(
+                KnowledgeChunk.source == "软件外包合同知识产权归属案例"
+            ).one()
+
+            self.assertEqual(civil_code.scope_mode, "global")
+            self.assertEqual(software_case.scope_mode, "scoped")
+        finally:
+            db.close()
+            engine.dispose()
+
     def test_bm25_cache_invalidates_when_content_changes(self):
         first = [(1, "违约责任", "来源", "")]
         changed = [(1, "付款验收", "来源", "")]
@@ -198,6 +266,50 @@ class RagHardeningTests(unittest.TestCase):
             remaining_tables = set(inspect(engine).get_table_names()) - {"alembic_version"}
             self.assertEqual(remaining_tables, set())
             engine.dispose()
+
+    def test_scope_migration_backfills_only_controlled_sources(self):
+        backend_dir = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "scope-backfill.db"
+            env = os.environ.copy()
+            env.update({"DB_BACKEND": "sqlite", "SQLITE_PATH": database.as_posix()})
+            previous = subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "20260726_02"],
+                cwd=backend_dir, env=env, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(previous.returncode, 0, previous.stdout + previous.stderr)
+
+            engine = create_engine(f"sqlite:///{database.as_posix()}")
+            with engine.begin() as connection:
+                for source in (
+                    "《民法典》第577条",
+                    "软件开发外包合同标准知识产权条款",
+                    "未知旧法规",
+                ):
+                    connection.execute(text(
+                        "INSERT INTO knowledge_chunks "
+                        "(category, source, content, embedding, applicable_contract_types, "
+                        "applicable_dimensions) VALUES "
+                        "('law', :source, 'content', '', '[]', '[]')"
+                    ), {"source": source})
+            engine.dispose()
+
+            upgrade = subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+                cwd=backend_dir, env=env, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
+
+            engine = create_engine(f"sqlite:///{database.as_posix()}")
+            with engine.connect() as connection:
+                rows = dict(connection.execute(text(
+                    "SELECT source, scope_mode FROM knowledge_chunks"
+                )).all())
+            engine.dispose()
+
+            self.assertEqual(rows["《民法典》第577条"], "global")
+            self.assertEqual(rows["软件开发外包合同标准知识产权条款"], "scoped")
+            self.assertEqual(rows["未知旧法规"], "unclassified")
 
     def test_filter_docs_applies_contract_dimension_category_and_date(self):
         docs = [

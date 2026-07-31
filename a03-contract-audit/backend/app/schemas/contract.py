@@ -101,6 +101,25 @@ class KnowledgeImport(BaseModel):
     expiry_date: date | None = None
     applicable_contract_types: list[str] = Field(default_factory=list)
     applicable_dimensions: list[str] = Field(default_factory=list)
+    scope_mode: str = "unclassified"
+
+    @field_validator("scope_mode")
+    @classmethod
+    def validate_scope_mode(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized not in {"global", "scoped", "unclassified"}:
+            raise ValueError("scope_mode must be global, scoped, or unclassified")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_scope_targets(self) -> "KnowledgeImport":
+        if (
+            self.scope_mode == "scoped"
+            and not self.applicable_contract_types
+            and not self.applicable_dimensions
+        ):
+            raise ValueError("scoped knowledge requires a contract type or audit dimension")
+        return self
 
 
 class AuditRuleOut(BaseModel):

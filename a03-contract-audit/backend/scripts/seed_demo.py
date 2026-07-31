@@ -11,6 +11,7 @@
   RAG 走已有关键词降级检索。
 - category 中英映射：law→法律法规、template→标准条款、rule→风险规则、case→典型案例。
 """
+import json
 import os
 import sys
 
@@ -25,6 +26,7 @@ from app.models.models import (
     AccessRole, AuditRule, Contract, ContractTemplate,
     KnowledgeChunk, LLMCallLog, LookupItem, Rectification, Risk, User,
 )
+from app.services.rag.retriever import controlled_seed_scope
 from sqlalchemy.orm import Session
 
 
@@ -413,18 +415,33 @@ def seed_contracts_and_risks(db, uploader: User) -> tuple[int, int]:
 def seed_knowledge(db) -> int:
     added = 0
     for category, source, content in _KNOWLEDGE:
+        scope_metadata = controlled_seed_scope(category, source)
         exists = (
             db.query(KnowledgeChunk)
             .filter(KnowledgeChunk.source == source, KnowledgeChunk.content == content)
             .first()
         )
         if exists:
+            exists.scope_mode = scope_metadata["scope_mode"]
+            exists.applicable_contract_types = json.dumps(
+                scope_metadata["applicable_contract_types"], ensure_ascii=False
+            )
+            exists.applicable_dimensions = json.dumps(
+                scope_metadata["applicable_dimensions"], ensure_ascii=False
+            )
             continue
         db.add(KnowledgeChunk(
             category=category,
             source=source,
             content=content,
             embedding="",  # DeepSeek 无 embedding 端点，RAG 走关键词降级
+            scope_mode=scope_metadata["scope_mode"],
+            applicable_contract_types=json.dumps(
+                scope_metadata["applicable_contract_types"], ensure_ascii=False
+            ),
+            applicable_dimensions=json.dumps(
+                scope_metadata["applicable_dimensions"], ensure_ascii=False
+            ),
         ))
         added += 1
     db.commit()

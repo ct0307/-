@@ -24,6 +24,20 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
+    op.execute(
+        "UPDATE knowledge_chunks SET scope_mode = 'global' "
+        "WHERE source LIKE '《民法典》%'"
+    )
+    op.execute(
+        "UPDATE knowledge_chunks SET scope_mode = 'scoped', "
+        "applicable_contract_types = '[\"软件开发外包合同\"]' "
+        "WHERE source LIKE '软件开发外包合同%'"
+    )
+    op.execute(
+        "UPDATE knowledge_chunks SET scope_mode = 'scoped', "
+        "applicable_contract_types = '[\"采购合同\", \"设备采购合同\"]' "
+        "WHERE source = '采购合同标准付款条款'"
+    )
 
 
 def downgrade() -> None:

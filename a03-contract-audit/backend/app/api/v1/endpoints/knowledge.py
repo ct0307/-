@@ -1,6 +1,7 @@
 """知识库端点：导入法规/行业规则/合同模板，切片向量化供 RAG 检索；查询卡片/统计。"""
 import hashlib
 import io
+import json
 import re
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -16,6 +17,7 @@ from app.schemas.contract import KnowledgeImport
 from app.services import audit_log
 from app.services.rag.retriever import (
     build_documents_without_embeddings,
+    normalize_scope_metadata,
     prepare_documents,
 )
 
@@ -421,6 +423,21 @@ def _do_index(chunks: list[dict], db: Session) -> int:
     return len(rows)
 
 
+def _parse_scope_form(
+    scope_mode: str,
+    applicable_contract_types: str,
+    applicable_dimensions: str,
+) -> dict:
+    try:
+        contract_types = json.loads(applicable_contract_types or "[]")
+        dimensions = json.loads(applicable_dimensions or "[]")
+        if not isinstance(contract_types, list) or not isinstance(dimensions, list):
+            raise ValueError("applicability fields must be JSON arrays")
+        return normalize_scope_metadata(scope_mode, contract_types, dimensions)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+
 def _replace_source_chunks(db: Session, source: str, chunks: list[dict]) -> tuple[int, int]:
     """先完整准备新行，再用单次事务替换来源；失败时旧知识可回滚。"""
     try:
@@ -475,6 +492,9 @@ async def import_knowledge_file(
     file: UploadFile = File(...),
     category: str = Form("auto"),
     overwrite: bool = Form(False),
+    scope_mode: str = Form("unclassified"),
+    applicable_contract_types: str = Form("[]"),
+    applicable_dimensions: str = Form("[]"),
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("legal", "admin")),
 ) -> dict:
@@ -500,7 +520,13 @@ async def import_knowledge_file(
 
     source = file.filename or "未命名文件"
 
-    chunks = [{"category": final_category, "source": source, "content": p} for p in split.chunks]
+    scope_metadata = _parse_scope_form(
+        scope_mode, applicable_contract_types, applicable_dimensions
+    )
+    chunks = [
+        {"category": final_category, "source": source, "content": p, **scope_metadata}
+        for p in split.chunks
+    ]
     if overwrite:
         kept, skipped = chunks, 0
         deleted, count = _replace_source_chunks(db, source, kept)

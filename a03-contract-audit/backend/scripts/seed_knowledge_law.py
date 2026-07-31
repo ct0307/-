@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.db.session import SessionLocal
 from app.models.models import KnowledgeChunk
-from app.services.rag.retriever import index_documents
+from app.services.rag.retriever import controlled_seed_scope, index_documents
 
 # ────────────────────────────────────────────────────────────────────────────
 # 知识条目：[category, source, content]
@@ -197,13 +197,27 @@ def seed(db, force: bool = False) -> dict:
     imported = 0
     skipped = 0
     for category, source, content in LAW_ITEMS:
+        scope_metadata = controlled_seed_scope(category, source)
         if not force:
             exists = db.query(KnowledgeChunk).filter(KnowledgeChunk.source == source).first()
             if exists:
+                exists.scope_mode = scope_metadata["scope_mode"]
+                exists.applicable_contract_types = json.dumps(
+                    scope_metadata["applicable_contract_types"], ensure_ascii=False
+                )
+                exists.applicable_dimensions = json.dumps(
+                    scope_metadata["applicable_dimensions"], ensure_ascii=False
+                )
+                db.commit()
                 skipped += 1
                 continue
         try:
-            n = index_documents([{"category": category, "source": source, "content": content}], db=db)
+            n = index_documents([{
+                "category": category,
+                "source": source,
+                "content": content,
+                **scope_metadata,
+            }], db=db)
             imported += n
             print(f"  ✓ [{category}] {source[:40]} → {n} 切片")
         except Exception as exc:

@@ -415,6 +415,7 @@ def prepare_documents(chunks: list[dict]) -> list[KnowledgeChunk]:
     """在数据库事务外生成并校验全部向量，返回尚未持久化的 ORM 行。"""
     if not chunks:
         return []
+    chunks = [_normalize_chunk_scope(chunk) for chunk in chunks]
     adapter = get_embedding_adapter()
     vectors = adapter.embed([chunk["content"] for chunk in chunks])
     dimension = _validate_vectors(vectors, len(chunks))
@@ -433,9 +434,57 @@ def prepare_documents(chunks: list[dict]) -> list[KnowledgeChunk]:
 def build_documents_without_embeddings(chunks: list[dict]) -> list[KnowledgeChunk]:
     """Embedding 不可用时生成空向量行，保留 BM25 检索能力。"""
     return [
-        _knowledge_row(chunk, embedding="", embedding_model=None, embedding_dimension=None)
+        _knowledge_row(
+            _normalize_chunk_scope(chunk),
+            embedding="",
+            embedding_model=None,
+            embedding_dimension=None,
+        )
         for chunk in chunks
     ]
+
+
+def normalize_scope_metadata(
+    scope_mode: str = "unclassified",
+    applicable_contract_types=None,
+    applicable_dimensions=None,
+) -> dict:
+    """规范化知识作用域；`scoped` 缺少目标时默认拒绝。"""
+    normalized_mode = str(scope_mode or "unclassified").strip().casefold()
+    if normalized_mode not in {"global", "scoped", "unclassified"}:
+        raise ValueError("scope_mode must be global, scoped, or unclassified")
+    contract_types = _json_string_list(applicable_contract_types)
+    dimensions = _json_string_list(applicable_dimensions)
+    if normalized_mode == "scoped" and not contract_types and not dimensions:
+        raise ValueError("scoped knowledge requires a contract type or audit dimension")
+    return {
+        "scope_mode": normalized_mode,
+        "applicable_contract_types": contract_types,
+        "applicable_dimensions": dimensions,
+    }
+
+
+def _normalize_chunk_scope(chunk: dict) -> dict:
+    metadata = normalize_scope_metadata(
+        chunk.get("scope_mode", "unclassified"),
+        chunk.get("applicable_contract_types", []),
+        chunk.get("applicable_dimensions", []),
+    )
+    return {**chunk, **metadata}
+
+
+def controlled_seed_scope(category: str, source: str) -> dict:
+    """为仓库内受控种子赋作用域，不推断任意历史知识。"""
+    normalized_category = category.strip().casefold()
+    if normalized_category == "law" and source.startswith("《民法典》"):
+        return normalize_scope_metadata("global")
+    if "软件" in source or "技术类合同" in source:
+        return normalize_scope_metadata("scoped", ["软件开发外包合同"], [])
+    if "采购合同" in source:
+        return normalize_scope_metadata("scoped", ["采购合同", "设备采购合同"], [])
+    if normalized_category in {"rule", "template"}:
+        return normalize_scope_metadata("global")
+    return normalize_scope_metadata("unclassified")
 
 
 def _knowledge_row(
@@ -460,6 +509,7 @@ def _knowledge_row(
         applicable_dimensions=json.dumps(
             chunk.get("applicable_dimensions", []), ensure_ascii=False
         ),
+        scope_mode=chunk.get("scope_mode", "unclassified"),
         embedding_model=embedding_model,
         embedding_dimension=embedding_dimension,
         content_hash=hashlib.sha256(chunk["content"].encode("utf-8")).hexdigest(),
