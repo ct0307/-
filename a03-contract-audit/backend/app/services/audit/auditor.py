@@ -303,7 +303,7 @@ def _ground_risks(
             contract_type=contract_type,
             dimensions=dimensions or [],
         ) if query else []
-        reliable_sources = [source for source in sources if source.get("reliable", True)]
+        reliable_sources = [source for source in sources if source.get("reliable", False)]
         risk["rag_sources"] = reliable_sources
         if reliable_sources:
             risk["basis"] = "；".join(_format_source(source) for source in reliable_sources)

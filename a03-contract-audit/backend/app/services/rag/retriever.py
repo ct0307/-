@@ -90,7 +90,7 @@ def retrieve(
             KnowledgeChunk.version, KnowledgeChunk.effective_date,
             KnowledgeChunk.expiry_date, KnowledgeChunk.applicable_contract_types,
             KnowledgeChunk.applicable_dimensions, KnowledgeChunk.embedding_model,
-            KnowledgeChunk.embedding_dimension,
+            KnowledgeChunk.embedding_dimension, KnowledgeChunk.scope_mode,
         ).all()
     finally:
         db.close()
@@ -101,7 +101,7 @@ def retrieve(
         return results
 
     # docs: id/content/source/embedding/category/article/version/effective/expiry/
-    #       contract_types/dimensions/embedding_model/embedding_dimension
+    #       contract_types/dimensions/embedding_model/embedding_dimension/scope_mode
     docs = [tuple(r) for r in rows]
     docs = _filter_docs(
         docs,
@@ -148,7 +148,7 @@ def retrieve(
             "article_number": _doc_value(doc, 5) or _extract_article_number(doc[1]),
             "version": _doc_value(doc, 6),
             "retrieval_mode": "hybrid" if vec_ok else "bm25",
-            "reliable": True,
+            "reliable": _doc_value(doc, 13) in {"global", "scoped"},
         })
 
     mode = "hybrid" if vec_ok else "bm25"
@@ -183,13 +183,16 @@ def _filter_docs(
     categories: list[str] | None = None,
     as_of: date | None = None,
 ) -> list[tuple]:
-    """按分类、合同类型、审查维度和有效期过滤；缺失元数据表示不限制。"""
+    """按分类、作用域、合同类型、审查维度和有效期执行默认拒绝过滤。"""
     wanted_type = contract_type.strip().casefold()
     wanted_dimensions = {value.strip().casefold() for value in (dimensions or []) if value.strip()}
     wanted_categories = {value.strip().casefold() for value in (categories or []) if value.strip()}
     effective_on = as_of or date.today()
     filtered: list[tuple] = []
     for doc in docs:
+        scope_mode = str(_doc_value(doc, 13, "unclassified") or "unclassified").casefold()
+        if scope_mode not in {"global", "scoped"}:
+            continue
         category = str(_doc_value(doc, 4, "") or "").casefold()
         if wanted_categories and category not in wanted_categories:
             continue
@@ -200,11 +203,16 @@ def _filter_docs(
         if expiry_date and expiry_date < effective_on:
             continue
         contract_types = {value.casefold() for value in _json_string_list(_doc_value(doc, 9, "[]"))}
-        if wanted_type and contract_types and wanted_type not in contract_types:
-            continue
         doc_dimensions = {value.casefold() for value in _json_string_list(_doc_value(doc, 10, "[]"))}
-        if wanted_dimensions and doc_dimensions and not wanted_dimensions.intersection(doc_dimensions):
-            continue
+        if scope_mode == "scoped":
+            if not contract_types and not doc_dimensions:
+                continue
+            if contract_types and (not wanted_type or wanted_type not in contract_types):
+                continue
+            if doc_dimensions and (
+                not wanted_dimensions or not wanted_dimensions.intersection(doc_dimensions)
+            ):
+                continue
         filtered.append(doc)
     return filtered
 
@@ -375,7 +383,7 @@ def _keyword_search(query: str, top_k: int) -> list[dict]:
                 "article_number": None,
                 "score": hits,
                 "retrieval_mode": "fallback",
-                "reliable": True,
+                "reliable": False,
             })
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:top_k]

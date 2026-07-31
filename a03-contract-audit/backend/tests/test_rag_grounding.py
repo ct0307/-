@@ -62,6 +62,23 @@ class RagGroundingTests(unittest.TestCase):
         self.assertLessEqual(grounded[0]["confidence"], 50)
         self.assertTrue(grounded[0]["requires_manual_review"])
 
+    def test_source_without_reliable_flag_requires_manual_review(self):
+        risks = [_risk("payment", "payment within 30 days")]
+        source = {
+            "chunk_id": 1,
+            "content": "payment reference",
+            "source": "legacy source",
+            "score": 0.9,
+        }
+
+        with patch.object(auditor, "retrieve", return_value=[source]):
+            grounded = auditor._ground_risks(risks)
+
+        self.assertEqual(grounded[0]["basis"], auditor.NO_RELIABLE_BASIS)
+        self.assertEqual(grounded[0]["rag_sources"], [])
+        self.assertLessEqual(grounded[0]["confidence"], 50)
+        self.assertTrue(grounded[0]["requires_manual_review"])
+
 
 if __name__ == "__main__":
     unittest.main()

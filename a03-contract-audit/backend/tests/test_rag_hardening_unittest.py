@@ -141,6 +141,7 @@ class RagHardeningTests(unittest.TestCase):
 
         self.assertTrue(results)
         self.assertTrue(all(item["source_type"] == "fallback_rule" for item in results))
+        self.assertTrue(all(item["reliable"] is False for item in results))
         self.assertTrue(all("民法典" not in item["source"] for item in results))
 
     def test_article_number_is_extracted_from_chunk_content(self):
@@ -203,18 +204,21 @@ class RagHardeningTests(unittest.TestCase):
             (
                 1, "采购付款规则", "采购制度", "", "rule", "第一条", "2026",
                 date(2026, 1, 1), None, '["采购合同"]', '["payment"]', None, None,
+                "scoped",
             ),
             (
                 2, "劳动争议规则", "劳动制度", "", "rule", "第二条", "2026",
                 date(2026, 1, 1), None, '["劳动合同"]', '["legal"]', None, None,
+                "scoped",
             ),
             (
                 3, "已失效采购规则", "旧制度", "", "rule", "第三条", "2020",
                 date(2020, 1, 1), date(2025, 12, 31), '["采购合同"]', '["payment"]', None, None,
+                "scoped",
             ),
             (
                 4, "无范围限制法规", "通用法规", "", "law", "第四条", None,
-                None, None, "[]", "[]", None, None,
+                None, None, "[]", "[]", None, None, "global",
             ),
         ]
 
@@ -227,6 +231,47 @@ class RagHardeningTests(unittest.TestCase):
         )
 
         self.assertEqual([doc[0] for doc in result], [1, 4])
+
+    def test_filter_docs_rejects_unclassified_and_scoped_without_targets(self):
+        docs = [
+            (1, "unknown", "legacy", "", "law", None, None, None, None,
+             "[]", "[]", None, None, "unclassified"),
+            (2, "missing scope", "template", "", "template", None, None, None, None,
+             "[]", "[]", None, None, "scoped"),
+            (3, "civil code", "controlled law", "", "law", None, None, None, None,
+             "[]", "[]", None, None, "global"),
+        ]
+
+        result = retriever._filter_docs(
+            docs,
+            contract_type="purchase",
+            dimensions=["payment"],
+        )
+
+        self.assertEqual([doc[0] for doc in result], [3])
+
+    def test_filter_docs_rejects_cross_domain_scoped_document(self):
+        docs = [
+            (1, "software acceptance", "software template", "", "template", None, None,
+             None, None, '["software"]', '["acceptance"]', None, None, "scoped"),
+            (2, "purchase payment", "purchase template", "", "template", None, None,
+             None, None, '["purchase"]', '["payment"]', None, None, "scoped"),
+        ]
+
+        result = retriever._filter_docs(
+            docs,
+            contract_type="purchase",
+            dimensions=["payment"],
+        )
+
+        self.assertEqual([doc[0] for doc in result], [2])
+
+    def test_bm25_search_rejects_zero_score_documents(self):
+        docs = [(1, "alpha beta", "source", ""), (2, "gamma delta", "source", "")]
+
+        result = retriever._bm25_search("unrelated", docs)
+
+        self.assertEqual(result, {})
 
     def test_single_long_sentence_is_hard_split(self):
         text = "第一条 " + "甲" * 900 + "\n第二条 " + "乙" * 30
