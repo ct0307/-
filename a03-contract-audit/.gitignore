@@ -38,5 +38,6 @@ logs/
 
 # 本地 Agent 规划与根目录交付副本
 .planning/
+.worktrees/
 /契鉴_项目详细方案.docx
 /契鉴_项目详细方案.pdf
