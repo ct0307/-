@@ -2,6 +2,7 @@
 // 侧栏：品牌印章徽标 + 导航（按角色过滤）+ OpenClaw 状态 + 用户卡片 + 折叠按钮。
 // collapsed 由 MainLayout 通过 provide 注入，双方共享同一个 ref。
 import { computed, inject, nextTick, onMounted, ref, watch, type Ref } from 'vue'
+import { Expand, Fold } from '@element-plus/icons-vue'
 import { useRoute } from 'vue-router'
 import { NAV_ITEMS } from '@/config/nav'
 import { useAuthStore } from '@/stores/auth'

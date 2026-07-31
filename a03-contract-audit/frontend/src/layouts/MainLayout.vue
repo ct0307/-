@@ -3,6 +3,7 @@
 // collapsed 通过 provide 传给 AppSidebar，双方通过同一个 ref 驱动宽度和菜单状态。
 // mobileOpen 用于 ≤768px 时侧栏 overlay 的显隐。
 import { ref, provide, computed, onMounted, onUnmounted, watch } from 'vue'
+import { Menu } from '@element-plus/icons-vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import AppHeader from '@/components/layout/AppHeader.vue'
 

@@ -2,6 +2,7 @@
 // 风险复核抽屉：命中原文 / 依据 / 建议 + 底部操作 + AI 追问对话。
 // 追问上下文绑定当前风险条款，历史在抽屉内保留，关闭/切换风险自动清空。
 import { computed, ref, watch, nextTick } from 'vue'
+import { ChatDotRound } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { RiskOut } from '@/api/types'
 import { chatWithRisk, type ChatMessage } from '@/api/chat'
