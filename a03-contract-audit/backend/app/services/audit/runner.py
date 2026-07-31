@@ -4,6 +4,7 @@
 真实 LLM 接入后，只有 auditor.audit_contract 内部变化，此处不动。
 """
 import json
+import time
 
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,7 @@ def apply_parse_quality(contract: Contract, parsed: DocumentParseResult) -> None
 
 def run_audit(db: Session, contract: Contract, dimensions: list[str] | None = None) -> dict:
     """串行、原子地执行单份合同审查；失败时保留进入审查前的状态。"""
+    total_started = time.perf_counter()
     contract_id = contract.id
     locked_contract = (
         db.query(Contract)
@@ -40,7 +42,21 @@ def run_audit(db: Session, contract: Contract, dimensions: list[str] | None = No
     locked_contract.status = "auditing"
     try:
         result = _run_audit_locked(db, locked_contract, dimensions)
+        timings = result.pop("_timings", {})
+        persist_started = time.perf_counter()
         db.commit()
+        persist_ms = round((time.perf_counter() - persist_started) * 1000)
+        log.info(
+            "audit.performance",
+            contract_id=contract_id,
+            status="success",
+            parse_ms=int(timings.get("parse_ms", 0)),
+            legal_agent_ms=int(timings.get("legal_agent_ms", 0)),
+            finance_agent_ms=int(timings.get("finance_agent_ms", 0)),
+            grounding_ms=int(timings.get("grounding_ms", 0)),
+            persist_ms=persist_ms,
+            total_ms=round((time.perf_counter() - total_started) * 1000),
+        )
         return result
     except BaseException:
         db.rollback()
@@ -66,11 +82,18 @@ def _run_audit_locked(
 ) -> dict:
     """在调用方持有合同锁和事务时执行审查。"""
 
+    parse_started = time.perf_counter()
     parsed = extract_document(contract.storage_path)
+    parse_ms = round((time.perf_counter() - parse_started) * 1000)
     apply_parse_quality(contract, parsed)
     text = parsed.text
     cross_checks: list[dict] = []
     risk_count = 0
+    audit_timings = {
+        "legal_agent_ms": 0,
+        "finance_agent_ms": 0,
+        "grounding_ms": 0,
+    }
 
     if len(text) < 200:
         contract.requires_review = True
@@ -121,6 +144,7 @@ def _run_audit_locked(
         )
         risks = result["risks"]
         cross_checks = result["cross_checks"]
+        audit_timings.update(result.get("timings", {}))
 
         for risk in risks:
             db.add(Risk(
@@ -167,6 +191,7 @@ def _run_audit_locked(
         "requires_review": contract.requires_review,
         "ocr_confidence": contract.ocr_confidence,
         "review_reason": contract.review_reason,
+        "_timings": {"parse_ms": parse_ms, **audit_timings},
     }
 
 

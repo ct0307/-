@@ -162,6 +162,43 @@ def test_run_audit_restores_previous_status_after_failure(monkeypatch, db: Sessi
     assert contract.status == "parsed"
 
 
+def test_run_audit_logs_structured_stage_timings_without_contract_text(monkeypatch, db: Session):
+    contract = _contract(db, "timing.txt")
+    sensitive_text = "SECRET-CONTRACT-BODY" * 20
+    parsed = DocumentParseResult(text=sensitive_text, source="native")
+    events: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    monkeypatch.setattr(
+        runner,
+        "audit_contract",
+        lambda *_args, **_kwargs: {
+            "risks": [],
+            "cross_checks": [],
+            "timings": {
+                "legal_agent_ms": 11,
+                "finance_agent_ms": 13,
+                "grounding_ms": 7,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        runner.log,
+        "info",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    run_audit(db, contract)
+
+    fields = next(fields for event, fields in events if event == "audit.performance")
+    assert fields["contract_id"] == contract.id
+    assert fields["legal_agent_ms"] == 11
+    assert fields["finance_agent_ms"] == 13
+    assert fields["grounding_ms"] == 7
+    assert all(fields[name] >= 0 for name in ("parse_ms", "persist_ms", "total_ms"))
+    assert sensitive_text not in repr(fields)
+
+
 def test_llm_call_log_joins_caller_transaction_without_committing():
     class FakeSession:
         def __init__(self):

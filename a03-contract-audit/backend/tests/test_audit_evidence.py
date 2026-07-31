@@ -61,3 +61,16 @@ def test_selected_dimensions_are_enforced_in_agent_prompt(monkeypatch):
     )
 
     assert "本次仅审查以下维度：保密条款审查" in captured[0]
+
+
+def test_auditor_reports_agent_and_grounding_timings(monkeypatch):
+    monkeypatch.setattr(auditor, "_agent_audit", lambda *_args, **_kwargs: [])
+
+    result = auditor.audit_contract({}, "sensitive contract body", contract_id=42)
+
+    assert set(result["timings"]) == {
+        "legal_agent_ms",
+        "finance_agent_ms",
+        "grounding_ms",
+    }
+    assert all(isinstance(value, int) and value >= 0 for value in result["timings"].values())

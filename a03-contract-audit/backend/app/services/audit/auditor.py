@@ -21,6 +21,7 @@
 """
 import json
 import re
+import time
 from typing import TYPE_CHECKING
 
 from app.core.config import settings
@@ -116,20 +117,30 @@ def audit_contract(
     """多智能体主从协同审查。dimensions 为空/None 时全量审查。"""
     all_risks: list[dict] = []
     shared_context: dict = {"elements": elements}
+    timings = {
+        "legal_agent_ms": 0,
+        "finance_agent_ms": 0,
+        "grounding_ms": 0,
+    }
 
     for role in _AGENT_ORDER:
         if dimensions and not set(dimensions).intersection(_ROLE_DIMENSIONS[role]):
             log.info("audit.agent_skipped", agent=role, dimensions=dimensions)
             continue
+        role_started = time.perf_counter()
         try:
             risks = _agent_audit(
                 role, elements, contract_text, shared_context,
                 db=db, contract_id=contract_id,
                 dimensions=dimensions or [],
                 contract_type=contract_type,
+                timings=timings,
             )
             log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(risks))
         except (LLMError, ValueError) as exc:
+            timings[f"{role}_agent_ms"] = round(
+                (time.perf_counter() - role_started) * 1000
+            )
             log.warning("audit.agent_fallback", agent=role, error=str(exc)[:120])
             # 不写假风险数据进台账——用一条系统提示风险标明 Agent 降级，
             # 让法务知道该 Agent 本次未能审查，需要人工补充。
@@ -154,7 +165,7 @@ def audit_contract(
         r["tier"] = classify_tier(r, conflict_categories)
 
     log.info("audit.done", total=len(all_risks), conflicts=len(cross_checks), agents=_AGENT_ORDER)
-    return {"risks": all_risks, "cross_checks": cross_checks}
+    return {"risks": all_risks, "cross_checks": cross_checks, "timings": timings}
 
 
 def _summarize_for_context(role: str, risks: list[dict], elements: dict) -> dict:
@@ -207,10 +218,12 @@ def _agent_audit(
     contract_id: int | None = None,
     dimensions: list[str] | None = None,
     contract_type: str = "",
+    timings: dict[str, int] | None = None,
 ) -> list[dict]:
     """单个 Agent 审查：定向 RAG 依据 + 角色 prompt（含上游共享上下文）→ chat → 解析。
     db/contract_id 可选，仅用于写 LLM 调用日志，不影响审查主链路。
     """
+    agent_started = time.perf_counter()
     cfg = _AGENTS[role]
     dimension_instruction = _dimension_instruction(dimensions)
 
@@ -278,11 +291,21 @@ def _agent_audit(
     _record_llm_call(db, contract_id, agent=role, resp=resp, mode="llm")
     raw = _parse_risk_json(resp.text)
     normalized = [_normalize(r, role) for r in raw]
-    return _ground_risks(
+    if timings is not None:
+        timings[f"{role}_agent_ms"] = round(
+            (time.perf_counter() - agent_started) * 1000
+        )
+    grounding_started = time.perf_counter()
+    grounded = _ground_risks(
         normalized,
         contract_type=contract_type,
         dimensions=selected_dimensions,
     )
+    if timings is not None:
+        timings["grounding_ms"] += round(
+            (time.perf_counter() - grounding_started) * 1000
+        )
+    return grounded
 
 
 def _ground_risks(
