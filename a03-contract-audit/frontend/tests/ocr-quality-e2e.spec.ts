@@ -35,6 +35,7 @@ const risks = [{
 }]
 
 test('renders low-confidence OCR review state without mobile overflow', async ({ page }) => {
+  let auditRequestBody: Record<string, unknown> | null = null
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname
@@ -63,7 +64,7 @@ test('renders low-confidence OCR review state without mobile overflow', async ({
       body = {
         id: 1,
         filename: 'scan.pdf',
-        contract_type: '软件开发外包合同',
+        contract_type: '',
         status: 'uploaded',
         created_at: '2026-07-26T10:00:00Z',
         requires_review: false,
@@ -73,6 +74,7 @@ test('renders low-confidence OCR review state without mobile overflow', async ({
     } else if (path.endsWith('/contracts/1/parse')) {
       body = parseResult
     } else if (path.endsWith('/contracts/1/audit')) {
+      auditRequestBody = route.request().postDataJSON()
       body = auditResult
     } else if (path.endsWith('/contracts/1/risks')) {
       body = risks
@@ -95,12 +97,19 @@ test('renders low-confidence OCR review state without mobile overflow', async ({
   await page.goto(`${baseUrl}/audit`)
   await page.waitForLoadState('networkidle')
 
+  const contractTypeSelect = page.locator('.config-panel .el-select').first()
+  await expect(contractTypeSelect.locator('input')).toHaveValue('')
+
   await page.locator('input[type="file"]').first().setInputFiles({
     name: 'scan.pdf',
     mimeType: 'application/pdf',
     buffer: Buffer.from('%PDF-1.4 mocked scan'),
   })
+  await contractTypeSelect.click()
+  await page.getByRole('option', { name: '软件开发外包合同' }).click()
   await page.getByRole('button', { name: '启动合规审查' }).click()
+
+  expect(auditRequestBody).toMatchObject({ contract_type: '软件开发外包合同' })
 
   const reviewAlert = page.getByRole('alert').filter({ hasText: '扫描件需人工复核' })
   await expect(reviewAlert).toContainText('扫描件需人工复核')
@@ -122,6 +131,54 @@ test('renders low-confidence OCR review state without mobile overflow', async ({
     path: test.info().outputPath('ocr-review-mobile.png'),
     fullPage: true,
   })
+})
+
+test('requires confirmation when selected type conflicts with the material', async ({ page }) => {
+  let auditCalls = 0
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    let body: unknown = []
+    if (path.endsWith('/auth/login')) {
+      body = {
+        access_token: 'test-token', token_type: 'bearer', role: 'legal',
+        username: 'legal', department: '法务部',
+      }
+    } else if (path.endsWith('/runtime/status')) {
+      body = { status: 'online', checked_at: '2026-07-31T10:00:00Z' }
+    } else if (path.endsWith('/contracts/upload')) {
+      body = {
+        id: 1, filename: '设备采购合同.pdf', contract_type: '', status: 'uploaded',
+        created_at: '2026-07-31T10:00:00Z', requires_review: false,
+        ocr_confidence: null, review_reason: null,
+      }
+    } else if (path.endsWith('/contracts/1/parse')) {
+      body = { ...parseResult, elements: { contract_name: '设备采购合同' } }
+    } else if (path.endsWith('/contracts/1/audit')) {
+      auditCalls += 1
+      body = { ...auditResult, risk_count: 0 }
+    } else if (path.endsWith('/contracts/1/risks')) {
+      body = []
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+  })
+
+  await page.goto(`${baseUrl}/login`)
+  await page.locator('input[name="username"]').fill('legal')
+  await page.locator('input[name="password"]').fill('legal123')
+  await page.getByRole('button', { name: '登 录' }).click()
+  await page.goto(`${baseUrl}/audit`)
+  await page.locator('input[type="file"]').first().setInputFiles({
+    name: '设备采购合同.pdf',
+    mimeType: 'application/pdf',
+    buffer: Buffer.from('%PDF-1.4 mocked purchase contract'),
+  })
+  const contractTypeSelect = page.locator('.config-panel .el-select').first()
+  await contractTypeSelect.click()
+  await page.getByRole('option', { name: '软件开发外包合同' }).click()
+  await page.getByRole('button', { name: '启动合规审查' }).click()
+
+  await expect(page.getByRole('dialog', { name: '合同类型待确认' })).toBeVisible()
+  expect(auditCalls).toBe(0)
 })
 
 test('filters review-required contracts in history without mobile overflow', async ({ page }) => {

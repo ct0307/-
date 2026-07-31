@@ -66,13 +66,28 @@ def test_create_batch_persists_fifty_items(monkeypatch, tmp_path):
     assert len(list(tmp_path.iterdir())) == 50
 
 
+def test_create_batch_rejects_empty_contract_type_before_writing_files(monkeypatch, tmp_path):
+    db = _session()
+    user = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+
+    with pytest.raises(HTTPException) as exc_info:
+        batches.create_batch(_files(1), "missing-type", " ", [], db, user)
+
+    assert exc_info.value.status_code == 422
+    assert db.query(Contract).count() == 0
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_create_batch_persists_dimensions_for_recovery(monkeypatch, tmp_path):
     db = _session()
     user = _user(db)
     monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
     monkeypatch.setattr(batches, "_dispatch_item", lambda _item, _dimensions: "task-1")
 
-    result = batches.create_batch(_files(1), "recoverable", "", ["legal", "payment"], db, user)
+    result = batches.create_batch(
+        _files(1), "recoverable", "采购合同", ["legal", "payment"], db, user
+    )
     saved = db.get(AuditBatch, result.id)
 
     assert saved is not None
@@ -144,8 +159,8 @@ def test_create_batch_is_idempotent_for_same_owner(monkeypatch, tmp_path):
     monkeypatch.setattr(batches, "_dispatch_item", lambda _item, _dimensions: "task-1")
     files = _files(1)
 
-    first = batches.create_batch(files, "same-request", "", [], db, user)
-    second = batches.create_batch(files, "same-request", "", [], db, user)
+    first = batches.create_batch(files, "same-request", "采购合同", [], db, user)
+    second = batches.create_batch(files, "same-request", "采购合同", [], db, user)
 
     assert second.id == first.id
     assert db.query(AuditBatch).count() == 1
@@ -184,7 +199,7 @@ def test_create_batch_cleans_files_when_database_flush_fails(monkeypatch, tmp_pa
     monkeypatch.setattr(db, "flush", fail_after_first_file)
 
     with pytest.raises(HTTPException) as exc_info:
-        batches.create_batch(_files(2), "rollback", "", [], db, user)
+        batches.create_batch(_files(2), "rollback", "采购合同", [], db, user)
 
     assert exc_info.value.status_code == 500
     assert list(tmp_path.iterdir()) == []

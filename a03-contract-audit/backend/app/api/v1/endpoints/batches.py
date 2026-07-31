@@ -95,6 +95,9 @@ def create_batch(
         return BatchOut.model_validate(existing)
 
     uploads = _validate_uploads(files)
+    confirmed_type = contract_type.strip()
+    if not confirmed_type:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "请先确认合同类型")
     os.makedirs(settings.storage_path, exist_ok=True)
     created_paths: list[str] = []
     try:
@@ -117,7 +120,7 @@ def create_batch(
             contract = Contract(
                 filename=upload.filename,
                 storage_path=stored_path,
-                contract_type=contract_type,
+                contract_type=confirmed_type,
                 department=user.department,
                 status="uploaded",
                 uploaded_by=user.id,

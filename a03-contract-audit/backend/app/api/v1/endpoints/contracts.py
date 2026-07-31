@@ -118,6 +118,9 @@ def batch_upload_contracts(
     """
     if len(files) > 200:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次最多上传 200 份合同")
+    confirmed_type = contract_type.strip()
+    if not confirmed_type:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "请先确认合同类型")
 
     from app.core.crypto import encrypt_bytes, is_encryption_enabled
     encrypted_flag = is_encryption_enabled()
@@ -144,7 +147,7 @@ def batch_upload_contracts(
             contract = Contract(
                 filename=fname,
                 storage_path=stored_path,
-                contract_type=contract_type,
+                contract_type=confirmed_type,
                 department=user.department,
                 status="uploaded",
                 uploaded_by=user.id,
@@ -257,6 +260,11 @@ def audit_contract_endpoint(
     user: User = Depends(require_roles("legal", "finance")),
 ) -> AuditResponse:
     contract = _get_contract(db, contract_id, user)
+    confirmed_type = body.contract_type.strip()
+    if not confirmed_type:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "请先确认合同类型")
+    contract.contract_type = confirmed_type
+    db.commit()
     dimensions = body.dimensions or []
 
     if settings.AUDIT_ASYNC:

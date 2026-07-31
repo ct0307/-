@@ -29,7 +29,7 @@ const route = useRoute()
 const router = useRouter()
 
 const department = ref('采购中心') // 保留兼容（批量上传可能引用），实际展示改用 auth.department
-const contractType = ref('软件开发外包合同')
+const contractType = ref('')
 const dimExpanded = ref(false) // 审查维度折叠面板，默认收起
 
 // 降级默认值（接口失败时兜底）
@@ -38,6 +38,29 @@ const _DEFAULT_CTYPES = ['软件开发外包合同', '技术服务合同', '采�
 
 const departmentOptions = ref<string[]>(_DEFAULT_DEPTS)
 const contractTypeOptions = ref<string[]>(_DEFAULT_CTYPES)
+
+const _TYPE_HINTS = [
+  { family: 'purchase', label: '采购合同', keywords: ['采购', '设备购置', '供货'] },
+  { family: 'software', label: '软件开发外包合同', keywords: ['软件开发', '源代码', '系统开发'] },
+  { family: 'labor', label: '劳动合同', keywords: ['劳动合同', '劳动关系', '试用期'] },
+  { family: 'lease', label: '租赁合同', keywords: ['租赁', '出租方', '承租方'] },
+] as const
+
+function contractTypeFamily(value: string) {
+  const matched = _TYPE_HINTS.find((item) => item.keywords.some((keyword) => value.includes(keyword)))
+  return matched?.family ?? value
+}
+
+const suggestedContractType = computed(() => {
+  const material = `${session.filename} ${JSON.stringify(session.elements ?? {})}`
+  return _TYPE_HINTS.find((item) => item.keywords.some((keyword) => material.includes(keyword)))?.label ?? ''
+})
+
+const hasContractTypeConflict = computed(() => Boolean(
+  suggestedContractType.value
+  && contractType.value
+  && contractTypeFamily(suggestedContractType.value) !== contractTypeFamily(contractType.value),
+))
 
 // mount 时从后端拉取管理员维护的选项列表；失败时静默降级到内置默认值
 onMounted(async () => {
@@ -84,9 +107,10 @@ function onFileChange(uploadFile: { raw?: UploadRawFile }) {
 }
 
 async function onFile(file: UploadRawFile) {
+  contractType.value = ''
   pendingFilename.value = file.name // 立即显示文件名，不等后端返回
   try {
-    await session.uploadAndParse(file, contractType.value)
+    await session.uploadAndParse(file)
     pendingFilename.value = '' // 后端已返回 session.filename，清除 pending 态
     ElMessage.success('上传并解析完成')
   } catch {
@@ -104,9 +128,31 @@ async function onAudit() {
     ElMessage.warning('请先上传合同')
     return
   }
+  if (!contractType.value) {
+    ElMessage.warning('请先确认合同类型')
+    return
+  }
+  if (hasContractTypeConflict.value) {
+    try {
+      await ElMessageBox.confirm(
+        `材料内容更像“${suggestedContractType.value}”，当前选择为“${contractType.value}”。请核对后再继续。`,
+        '合同类型待确认',
+        {
+          type: 'warning',
+          confirmButtonText: '确认当前类型并继续',
+          cancelButtonText: '返回修改',
+        },
+      )
+    } catch {
+      return
+    }
+  }
   auditState.value = 'running'
   try {
-    await session.runAudit(dimensions.value.filter(d => d.on).map(d => d.key))
+    await session.runAudit(
+      contractType.value,
+      dimensions.value.filter(d => d.on).map(d => d.key),
+    )
     auditState.value = 'done'
     const n = session.riskCount
     ElMessage.success(`审查完成，检出 ${n} 条风险`)
@@ -379,10 +425,17 @@ function closeBatch() {
       <el-card shadow="never" class="config-panel">
         <template #header><span class="panel-title">合同信息 &amp; 审查配置</span></template>
         <div class="form-grid">
-          <label>合同类型
-            <el-select v-model="contractType" size="default" filterable>
+          <label>合同类型 <span class="required-mark">*</span>
+            <el-select v-model="contractType" size="default" filterable placeholder="请选择并确认合同类型">
               <el-option v-for="t in contractTypeOptions" :key="t" :label="t" :value="t" />
             </el-select>
+            <span v-if="!contractType" class="field-error">审查前必须确认合同类型</span>
+            <span v-else-if="hasContractTypeConflict" class="field-warning">
+              材料建议类型：{{ suggestedContractType }}，请核对
+            </span>
+            <span v-else-if="suggestedContractType" class="field-hint">
+              材料建议类型：{{ suggestedContractType }}
+            </span>
           </label>
           <label>归属部门
             <div class="dept-readonly">
@@ -416,7 +469,7 @@ function closeBatch() {
           type="primary"
           class="run-btn"
           :loading="session.busy"
-          :disabled="session.step < 1 || session.busy"
+          :disabled="session.step < 1 || session.busy || !contractType"
           @click="onAudit"
         >
           <el-icon><MagicStick /></el-icon>启动合规审查
@@ -626,7 +679,7 @@ function closeBatch() {
           v-if="!batchStore.batch"
           type="primary"
           :loading="batchStore.loading"
-          :disabled="!batchItems.length"
+          :disabled="!batchItems.length || !contractType"
           @click="startBatchUpload"
         >
           提交审查（{{ batchItems.length }} 份）
@@ -681,6 +734,22 @@ function closeBatch() {
   gap: 6px;
   font-size: 13px;
   color: var(--ivory-dim);
+}
+.required-mark,
+.field-error {
+  color: var(--seal);
+}
+.field-error,
+.field-warning,
+.field-hint {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.field-warning {
+  color: var(--amber);
+}
+.field-hint {
+  color: var(--muted);
 }
 /* 归属部门只读展示 */
 .dept-readonly {

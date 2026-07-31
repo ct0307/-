@@ -22,9 +22,13 @@ export function parseContract(id: number): Promise<ParseResult> {
   return client.post(`/contracts/${id}/parse`)
 }
 
-export function auditContract(id: number, dimensions?: string[], signal?: AbortSignal): Promise<AuditResult> {
-  // dimensions 为空数组或 undefined 时不传，后端默认全量审查
-  const body = dimensions && dimensions.length ? { dimensions } : undefined
+export function auditContract(
+  id: number,
+  contractType: string,
+  dimensions?: string[],
+  signal?: AbortSignal,
+): Promise<AuditResult> {
+  const body = { contract_type: contractType, dimensions: dimensions ?? [] }
   return client.post(`/contracts/${id}/audit`, body, { signal, timeout: 180_000 })
 }
 

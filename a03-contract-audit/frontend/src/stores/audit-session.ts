@@ -71,12 +71,17 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
 
   let _auditAbort: AbortController | null = null
 
-  async function runAudit(dimensions?: string[]) {
+  async function runAudit(contractType: string, dimensions?: string[]) {
     if (!contractId.value) return
     busy.value = true
     _auditAbort = new AbortController()
     try {
-      const initial = await auditContract(contractId.value, dimensions, _auditAbort.signal)
+      const initial = await auditContract(
+        contractId.value,
+        contractType,
+        dimensions,
+        _auditAbort.signal,
+      )
       const res = initial.status === 'auditing'
         ? await waitForAuditTerminal(
             (signal) => getAuditStatus(contractId.value!, signal),

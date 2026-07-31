@@ -48,7 +48,8 @@ class CrossCheckOut(BaseModel):
 
 
 class AuditRequest(BaseModel):
-    """审查触发请求：可选维度列表，空/不传表示全量审查。"""
+    """审查触发请求：合同类型必须由用户确认，维度为空表示全量审查。"""
+    contract_type: str = ""
     dimensions: list[str] = []
 
 
