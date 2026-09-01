@@ -228,6 +228,9 @@ def test_local_services_reject_an_occupied_port(tmp_path):
 def test_local_services_stop_only_recorded_processes(monkeypatch, tmp_path):
     commands = []
 
+    class Completed:
+        returncode = 0
+
     class Process:
         def __init__(self, pid):
             self.pid = pid
@@ -236,11 +239,11 @@ def test_local_services_stop_only_recorded_processes(monkeypatch, tmp_path):
             return None
 
     monkeypatch.setattr(quality_gate.os, "name", "nt")
-    monkeypatch.setattr(
-        quality_gate.subprocess,
-        "run",
-        lambda argv, **kwargs: commands.append((tuple(argv), kwargs)),
-    )
+    def fake_run(argv, **kwargs):
+        commands.append((tuple(argv), kwargs))
+        return Completed()
+
+    monkeypatch.setattr(quality_gate.subprocess, "run", fake_run)
     manager = quality_gate.LocalServiceManager(
         make_config(tmp_path, include_e2e=True)
     )
@@ -252,6 +255,31 @@ def test_local_services_stop_only_recorded_processes(monkeypatch, tmp_path):
         ("taskkill", "/PID", "202", "/T", "/F"),
         ("taskkill", "/PID", "101", "/T", "/F"),
     ]
+
+
+def test_local_services_report_failed_taskkill(monkeypatch, tmp_path):
+    class Process:
+        pid = 303
+
+        def poll(self):
+            return None
+
+    class Completed:
+        returncode = 1
+
+    monkeypatch.setattr(quality_gate.os, "name", "nt")
+    monkeypatch.setattr(
+        quality_gate.subprocess,
+        "run",
+        lambda argv, **kwargs: Completed(),
+    )
+    manager = quality_gate.LocalServiceManager(
+        make_config(tmp_path, include_e2e=True)
+    )
+    manager.processes = [Process()]
+
+    with pytest.raises(quality_gate.GateError, match="303"):
+        manager.stop()
 
 
 def test_parse_args_accepts_include_e2e():

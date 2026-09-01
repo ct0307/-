@@ -199,16 +199,19 @@ class LocalServiceManager:
             raise GateError(f"本地服务健康检查超时：{', '.join(sorted(pending))}")
 
     def stop(self) -> None:
+        failed_pids: list[int] = []
         for process in reversed(self.processes):
             if process.poll() is not None:
                 continue
             if os.name == "nt":
-                subprocess.run(
+                completed = subprocess.run(
                     ("taskkill", "/PID", str(process.pid), "/T", "/F"),
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+                if completed.returncode != 0:
+                    failed_pids.append(process.pid)
             else:  # pragma: no cover - 当前交付环境为 Windows
                 process.terminate()
                 try:
@@ -217,6 +220,9 @@ class LocalServiceManager:
                     process.kill()
                     process.wait(timeout=5)
         self.processes.clear()
+        if failed_pids:
+            failed = ", ".join(str(pid) for pid in failed_pids)
+            raise GateError(f"无法回收本地服务进程：{failed}")
 
 
 def default_steps(config: GateConfig) -> tuple[Step, ...]:
