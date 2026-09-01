@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import re
 import time
 from typing import Any, Literal, Mapping, Protocol, Sequence
 
@@ -18,6 +19,9 @@ from evaluation.benchmark import (
     summarize_benchmark,
 )
 from evaluation.evidence import EvidenceWriter
+
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class TargetUnavailable(RuntimeError):
@@ -210,6 +214,10 @@ def load_benchmark_manifest(path: Path) -> BenchmarkDataset:
     concurrency = payload.get("concurrency")
     if not all((model, model_hash, prompt_version, output_hash)):
         raise ValueError("基准清单缺少模型、提示词或输出 Schema 标识")
+    if not _SHA256.fullmatch(model_hash):
+        raise ValueError("model_sha256 必须是 64 位小写十六进制")
+    if not _SHA256.fullmatch(output_hash):
+        raise ValueError("output_schema_sha256 必须是 64 位小写十六进制")
     if not isinstance(context_length, int) or context_length <= 0:
         raise ValueError("context_length 必须是正整数")
     if not isinstance(concurrency, int) or concurrency <= 0:

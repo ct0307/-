@@ -26,6 +26,7 @@ from evaluation.benchmark_runner import (
 )
 from evaluation.elements import evaluate_dataset
 from evaluation.evidence import EvidenceWriter, sha256_file
+from evaluation.report import build_report
 
 
 EXIT_OK = 0
@@ -287,6 +288,16 @@ def _run_benchmark(args: argparse.Namespace) -> int:
     return EXIT_OK if comparison.status == "passed" else EXIT_FAILED
 
 
+def _run_report(args: argparse.Namespace) -> int:
+    result = build_report(args.run_dir)
+    return {
+        "passed": EXIT_OK,
+        "failed": EXIT_FAILED,
+        "blocked": EXIT_BLOCKED,
+        "error": EXIT_ERROR,
+    }[result.status]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="A03 硬指标证据流水线")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -314,6 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
     benchmark.add_argument("--run-id")
     benchmark.add_argument("--request-timeout", type=float, default=120)
+    report = subcommands.add_parser("report", help="校验证据并生成 Markdown 报告")
+    report.add_argument("--run-dir", type=Path, required=True)
     return parser
 
 
@@ -326,6 +339,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_batch(args)
         if args.command == "benchmark":
             return _run_benchmark(args)
+        if args.command == "report":
+            return _run_report(args)
         raise ValueError(f"未知子命令: {args.command}")
     except (FileExistsError, OSError, ValueError) as exc:
         print(f"输入无效: {exc}", file=sys.stderr)

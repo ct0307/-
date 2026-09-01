@@ -134,12 +134,12 @@ def _write_benchmark_manifest(tmp_path: Path) -> Path:
             {
                 "schema_version": "1.0",
                 "model": "qwen-test",
-                "model_sha256": "model-hash",
+                "model_sha256": "d" * 64,
                 "prompt_version": "prompt-v1",
                 "dataset_sha256": dataset_sha256(cases),
                 "context_length": 8192,
                 "concurrency": 1,
-                "output_schema_sha256": "schema-hash",
+                "output_schema_sha256": "e" * 64,
                 "warmup_runs": 3,
                 "measured_runs": 5,
                 "cases": [
@@ -295,6 +295,7 @@ def test_batch_command_uses_gateway_and_writes_passed_manifest(monkeypatch, tmp_
     assert gateway.submission_sizes == [50, 1, 1]
     assert manifest["status"] == "passed"
     assert manifest["modules"] == {"batch": "passed"}
+    assert main(["report", "--run-dir", str(tmp_path / "runs" / "batch-pass")]) == EXIT_OK
 
 
 def test_batch_command_is_blocked_when_token_is_missing(monkeypatch, tmp_path):
@@ -355,6 +356,10 @@ def test_benchmark_command_compares_two_targets_and_writes_passed_manifest(
     assert [len(target.calls) for target in _CliBenchmarkTarget.instances] == [16, 16]
     assert manifest["status"] == "passed"
     assert manifest["modules"] == {"benchmark": "passed"}
+    assert (
+        main(["report", "--run-dir", str(tmp_path / "runs" / "benchmark-pass")])
+        == EXIT_OK
+    )
 
 
 def test_benchmark_command_is_blocked_when_key_is_missing(monkeypatch, tmp_path):
@@ -385,3 +390,39 @@ def test_benchmark_command_is_blocked_when_key_is_missing(monkeypatch, tmp_path)
     assert code == EXIT_BLOCKED
     assert manifest["status"] == "blocked"
     assert manifest["modules"] == {"benchmark": "blocked"}
+
+
+def test_report_command_builds_report_for_complete_run(tmp_path):
+    gold = _gold_row()
+    assert (
+        _invoke_elements(
+            tmp_path,
+            gold=gold,
+            prediction=gold["gold"],
+            run_id="report-source",
+        )
+        == EXIT_OK
+    )
+    run_dir = tmp_path / "runs" / "report-source"
+
+    code = main(["report", "--run-dir", str(run_dir)])
+
+    assert code == EXIT_OK
+    assert (run_dir / "report.md").is_file()
+
+
+def test_report_command_returns_invalid_for_missing_event_stream(tmp_path):
+    gold = _gold_row()
+    _invoke_elements(
+        tmp_path,
+        gold=gold,
+        prediction=gold["gold"],
+        run_id="broken-report-source",
+    )
+    run_dir = tmp_path / "runs" / "broken-report-source"
+    (run_dir / "elements.jsonl").unlink()
+
+    code = main(["report", "--run-dir", str(run_dir)])
+
+    assert code == EXIT_INVALID
+    assert not (run_dir / "report.md").exists()

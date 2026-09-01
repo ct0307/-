@@ -44,12 +44,12 @@ def _config(target: str, cases: tuple[BenchmarkCase, ...] | None = None) -> Benc
     selected = cases or _cases()
     return BenchmarkConfig(
         target=target,
-        model_sha256="model-hash",
+        model_sha256="d" * 64,
         prompt_version="prompt-v1",
         dataset_sha256=dataset_sha256(selected),
         context_length=8192,
         concurrency=1,
-        output_schema_sha256="schema-hash",
+        output_schema_sha256="e" * 64,
     )
 
 
@@ -77,12 +77,12 @@ def _write_manifest(tmp_path, *, dataset_hash: str | None = None):
             {
                 "schema_version": "1.0",
                 "model": "qwen-test",
-                "model_sha256": "model-hash",
+                "model_sha256": "d" * 64,
                 "prompt_version": "prompt-v1",
                 "dataset_sha256": dataset_hash or dataset_sha256(cases),
                 "context_length": 8192,
                 "concurrency": 1,
-                "output_schema_sha256": "schema-hash",
+                "output_schema_sha256": "e" * 64,
                 "warmup_runs": 3,
                 "measured_runs": 5,
                 "cases": [
@@ -147,6 +147,16 @@ def test_manifest_rejects_round_counts_other_than_three_and_five(tmp_path):
 def test_manifest_rejects_dataset_hash_mismatch(tmp_path):
     with pytest.raises(ValueError, match="dataset_sha256"):
         load_benchmark_manifest(_write_manifest(tmp_path, dataset_hash="wrong"))
+
+
+def test_manifest_rejects_invalid_model_hash(tmp_path):
+    path = _write_manifest(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["model_sha256"] = "not-a-hash"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="model_sha256"):
+        load_benchmark_manifest(path)
 
 
 def test_comparison_passes_only_when_openclaw_is_not_less_reliable_and_faster():
