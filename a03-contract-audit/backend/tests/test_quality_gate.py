@@ -4,8 +4,10 @@ import importlib.util
 import json
 import socket
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -250,3 +252,56 @@ def test_local_services_stop_only_recorded_processes(monkeypatch, tmp_path):
         ("taskkill", "/PID", "202", "/T", "/F"),
         ("taskkill", "/PID", "101", "/T", "/F"),
     ]
+
+
+def test_parse_args_accepts_include_e2e():
+    assert quality_gate.parse_args(["--include-e2e"]).include_e2e is True
+
+
+def test_preflight_reports_missing_backend_python(tmp_path):
+    with pytest.raises(quality_gate.GateError, match="后端虚拟环境 Python"):
+        quality_gate.validate_environment(make_config(tmp_path))
+
+
+def test_subprocess_runner_removes_overridden_environment(monkeypatch, tmp_path):
+    captured = {}
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = tuple(argv)
+        captured.update(kwargs)
+        return Completed()
+
+    monkeypatch.setenv("E2E_BASE_URL", "http://stale.example")
+    monkeypatch.setattr(quality_gate.subprocess, "run", fake_run)
+    runner = quality_gate.SubprocessRunner(monotonic=lambda: 10.0)
+
+    result = runner.run(
+        quality_gate.Step(
+            "frontend",
+            ("npm.cmd", "test"),
+            tmp_path,
+            {"E2E_BASE_URL": None},
+        )
+    )
+
+    assert result.exit_code == 0
+    assert "E2E_BASE_URL" not in captured["env"]
+    assert captured["cwd"] == tmp_path
+    assert captured["check"] is False
+
+
+def test_powershell_entry_forwards_switch_and_exit_code():
+    script = (PROJECT_ROOT / "scripts/quality_gate.ps1").read_text(encoding="utf-8")
+    assert "param([switch]$IncludeE2E)" in script
+    assert "backend\\.venv\\Scripts\\python.exe" in script
+    assert "--include-e2e" in script
+    assert "exit $LASTEXITCODE" in script
+
+
+def test_report_timestamps_are_normalized_to_utc():
+    local_time = datetime(2026, 9, 1, 20, 0, tzinfo=timezone(timedelta(hours=8)))
+
+    assert quality_gate._iso_utc(local_time) == "2026-09-01T12:00:00Z"

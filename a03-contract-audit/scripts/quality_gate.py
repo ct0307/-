@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, Mapping, Protocol
 
@@ -54,6 +56,34 @@ class CommandRunner(Protocol):
     def run(self, step: Step) -> StepResult: ...
 
 
+class SubprocessRunner:
+    def __init__(self, *, monotonic: Callable[[], float] = time.monotonic) -> None:
+        self.monotonic = monotonic
+
+    def run(self, step: Step) -> StepResult:
+        print(f"\n[质量门禁] 开始：{step.name}")
+        environment = os.environ.copy()
+        for key, value in step.env_overrides.items():
+            if value is None:
+                environment.pop(key, None)
+            else:
+                environment[key] = value
+        started = self.monotonic()
+        completed = subprocess.run(
+            step.argv,
+            cwd=step.cwd,
+            env=environment,
+            check=False,
+        )
+        duration = self.monotonic() - started
+        status = "passed" if completed.returncode == 0 else "failed"
+        print(
+            f"[质量门禁] 结束：{step.name}，状态={status}，"
+            f"退出码={completed.returncode}，耗时={duration:.2f}s"
+        )
+        return StepResult(step.name, status, completed.returncode, duration)
+
+
 class ServiceManager(Protocol):
     def ensure_ports_free(self) -> None: ...
 
@@ -66,6 +96,21 @@ class ServiceManager(Protocol):
 
 class GateError(RuntimeError):
     """质量门禁的环境或编排错误。"""
+
+
+def validate_environment(config: GateConfig) -> None:
+    if not config.python_executable.is_file():
+        raise GateError(f"未找到后端虚拟环境 Python：{config.python_executable}")
+    required_directories = (
+        (config.project_root / "backend", "后端目录"),
+        (config.project_root / "frontend", "前端目录"),
+        (config.project_root / "frontend/node_modules", "前端 node_modules"),
+    )
+    for path, label in required_directories:
+        if not path.is_dir():
+            raise GateError(f"未找到{label}：{path}")
+    if not shutil.which(config.npm_executable):
+        raise GateError(f"未找到 npm 命令：{config.npm_executable}")
 
 
 class LocalServiceManager:
@@ -263,7 +308,7 @@ def _git_commit(project_root: Path) -> str:
 
 
 def _iso_utc(value: datetime) -> str:
-    return value.isoformat().replace("+00:00", "Z")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _write_summary(
@@ -302,3 +347,39 @@ def _write_summary(
         encoding="utf-8",
     )
     temporary.replace(target)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="运行本地一键质量门禁")
+    parser.add_argument(
+        "--include-e2e",
+        action="store_true",
+        help="启动本地前后端并执行服务型 E2E",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    project_root = Path(__file__).resolve().parents[1]
+    config = GateConfig(
+        project_root=project_root,
+        python_executable=project_root / "backend/.venv/Scripts/python.exe",
+        npm_executable=shutil.which("npm.cmd") or "npm.cmd",
+        include_e2e=args.include_e2e,
+    )
+    try:
+        validate_environment(config)
+    except GateError as exc:
+        print(f"质量门禁环境错误：{exc}")
+        return 3
+    return run_gate(
+        config,
+        runner=SubprocessRunner(),
+        services=LocalServiceManager(config),
+        clock=lambda: datetime.now(timezone.utc),
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
