@@ -6,21 +6,18 @@ import hashlib
 import json
 import re
 import unicodedata
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+
+from jsonschema import Draft202012Validator
 
 
 SCALAR_FIELDS = ("party_a", "party_b", "subject", "amount", "duration")
 MULTIVALUE_FIELDS = ("payment_terms",)
 REQUIRED_GOLD_FIELDS = SCALAR_FIELDS + MULTIVALUE_FIELDS
-REQUIRED_RECORD_FIELDS = (
-    "case_id",
-    "file",
-    "contract_type",
-    "document_kind",
-    "gold",
-    "reviewer",
-    "version",
-)
+_SCHEMA_PATH = Path(__file__).with_name("schema.json")
+_GOLD_SCHEMA = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
+_GOLD_VALIDATOR = Draft202012Validator(_GOLD_SCHEMA)
 
 
 def normalize_scalar(value: Any) -> str:
@@ -63,14 +60,15 @@ def multivalue_metrics(gold: Any, predicted: Any) -> dict[str, float]:
 
 
 def validate_gold_record(record: Mapping[str, Any]) -> None:
-    for field in REQUIRED_RECORD_FIELDS:
-        if field not in record or record[field] in (None, ""):
-            raise ValueError(f"金标准缺少必填字段: {field}")
-    if not isinstance(record["gold"], Mapping):
-        raise ValueError("gold 必须是对象")
-    for field in REQUIRED_GOLD_FIELDS:
-        if field not in record["gold"]:
-            raise ValueError(f"gold 缺少必填字段: {field}")
+    errors = sorted(
+        _GOLD_VALIDATOR.iter_errors(record),
+        key=lambda item: [str(part) for part in item.absolute_path],
+    )
+    if not errors:
+        return
+    first = errors[0]
+    location = ".".join(str(part) for part in first.absolute_path) or "$"
+    raise ValueError(f"金标准不符合 schema.json: {location}: {first.message}")
 
 
 def dataset_sha256(records: Sequence[Mapping[str, Any]]) -> str:
@@ -103,13 +101,19 @@ def evaluate_dataset(
     predictions: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     """按字段宏平均评测，并保留每个错误案例的原始值。"""
+    for record in gold_records:
+        validate_gold_record(record)
+    gold_case_ids = {str(record["case_id"]) for record in gold_records}
+    unknown_ids = sorted(set(predictions) - gold_case_ids)
+    if unknown_ids:
+        raise ValueError(f"预测集包含未知 case_id: {', '.join(unknown_ids)}")
+
     seen: set[str] = set()
     cases: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     field_metrics: dict[str, list[dict[str, float]]] = defaultdict(list)
 
     for record in gold_records:
-        validate_gold_record(record)
         case_id = str(record["case_id"])
         if case_id in seen:
             raise ValueError(f"case_id 重复: {case_id}")

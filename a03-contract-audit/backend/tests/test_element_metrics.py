@@ -9,6 +9,26 @@ from evaluation.elements import (
 )
 
 
+def _valid_gold_record() -> dict:
+    return {
+        "case_id": "case-1",
+        "file": "case-1.pdf",
+        "contract_type": "采购合同",
+        "document_kind": "pdf",
+        "reviewers": ["reviewer-a", "reviewer-b"],
+        "review_status": "agreed",
+        "version": "v1",
+        "gold": {
+            "party_a": "甲公司",
+            "party_b": "乙公司",
+            "subject": "设备采购",
+            "amount": "100万元",
+            "duration": "12个月",
+            "payment_terms": ["首付款", "验收款"],
+        },
+    }
+
+
 def test_scalar_accuracy_uses_gold_labels():
     assert scalar_accuracy(["甲公司", "乙公司"], ["甲公司", "错误公司"]) == 0.5
 
@@ -28,38 +48,50 @@ def test_multivalue_metrics_count_missing_and_extra_values():
 
 
 def test_gold_record_requires_frozen_audit_fields():
-    with pytest.raises(ValueError, match="reviewer"):
-        validate_gold_record(
+    record = _valid_gold_record()
+    del record["reviewers"]
+
+    with pytest.raises(ValueError, match="reviewers"):
+        validate_gold_record(record)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda row: row.update(document_kind="jpg"), "document_kind"),
+        (lambda row: row.update(reviewers=["reviewer-a"]), "reviewers"),
+        (lambda row: row["gold"].update(payment_terms="首付款"), "payment_terms"),
+    ],
+)
+def test_gold_record_enforces_json_schema(mutate, message):
+    record = _valid_gold_record()
+    mutate(record)
+
+    with pytest.raises(ValueError, match=message):
+        validate_gold_record(record)
+
+
+def test_adjudicated_record_requires_adjudicator():
+    record = _valid_gold_record()
+    record["review_status"] = "adjudicated"
+
+    with pytest.raises(ValueError, match="adjudicator"):
+        validate_gold_record(record)
+
+
+def test_evaluation_rejects_unknown_prediction_case_id():
+    with pytest.raises(ValueError, match="unknown-case"):
+        evaluate_dataset(
+            [_valid_gold_record()],
             {
-                "case_id": "case-1",
-                "file": "case-1.pdf",
-                "contract_type": "采购合同",
-                "document_kind": "pdf",
-                "version": "v1",
-                "gold": {},
-            }
+                "case-1": _valid_gold_record()["gold"],
+                "unknown-case": _valid_gold_record()["gold"],
+            },
         )
 
 
 def test_evaluation_reports_macro_groups_and_error_cases():
-    gold_records = [
-        {
-            "case_id": "case-1",
-            "file": "case-1.pdf",
-            "contract_type": "采购合同",
-            "document_kind": "pdf",
-            "reviewer": "reviewer-a",
-            "version": "v1",
-            "gold": {
-                "party_a": "甲公司",
-                "party_b": "乙公司",
-                "subject": "设备采购",
-                "amount": "100万元",
-                "duration": "12个月",
-                "payment_terms": ["首付款", "验收款"],
-            },
-        }
-    ]
+    gold_records = [_valid_gold_record()]
     predictions = {
         "case-1": {
             "party_a": "甲公司",
