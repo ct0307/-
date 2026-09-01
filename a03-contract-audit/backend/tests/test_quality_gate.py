@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import socket
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,16 +52,39 @@ class InterruptingRunner:
         raise KeyboardInterrupt
 
 
+class RecordingServices:
+    def __init__(self):
+        self.events = []
+
+    def ensure_ports_free(self):
+        self.events.append("ports")
+
+    def start(self):
+        self.events.append("start")
+
+    def wait_until_healthy(self):
+        self.events.append("healthy")
+
+    def stop(self):
+        self.events.append("stop")
+
+
+class OccupiedPortServices(RecordingServices):
+    def ensure_ports_free(self):
+        self.events.append("ports")
+        raise quality_gate.GateError("端口已占用")
+
+
 def fixed_clock():
     return datetime(2026, 9, 1, tzinfo=timezone.utc)
 
 
-def make_config(tmp_path: Path):
+def make_config(tmp_path: Path, *, include_e2e: bool = False):
     return quality_gate.GateConfig(
         project_root=tmp_path,
         python_executable=tmp_path / "backend/.venv/Scripts/python.exe",
         npm_executable="npm.cmd",
-        include_e2e=False,
+        include_e2e=include_e2e,
     )
 
 
@@ -133,3 +157,96 @@ def test_gate_records_interruption_and_returns_130(tmp_path):
     assert code == 130
     assert report["status"] == "interrupted"
     assert report["exit_code"] == 130
+
+
+def test_e2e_sets_url_and_stops_owned_services(tmp_path):
+    services = RecordingServices()
+    runner = RecordingRunner([0, 0, 0, 0, 0])
+
+    code = quality_gate.run_gate(
+        make_config(tmp_path, include_e2e=True),
+        runner=runner,
+        services=services,
+        clock=fixed_clock,
+    )
+
+    frontend = next(step for step in runner.steps if step.name == "frontend")
+    assert frontend.env_overrides["E2E_BASE_URL"] == "http://127.0.0.1:5173"
+    assert services.events == ["ports", "start", "healthy", "stop"]
+    assert code == 0
+
+
+def test_e2e_stops_owned_services_when_frontend_tests_fail(tmp_path):
+    services = RecordingServices()
+
+    code = quality_gate.run_gate(
+        make_config(tmp_path, include_e2e=True),
+        runner=RecordingRunner([0, 0, 8]),
+        services=services,
+        clock=fixed_clock,
+    )
+
+    assert code == 8
+    assert services.events[-1] == "stop"
+
+
+def test_e2e_refuses_occupied_port_without_starting_services(tmp_path):
+    services = OccupiedPortServices()
+
+    code = quality_gate.run_gate(
+        make_config(tmp_path, include_e2e=True),
+        runner=RecordingRunner([]),
+        services=services,
+        clock=fixed_clock,
+    )
+
+    assert code == 3
+    assert services.events == ["ports"]
+
+
+def test_local_services_reject_an_occupied_port(tmp_path):
+    held = socket.socket()
+    held.bind(("127.0.0.1", 0))
+    port = held.getsockname()[1]
+    manager = quality_gate.LocalServiceManager(
+        make_config(tmp_path, include_e2e=True),
+        ports=(port,),
+    )
+    try:
+        try:
+            manager.ensure_ports_free()
+        except quality_gate.GateError as exc:
+            assert str(port) in str(exc)
+        else:
+            raise AssertionError("占用端口必须阻止 E2E 启动")
+    finally:
+        held.close()
+
+
+def test_local_services_stop_only_recorded_processes(monkeypatch, tmp_path):
+    commands = []
+
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(quality_gate.os, "name", "nt")
+    monkeypatch.setattr(
+        quality_gate.subprocess,
+        "run",
+        lambda argv, **kwargs: commands.append((tuple(argv), kwargs)),
+    )
+    manager = quality_gate.LocalServiceManager(
+        make_config(tmp_path, include_e2e=True)
+    )
+    manager.processes = [Process(101), Process(202)]
+
+    manager.stop()
+
+    assert [command[0] for command in commands] == [
+        ("taskkill", "/PID", "202", "/T", "/F"),
+        ("taskkill", "/PID", "101", "/T", "/F"),
+    ]
