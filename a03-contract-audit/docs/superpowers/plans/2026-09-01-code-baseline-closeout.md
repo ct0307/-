@@ -102,11 +102,11 @@ $frontendProcess = Start-Process -FilePath (Get-Command npm.cmd).Source -Argumen
 等待两个进程进入监听后执行：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8000/api/v1/runtime/status' | Select-Object StatusCode
+Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8000/openapi.json' | Select-Object StatusCode
 Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:5173/login' | Select-Object StatusCode
 ```
 
-Expected: 两个请求均返回 HTTP 200。若端口已被其他进程占用，先识别现有进程和页面身份，不直接终止未知进程。
+Expected: 两个请求均返回 HTTP 200。`/api/v1/runtime/status` 需要登录后的 Bearer 令牌，不作为匿名健康端点。若端口已被其他进程占用，先识别现有进程和页面身份，不直接终止未知进程。
 
 ---
 
