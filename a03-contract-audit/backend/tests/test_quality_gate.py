@@ -1,6 +1,7 @@
 """本地质量门禁必须按固定顺序执行，并在失败时立即停止。"""
 
 import importlib.util
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,11 @@ class ForbiddenServices:
 
     def stop(self):
         raise AssertionError("默认门禁不得停止服务")
+
+
+class InterruptingRunner:
+    def run(self, step):
+        raise KeyboardInterrupt
 
 
 def fixed_clock():
@@ -92,3 +98,38 @@ def test_gate_stops_after_first_failed_step(tmp_path):
 
     assert code == 7
     assert [step.name for step in runner.steps] == ["evaluation", "backend"]
+
+
+def test_gate_writes_atomic_summary_for_failure(tmp_path):
+    code = quality_gate.run_gate(
+        make_config(tmp_path),
+        runner=RecordingRunner([0, 9]),
+        services=ForbiddenServices(),
+        clock=fixed_clock,
+    )
+
+    report = json.loads(
+        (tmp_path / ".quality-gate/summary.json").read_text(encoding="utf-8")
+    )
+    assert code == 9
+    assert report["schema_version"] == 1
+    assert report["status"] == "failed"
+    assert report["exit_code"] == 9
+    assert [step["name"] for step in report["steps"]] == ["evaluation", "backend"]
+    assert not (tmp_path / ".quality-gate/summary.json.tmp").exists()
+
+
+def test_gate_records_interruption_and_returns_130(tmp_path):
+    code = quality_gate.run_gate(
+        make_config(tmp_path),
+        runner=InterruptingRunner(),
+        services=ForbiddenServices(),
+        clock=fixed_clock,
+    )
+
+    report = json.loads(
+        (tmp_path / ".quality-gate/summary.json").read_text(encoding="utf-8")
+    )
+    assert code == 130
+    assert report["status"] == "interrupted"
+    assert report["exit_code"] == 130

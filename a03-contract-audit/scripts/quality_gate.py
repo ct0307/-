@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Literal, Mapping, Protocol
 
@@ -80,11 +83,90 @@ def run_gate(
     *,
     runner: CommandRunner,
     services: ServiceManager,
-    clock: Callable[[], object],
+    clock: Callable[[], datetime],
 ) -> int:
-    del services, clock
-    for step in default_steps(config):
-        result = runner.run(step)
-        if result.exit_code != 0:
-            return result.exit_code
-    return 0
+    del services
+    started_at = clock()
+    results: list[StepResult] = []
+    status = "passed"
+    exit_code = 0
+    try:
+        for step in default_steps(config):
+            result = runner.run(step)
+            results.append(result)
+            if result.exit_code != 0:
+                status = "failed"
+                exit_code = result.exit_code
+                break
+    except KeyboardInterrupt:
+        status = "interrupted"
+        exit_code = 130
+
+    try:
+        _write_summary(
+            config,
+            started_at=started_at,
+            finished_at=clock(),
+            status=status,
+            exit_code=exit_code,
+            results=results,
+        )
+    except OSError as exc:
+        print(f"质量门禁报告写入失败：{exc}")
+        return 3
+    return exit_code
+
+
+def _git_commit(project_root: Path) -> str:
+    completed = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return "unknown"
+    return completed.stdout.strip() or "unknown"
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _write_summary(
+    config: GateConfig,
+    *,
+    started_at: datetime,
+    finished_at: datetime,
+    status: str,
+    exit_code: int,
+    results: list[StepResult],
+) -> None:
+    report_dir = config.project_root / ".quality-gate"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    target = report_dir / "summary.json"
+    temporary = report_dir / "summary.json.tmp"
+    payload = {
+        "schema_version": 1,
+        "mode": "e2e" if config.include_e2e else "default",
+        "git_commit": _git_commit(config.project_root),
+        "started_at": _iso_utc(started_at),
+        "finished_at": _iso_utc(finished_at),
+        "status": status,
+        "exit_code": exit_code,
+        "steps": [
+            {
+                "name": result.name,
+                "status": result.status,
+                "exit_code": result.exit_code,
+                "duration_seconds": round(result.duration_seconds, 3),
+            }
+            for result in results
+        ],
+    }
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(target)
