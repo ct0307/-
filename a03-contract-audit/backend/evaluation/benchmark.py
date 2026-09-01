@@ -65,10 +65,15 @@ def summarize_benchmark(
     *,
     latencies_ms: Sequence[float | None],
     wall_seconds: float,
+    expected_runs: int,
     power_samples: Sequence[PowerSample] | None = None,
 ) -> dict[str, object]:
-    if not latencies_ms:
-        raise ValueError("至少需要一次正式运行记录")
+    if expected_runs <= 0:
+        raise ValueError("expected_runs 必须大于 0")
+    if len(latencies_ms) != expected_runs:
+        raise ValueError(
+            f"正式运行记录数量应为 {expected_runs}，实际为 {len(latencies_ms)}"
+        )
     if wall_seconds <= 0:
         raise ValueError("wall_seconds 必须大于 0")
     successful = [float(value) for value in latencies_ms if value is not None]

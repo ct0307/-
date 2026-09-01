@@ -17,6 +17,13 @@ from evaluation.batch import (
     load_batch_manifest,
     run_batch_acceptance,
 )
+from evaluation.benchmark_runner import (
+    OpenAICompatibleTarget,
+    TargetUnavailable,
+    compare_target_results,
+    load_benchmark_manifest,
+    run_target,
+)
 from evaluation.elements import evaluate_dataset
 from evaluation.evidence import EvidenceWriter, sha256_file
 
@@ -178,6 +185,108 @@ def _run_batch(args: argparse.Namespace) -> int:
     return EXIT_OK if result.status == "passed" else EXIT_FAILED
 
 
+def _run_benchmark(args: argparse.Namespace) -> int:
+    dataset = load_benchmark_manifest(args.manifest)
+    run_id = args.run_id or _default_run_id("benchmark")
+    writer = EvidenceWriter.create(
+        args.runs_root,
+        run_id=run_id,
+        command="benchmark",
+        inputs={
+            "manifest_sha256": sha256_file(args.manifest),
+            "dataset_sha256": dataset.dataset_sha256,
+            "model_sha256": dataset.model_sha256,
+            "output_schema_sha256": dataset.output_schema_sha256,
+            "case_count": len(dataset.cases),
+            "warmup_runs": dataset.warmup_runs,
+            "measured_runs": dataset.measured_runs,
+            "concurrency": dataset.concurrency,
+        },
+    )
+    openclaw_key = os.environ.get(args.openclaw_key_env, "").strip()
+    gpu_key = os.environ.get(args.gpu_key_env, "").strip()
+    missing = [
+        name
+        for name, value in (
+            (args.openclaw_key_env, openclaw_key),
+            (args.gpu_key_env, gpu_key),
+        )
+        if not value
+    ]
+    if missing:
+        writer.append(
+            "benchmark",
+            {"event": "blocked", "reason": f"环境变量未配置: {', '.join(missing)}"},
+        )
+        writer.write_manifest(status="blocked", modules={"benchmark": "blocked"})
+        return EXIT_BLOCKED
+
+    openclaw_target = OpenAICompatibleTarget(
+        args.openclaw_url,
+        api_key=openclaw_key,
+        model=dataset.model,
+        timeout_seconds=args.request_timeout,
+    )
+    gpu_target = OpenAICompatibleTarget(
+        args.gpu_url,
+        api_key=gpu_key,
+        model=dataset.model,
+        timeout_seconds=args.request_timeout,
+    )
+    try:
+        openclaw = run_target(
+            dataset.config_for("openclaw"),
+            dataset.cases,
+            target=openclaw_target,
+            writer=writer,
+        )
+        gpu = run_target(
+            dataset.config_for("gpu"),
+            dataset.cases,
+            target=gpu_target,
+            writer=writer,
+        )
+        comparison = compare_target_results(openclaw, gpu)
+    except TargetUnavailable as exc:
+        writer.append("benchmark", {"event": "blocked", "reason": str(exc)})
+        writer.write_manifest(status="blocked", modules={"benchmark": "blocked"})
+        return EXIT_BLOCKED
+    finally:
+        openclaw_target.close()
+        gpu_target.close()
+
+    writer.append(
+        "benchmark",
+        {
+            "event": "target_summary",
+            "target": "openclaw",
+            "summary": openclaw.summary,
+        },
+    )
+    writer.append(
+        "benchmark",
+        {"event": "target_summary", "target": "gpu", "summary": gpu.summary},
+    )
+    writer.append(
+        "benchmark",
+        {
+            "event": "comparison",
+            "status": comparison.status,
+            "openclaw_success_rate": comparison.openclaw_success_rate,
+            "gpu_success_rate": comparison.gpu_success_rate,
+            "openclaw_p95": comparison.openclaw_p95,
+            "gpu_p95": comparison.gpu_p95,
+            "openclaw_throughput": comparison.openclaw_throughput,
+            "gpu_throughput": comparison.gpu_throughput,
+        },
+    )
+    writer.write_manifest(
+        status=comparison.status,
+        modules={"benchmark": comparison.status},
+    )
+    return EXIT_OK if comparison.status == "passed" else EXIT_FAILED
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="A03 硬指标证据流水线")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -196,6 +305,15 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--poll-interval", type=float, default=1.0)
     batch.add_argument("--timeout-seconds", type=float, default=900)
     batch.add_argument("--request-timeout", type=float, default=120)
+    benchmark = subcommands.add_parser("benchmark", help="执行 OpenClaw/GPU 同口径基准")
+    benchmark.add_argument("--manifest", type=Path, required=True)
+    benchmark.add_argument("--openclaw-url", required=True)
+    benchmark.add_argument("--openclaw-key-env", default="OPENCLAW_EVAL_KEY")
+    benchmark.add_argument("--gpu-url", required=True)
+    benchmark.add_argument("--gpu-key-env", default="GPU_EVAL_KEY")
+    benchmark.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
+    benchmark.add_argument("--run-id")
+    benchmark.add_argument("--request-timeout", type=float, default=120)
     return parser
 
 
@@ -206,6 +324,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_elements(args)
         if args.command == "batch":
             return _run_batch(args)
+        if args.command == "benchmark":
+            return _run_benchmark(args)
         raise ValueError(f"未知子命令: {args.command}")
     except (FileExistsError, OSError, ValueError) as exc:
         print(f"输入无效: {exc}", file=sys.stderr)
