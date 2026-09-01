@@ -205,7 +205,7 @@ async function advance(id: string, current: RectifyStatus) {
 }
 .seg button.active {
   background: var(--brass);
-  color: #fff;
+  color: var(--on-brass);
 }
 .rk-row {
   display: grid;
@@ -216,9 +216,8 @@ async function advance(id: string, current: RectifyStatus) {
 .rk-card {
   background: var(--ink-2);
   border: 1px solid var(--line);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-sm);
   padding: 16px 20px;
-  box-shadow: var(--shadow-sm);
 }
 .rk-card span {
   font-size: 13px;
@@ -251,7 +250,7 @@ async function advance(id: string, current: RectifyStatus) {
   gap: 16px;
   padding: 14px 16px;
   border: 1px solid var(--line);
-  border-radius: var(--r-md);
+  border-radius: var(--r-sm);
   margin-bottom: 10px;
   position: relative;
 }

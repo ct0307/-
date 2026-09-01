@@ -651,7 +651,7 @@ function goAudit() {
   margin: 0 0 12px;
   padding: 10px;
   list-style: none;
-  background: var(--bg-soft, rgba(0, 0, 0, 0.02));
+  background: var(--bg-soft);
   border-radius: var(--r-sm);
   border: 1px dashed var(--line);
   flex: 1;
@@ -684,7 +684,7 @@ function goAudit() {
   text-align: center;
   font-size: 12px;
   color: var(--muted);
-  background: var(--bg-soft, rgba(0, 0, 0, 0.02));
+  background: var(--bg-soft);
   border-radius: var(--r-sm);
   flex: 1;
 }
@@ -708,7 +708,8 @@ function goAudit() {
 }
 .kpi {
   background: var(--ink-3);
-  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
   padding: 14px 16px;
   display: flex;
   flex-direction: column;
@@ -717,7 +718,6 @@ function goAudit() {
 .kpi span {
   font-size: 12px;
   color: var(--muted);
-  font-family: var(--serif);
 }
 .kpi strong {
   font-size: 24px;

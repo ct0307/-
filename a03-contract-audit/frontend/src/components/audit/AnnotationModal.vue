@@ -120,7 +120,7 @@ async function scrollToRisk(id: number) {
     to bottom,
     transparent,
     transparent 31px,
-    rgba(58, 50, 34, 0.07) 32px
+    var(--paper-line) 32px
   );
   line-height: 2;
 }
@@ -217,7 +217,7 @@ async function scrollToRisk(id: number) {
     background: var(--seal-soft);
   }
   30% {
-    background: rgba(176, 116, 26, 0.4);
+    background: var(--annotation-highlight);
   }
 }
 .doc-hint {

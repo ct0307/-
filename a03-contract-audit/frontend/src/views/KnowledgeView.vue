@@ -2,6 +2,7 @@
 // 法规知识库(RAG)：搜索 + 分类 chip + 4 统计卡 + 卡片网格 + 关键词高亮 + 详情 + 批量导入。
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { CircleCheck, CircleClose, Loading, Upload } from '@element-plus/icons-vue'
 import {
   getKnowledgeCards,
   getKnowledgeStats,
@@ -359,7 +360,7 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
       </div>
       <div class="tool-right">
         <DemoBadge module="knowledge" />
-        <el-button :icon="'Upload'" @click="batchOpen = true">导入文件</el-button>
+        <el-button :icon="Upload" @click="batchOpen = true">导入文件</el-button>
         <el-button type="primary" :icon="'Plus'" @click="addOpen = true">添加知识</el-button>
       </div>
     </div>
@@ -549,8 +550,8 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 18px;
+  gap: 12px;
+  margin-bottom: 16px;
   flex-wrap: wrap;
 }
 .search-cats {
@@ -574,7 +575,7 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
 }
 .chips button.active {
   background: var(--brass);
-  color: #fff;
+  color: var(--on-brass);
   border-color: var(--brass);
 }
 .tool-right {
@@ -591,9 +592,8 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
 .stat-card {
   background: var(--ink-2);
   border: 1px solid var(--line);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-sm);
   padding: 16px 20px;
-  box-shadow: var(--shadow-sm);
 }
 .stat-card span {
   font-size: 13px;
@@ -613,15 +613,14 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
 .k-card {
   background: var(--ink-2);
   border: 1px solid var(--line);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-sm);
   padding: 16px;
   cursor: pointer;
-  box-shadow: var(--shadow-sm);
-  transition: border-color 0.2s var(--ease), transform 0.2s var(--ease);
+  transition: border-color 0.2s var(--ease), background-color 0.2s var(--ease);
 }
 .k-card:hover {
   border-color: var(--brass);
-  transform: translateY(-2px);
+  background: var(--ink-3);
 }
 .k-head {
   display: flex;
@@ -778,7 +777,6 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 3px;
-  font-family: var(--serif);
 }
 .mode-tag.article { background: var(--brass-soft); color: var(--brass); }
 .mode-tag.para { background: var(--ink-3, rgba(255,255,255,0.06)); color: var(--ivory-dim); }
@@ -802,5 +800,19 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
 @media (max-width: 1180px) {
   .stat-row { grid-template-columns: 1fr 1fr; }
   .card-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 720px) {
+  .stat-row,
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+  .search-cats,
+  .tool-right {
+    width: 100%;
+  }
+  .chips {
+    max-width: 100%;
+    overflow-x: auto;
+  }
 }
 </style>

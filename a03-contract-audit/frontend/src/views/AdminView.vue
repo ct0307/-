@@ -418,7 +418,8 @@ function exportCsv() {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 .admin-tabs :deep(.el-tabs__header) {
   margin-bottom: 16px;
@@ -444,7 +445,6 @@ function exportCsv() {
 }
 .access-table th {
   color: var(--ivory);
-  font-family: var(--serif);
   background: var(--ink-3);
 }
 .access-table th:first-child,
@@ -475,7 +475,7 @@ function exportCsv() {
 .stat-card {
   background: var(--ink-2);
   border: 1px solid var(--line);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-sm);
   padding: 14px 18px;
 }
 .stat-provider {

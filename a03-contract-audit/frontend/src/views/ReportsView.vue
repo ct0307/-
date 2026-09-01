@@ -236,7 +236,6 @@ function resetDrill() {
   margin-bottom: 16px;
 }
 .toolbar-title {
-  font-family: var(--serif);
   font-size: 15px;
   font-weight: 600;
   color: var(--ivory);
@@ -286,9 +285,8 @@ function resetDrill() {
 .kpi-card {
   background: var(--ink-2);
   border: 1px solid var(--line);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-sm);
   padding: 16px 20px;
-  box-shadow: var(--shadow-sm);
 }
 .kpi-label {
   display: flex;
@@ -319,6 +317,15 @@ function resetDrill() {
   }
   .chart-grid {
     grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 720px) {
+  .kpi-row {
+    grid-template-columns: 1fr;
+  }
+  .drill-scope {
+    width: 100%;
+    margin-left: 0;
   }
 }
 .meta-card {

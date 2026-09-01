@@ -128,7 +128,7 @@ async function onSubmit() {
   align-items: center;
   padding: 0 clamp(48px, 7vw, 120px);
   background:
-    radial-gradient(120% 100% at 0% 0%, #f3eee0 0%, var(--ink) 60%),
+    radial-gradient(120% 100% at 0% 0%, var(--login-glow) 0%, var(--ink) 60%),
     var(--ink);
   border-right: 1px solid var(--line);
   overflow: hidden;
@@ -142,7 +142,7 @@ async function onSubmit() {
   font-weight: 700;
   font-size: 46vh;
   line-height: 1;
-  color: rgba(178, 58, 44, 0.05);
+  color: var(--seal-watermark);
   user-select: none;
   pointer-events: none;
 }
@@ -199,7 +199,7 @@ async function onSubmit() {
   height: 8px;
   border: 1.5px solid var(--seal);
   border-radius: 2px;
-  background: rgba(178, 58, 44, 0.08);
+  background: var(--seal-panel-soft);
 }
 .brand-foot {
   margin: 0;

@@ -215,9 +215,8 @@ const activity = computed(() =>
 .kpi-card {
   background: var(--ink-2);
   border: 1px solid var(--line);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-sm);
   padding: 18px 20px;
-  box-shadow: var(--shadow-sm);
 }
 .kpi-label-row {
   display: flex;
@@ -228,7 +227,6 @@ const activity = computed(() =>
 .kpi-label {
   font-size: 13px;
   color: var(--ivory-dim);
-  font-family: var(--serif);
 }
 .kpi-hint {
   font-size: 13px;
@@ -249,7 +247,6 @@ const activity = computed(() =>
   font-size: 14px;
   color: var(--muted);
   font-style: normal;
-  font-family: var(--serif);
   margin-left: 3px;
 }
 

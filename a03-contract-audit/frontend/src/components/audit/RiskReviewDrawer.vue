@@ -2,7 +2,7 @@
 // 风险复核抽屉：命中原文 / 依据 / 建议 + 底部操作 + AI 追问对话。
 // 追问上下文绑定当前风险条款，历史在抽屉内保留，关闭/切换风险自动清空。
 import { computed, ref, watch, nextTick } from 'vue'
-import { ChatDotRound } from '@element-plus/icons-vue'
+import { ChatDotRound, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { RiskOut } from '@/api/types'
 import { chatWithRisk, type ChatMessage } from '@/api/chat'
@@ -78,39 +78,64 @@ function onEnter(e: KeyboardEvent) {
 </script>
 
 <template>
-  <el-drawer v-model="visible" title="风险复核" size="480px" :with-header="true">
+  <el-drawer v-model="visible" title="风险复核" size="min(560px, 100vw)" :with-header="true">
     <template v-if="risk">
       <!-- 风险详情 -->
       <div class="rd-head">
         <el-tag :type="levelMeta[risk.level].type" size="small">{{ levelMeta[risk.level].label }}</el-tag>
         <span class="rd-cat">{{ risk.category }}</span>
-        <el-tag size="small" effect="plain" class="mono">置信度 {{ risk.confidence }}%</el-tag>
+        <span class="rd-confidence mono">置信度 {{ risk.confidence }}%</span>
       </div>
 
-      <section class="rd-block">
-        <h4>命中原文</h4>
-        <p class="rd-clause annotate">{{ risk.original_text }}</p>
+      <section class="rd-block evidence-step">
+        <span class="step-index mono">01</span>
+        <div class="step-content">
+          <h4>命中原文</h4>
+          <p class="rd-clause annotate">{{ risk.original_text }}</p>
+        </div>
       </section>
-      <section class="rd-block">
-        <h4>法规 / 规则依据</h4>
-        <p class="rd-text">{{ risk.basis }}</p>
-      </section>
-
-      <!-- RAG 检索溯源：展示 AI 引用的具体法条原文来源 -->
-      <section v-if="risk.rag_sources?.length" class="rd-block">
-        <h4>检索来源</h4>
-        <div v-for="(s, i) in risk.rag_sources" :key="i" class="rag-source-card">
-          <div class="rag-source-head">
-            <span class="rag-tag" :title="s.source">{{ s.source }}</span>
-            <span class="rag-rank mono">#{{ i + 1 }}</span>
-          </div>
-          <p class="rag-content">{{ s.content.slice(0, 150) }}{{ s.content.length > 150 ? '…' : '' }}</p>
+      <section class="rd-block evidence-step">
+        <span class="step-index mono">02</span>
+        <div class="step-content">
+          <h4>法规 / 规则依据</h4>
+          <p class="rd-text">{{ risk.basis }}</p>
         </div>
       </section>
 
-      <section class="rd-block">
-        <h4>修改建议</h4>
-        <p class="rd-text">{{ risk.suggestion }}</p>
+      <!-- RAG 检索溯源：展示 AI 引用的具体法条原文来源 -->
+      <section v-if="risk.rag_sources?.length" class="rd-block evidence-step">
+        <span class="step-index mono">03</span>
+        <div class="step-content">
+          <h4>检索来源</h4>
+          <div v-for="(s, i) in risk.rag_sources" :key="i" class="rag-source-card">
+            <div class="rag-source-head">
+              <span class="rag-tag" :title="s.source">{{ s.source }}</span>
+              <span class="rag-rank mono">#{{ i + 1 }}</span>
+            </div>
+            <p class="rag-content">{{ s.content.slice(0, 150) }}{{ s.content.length > 150 ? '…' : '' }}</p>
+          </div>
+        </div>
+      </section>
+      <section v-else class="rd-block evidence-step source-missing" role="alert">
+        <span class="step-index mono">03</span>
+        <div class="step-content">
+          <h4>检索来源</h4>
+          <div class="missing-evidence">
+            <el-icon><WarningFilled /></el-icon>
+            <div>
+              <strong>无可靠依据</strong>
+              <p>当前结论必须由人工复核确认，不能直接作为正式审查依据。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="rd-block evidence-step">
+        <span class="step-index mono">04</span>
+        <div class="step-content">
+          <h4>修改建议</h4>
+          <p class="rd-text">{{ risk.suggestion }}</p>
+        </div>
       </section>
 
       <el-alert
@@ -191,23 +216,62 @@ function onEnter(e: KeyboardEvent) {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
 }
 .rd-cat {
-  font-family: var(--serif);
+  font-family: var(--sans);
   font-weight: 600;
   font-size: 15px;
   color: var(--ivory);
 }
+.rd-confidence {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
 .rd-block {
-  margin-bottom: 16px;
+  margin-bottom: 0;
+}
+.evidence-step {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 0;
+  position: relative;
+}
+.evidence-step:not(:last-of-type)::before {
+  content: '';
+  position: absolute;
+  left: 13px;
+  top: 25px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--line);
+}
+.step-index {
+  position: relative;
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--ink-2);
+  color: var(--brass);
+  font-size: 10px;
+}
+.step-content {
+  min-width: 0;
+  padding: 2px 0 20px 10px;
 }
 .rd-block h4 {
   margin: 0 0 6px;
   font-size: 13px;
   color: var(--brass);
   font-family: var(--mono);
-  letter-spacing: 0.05em;
+  letter-spacing: 0;
 }
 .rd-clause {
   margin: 0;
@@ -215,6 +279,8 @@ function onEnter(e: KeyboardEvent) {
   line-height: 1.7;
   color: var(--ivory);
   font-family: var(--serif);
+  background: var(--ink-3);
+  border-left: 2px solid var(--brass);
 }
 .rd-text {
   margin: 0;
@@ -223,14 +289,38 @@ function onEnter(e: KeyboardEvent) {
   font-size: 13px;
 }
 .rd-disclaimer {
-  margin-top: 10px;
+  margin: 2px 0 0 44px;
+}
+.missing-evidence {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 12px;
+  background: var(--amber-soft);
+  border-left: 2px solid var(--amber);
+  color: var(--amber);
+}
+.missing-evidence > .el-icon {
+  flex: none;
+  margin-top: 2px;
+}
+.missing-evidence strong {
+  display: block;
+  color: var(--ivory);
+  font-size: 13px;
+}
+.missing-evidence p {
+  margin: 3px 0 0;
+  color: var(--ivory-dim);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* —— 追问区域 —— */
 .chat-section {
-  margin-top: 20px;
-  border-top: 2px solid var(--brass);
-  padding-top: 14px;
+  margin: 20px 0 0 44px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
 }
 .chat-header {
   display: flex;
@@ -359,5 +449,13 @@ function onEnter(e: KeyboardEvent) {
   font-size: 12px;
   color: var(--ivory-dim);
   line-height: 1.6;
+}
+@media (max-width: 640px) {
+  .rd-head { flex-wrap: wrap; }
+  .rd-confidence { margin-left: 0; flex-basis: 100%; }
+  .rd-disclaimer,
+  .chat-section { margin-left: 0; }
+  .chat-input-row { flex-direction: column; align-items: stretch; }
+  .send-btn { width: 100%; height: 36px; }
 }
 </style>

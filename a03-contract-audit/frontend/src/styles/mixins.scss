@@ -9,7 +9,7 @@
     to bottom,
     transparent,
     transparent calc(#{$gap} - 1px),
-    rgba(58, 50, 34, 0.05) #{$gap}
+    var(--paper-line) #{$gap}
   );
   background-attachment: local;
   opacity: $opacity;
@@ -27,7 +27,7 @@
   color: $color;
   font-family: var(--serif);
   font-weight: 700;
-  background: rgba(178, 58, 44, 0.06);
+  background: var(--seal-panel-soft);
   letter-spacing: 0;
 }
 

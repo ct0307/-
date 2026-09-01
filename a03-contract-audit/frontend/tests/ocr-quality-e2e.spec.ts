@@ -116,6 +116,12 @@ test('renders low-confidence OCR review state without mobile overflow', async ({
   await expect(reviewAlert).toContainText('42.3%')
   await expect(page.getByText('待人工复核', { exact: true })).toBeVisible()
   await expect(page.getByText('扫描件识别质量不足')).toBeVisible()
+  await expect(page.getByText('无可靠依据 · 待人工复核')).toBeVisible()
+
+  await page.getByText('扫描件识别质量不足').click()
+  await expect(page.getByRole('alert').filter({ hasText: '无可靠依据' })).toContainText(
+    '不能直接作为正式审查依据',
+  )
 
   await page.setViewportSize({ width: 390, height: 844 })
   await page.waitForTimeout(350)

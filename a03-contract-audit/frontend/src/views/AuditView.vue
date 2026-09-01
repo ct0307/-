@@ -2,7 +2,7 @@
 // 合同合规审查（真实接口核心闭环）：上传→解析→审查→复核→生成整改。
 // 闭环逻辑迁移自 WorkbenchView，数据落 audit-session store。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { WarningFilled } from '@element-plus/icons-vue'
+import { ArrowRight, WarningFilled } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type UploadRawFile } from 'element-plus'
 import { getLookups } from '@/api/admin'
@@ -572,8 +572,18 @@ function closeBatch() {
                     <el-tag size="small" effect="plain" class="status-tag">{{ statusLabel[r.review_status] }}</el-tag>
                   </div>
                   <p class="risk-line">{{ r.suggestion }}</p>
+                  <div class="risk-evidence" :class="{ 'is-missing': !r.rag_sources?.length }">
+                    <span class="evidence-dot" />
+                    <span>
+                      {{ r.rag_sources?.length
+                        ? `${r.rag_sources.length} 条可靠依据`
+                        : '无可靠依据 · 待人工复核' }}
+                    </span>
+                    <span class="risk-confidence mono">{{ r.confidence }}%</span>
+                  </div>
                   <span class="review-cta">
-                    {{ _DONE_STATUS.has(r.review_status) ? '查看详情 →' : '进入复核 →' }}
+                    {{ _DONE_STATUS.has(r.review_status) ? '查看详情' : '进入复核' }}
+                    <el-icon><ArrowRight /></el-icon>
                   </span>
                 </article>
               </div>
@@ -692,14 +702,39 @@ function closeBatch() {
 <style scoped>
 .audit-grid {
   display: grid;
-  grid-template-columns: 400px 1fr;
-  gap: 20px;
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 16px;
   align-items: start;
 }
 .left-stack {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 0;
+  position: sticky;
+  top: 0;
+}
+.upload-panel {
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  border-bottom: 0;
+}
+.config-panel {
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+}
+.right-stack,
+.result-panel {
+  min-width: 0;
+}
+.result-panel {
+  min-height: calc(100vh - 124px);
+}
+.upload-panel :deep(.el-upload-dragger) {
+  min-height: 156px;
+  padding: 34px 16px 24px;
+  border-radius: var(--r-sm);
+  background: var(--ink-3);
+}
+.upload-panel :deep(.el-icon--upload) {
+  color: var(--info);
 }
 .upload-hint {
   margin: 4px 0 0;
@@ -756,7 +791,7 @@ function closeBatch() {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 32px;
+  min-height: 34px;
   padding: 0 12px;
   background: var(--ink-3);
   border-radius: var(--r-sm);
@@ -780,7 +815,7 @@ function closeBatch() {
   background: none;
   border: none;
   border-top: 1px solid var(--line);
-  padding: 10px 0 8px;
+  padding: 12px 0 8px;
   cursor: pointer;
   font-size: 13px;
   color: var(--ivory-dim);
@@ -790,6 +825,7 @@ function closeBatch() {
 .dim-summary { font-size: 12px; color: var(--brass); }
 .dim-hint {
   margin-left: auto;
+  max-width: 150px;
   font-size: 11px;
   color: var(--muted);
   font-style: italic;
@@ -852,6 +888,9 @@ function closeBatch() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
 }
 .result-head h2 {
   margin: 2px 0 0;
@@ -860,21 +899,25 @@ function closeBatch() {
 .eyebrow {
   font-size: 11px;
   color: var(--brass);
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
 }
 .result-kpis {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-  margin: 16px 0;
+  gap: 0;
+  margin: 0 0 20px;
+  border-bottom: 1px solid var(--line);
 }
 .kpi-mini {
-  background: var(--ink-3);
-  border-radius: var(--r-md);
-  padding: 12px;
+  min-width: 0;
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  border-right: 1px solid var(--line);
+}
+.kpi-mini:last-child {
+  border-right: 0;
 }
 .kpi-mini span {
   font-size: 12px;
@@ -889,8 +932,12 @@ function closeBatch() {
 }
 .result-two-col {
   display: grid;
-  grid-template-columns: 1.4fr 1fr;
-  gap: 20px;
+  grid-template-columns: minmax(0, 1.55fr) minmax(260px, 1fr);
+  gap: 24px;
+}
+.result-col + .result-col {
+  padding-left: 24px;
+  border-left: 1px solid var(--line);
 }
 .col-head {
   display: flex;
@@ -902,7 +949,7 @@ function closeBatch() {
   font-size: 14px;
   font-weight: 600;
   color: var(--ivory);
-  letter-spacing: 0.02em;
+  letter-spacing: 0;
   font-family: var(--serif);
 }
 .col-head h2 {
@@ -919,20 +966,22 @@ function closeBatch() {
 /* 3 步引导 */
 .onboard {
   display: flex;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 0;
-  padding: 32px 20px;
-  justify-content: center;
+  padding: 36px 24px;
+  min-height: 220px;
+  border-bottom: 1px solid var(--line);
 }
 .onboard-step {
   display: flex;
   align-items: flex-start;
   gap: 12px;
   flex: 1;
-  max-width: 200px;
+  max-width: none;
   opacity: 0.45;
   transition: opacity 0.2s ease;
   position: relative;
+  padding-right: 28px;
 }
 .onboard-step.active { opacity: 1; }
 .onboard-step.done   { opacity: 0.7; }
@@ -940,8 +989,8 @@ function closeBatch() {
   flex: none;
   width: 32px;
   height: 32px;
-  border-radius: 50%;
-  border: 2px solid var(--brass);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--brass);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -969,7 +1018,7 @@ function closeBatch() {
 }
 .step-arrow {
   position: absolute;
-  right: -18px;
+  right: 12px;
   top: 8px;
   color: var(--brass);
   font-size: 16px;
@@ -987,8 +1036,8 @@ function closeBatch() {
 }
 .risk-card {
   border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  padding: 12px 14px;
+  border-radius: var(--r-sm);
+  padding: 13px 14px 12px 16px;
   cursor: pointer;
   /* 仅过渡必要属性，避免 GPU 处理所有 CSS 变化 */
   transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
@@ -1013,8 +1062,8 @@ function closeBatch() {
   background: var(--sage);
 }
 .risk-card:hover {
-  border-color: var(--brass);
-  box-shadow: var(--shadow-sm);
+  border-color: var(--line-strong);
+  background: var(--ink-3);
 }
 .risk-head {
   display: flex;
@@ -1035,26 +1084,61 @@ function closeBatch() {
   color: var(--ivory-dim);
   line-height: 1.6;
 }
+.risk-evidence {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  color: var(--sage);
+  font-size: 11px;
+  font-weight: 600;
+}
+.risk-evidence.is-missing {
+  color: var(--amber);
+}
+.evidence-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.risk-confidence {
+  margin-left: auto;
+  color: var(--muted);
+  font-weight: 500;
+}
 .review-cta {
   font-size: 12px;
   color: var(--brass);
   margin-top: 6px;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
+.review-cta .el-icon { font-size: 13px; }
 .metadata-list {
   margin: 0;
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 8px 14px;
+  gap: 0;
   font-size: 13px;
+  border-top: 1px solid var(--line);
 }
 .metadata-list dt {
   color: var(--ivory-dim);
+  padding: 9px 12px 9px 0;
+  border-bottom: 1px solid var(--line);
 }
 .metadata-list dd {
   margin: 0;
   color: var(--ivory);
   font-family: var(--mono);
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
 }
 .metadata-list dd.warn {
   color: var(--seal);
@@ -1063,9 +1147,16 @@ function closeBatch() {
   .audit-grid {
     grid-template-columns: 1fr;
   }
+  .left-stack { position: static; }
   .result-two-col {
     grid-template-columns: 1fr;
   }
+  .result-col + .result-col {
+    padding: 20px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+  .result-panel { min-height: 0; }
 }
 .batch-btn {
   width: 100%;
@@ -1144,6 +1235,34 @@ function closeBatch() {
   padding-top: 4px;
 }
 @media (max-width: 640px) {
+  .onboard {
+    flex-direction: column;
+    min-height: 0;
+    padding: 20px 16px;
+    gap: 16px;
+  }
+  .onboard-step {
+    width: 100%;
+    padding-right: 0;
+  }
+  .step-arrow { display: none; }
+  .result-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .result-kpis {
+    grid-template-columns: 1fr 1fr;
+  }
+  .kpi-mini:nth-child(2) { border-right: 0; }
+  .kpi-mini:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+  .risk-head { flex-wrap: wrap; }
+  .status-tag { margin-left: 0; }
+  .dim-toggle { flex-wrap: wrap; }
+  .dim-hint {
+    margin-left: 0;
+    max-width: none;
+    flex-basis: 100%;
+  }
   .ocr-review-alert {
     align-items: flex-start;
     padding: 12px;

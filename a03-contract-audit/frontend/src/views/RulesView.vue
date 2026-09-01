@@ -228,6 +228,7 @@ async function submitTpl() {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 16px;
 }
 .tool-btns {
