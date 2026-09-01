@@ -34,6 +34,9 @@ logs/
 # 本地硬指标原始证据，可能包含运行环境信息且体积较大
 /evaluation-runs/
 
+# 本地一键质量门禁汇总，不纳入版本控制
+/.quality-gate/
+
 # IDE
 .vscode/
 .idea/

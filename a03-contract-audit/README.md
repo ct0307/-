@@ -187,6 +187,27 @@ a03-contract-audit/
 
 ---
 
+## 本地一键质量门禁
+
+在 Windows PowerShell 中从项目根目录运行：
+
+```powershell
+.\scripts\quality_gate.ps1
+```
+
+默认按顺序执行评测专项、后端全量测试、前端 Playwright 测试、TypeScript 类型检查和生产构建。任一阶段失败会立即停止并返回非零退出码；汇总写入 `.quality-gate/summary.json`。默认模式主动清除测试子进程中的 `E2E_BASE_URL`，因此需要本地服务的现有 E2E 会按测试约定如实跳过。
+
+需要连同本地服务型 E2E 一起验证时运行：
+
+```powershell
+.\scripts\quality_gate.ps1 -IncludeE2E
+```
+
+该模式要求 `127.0.0.1:8000` 和 `127.0.0.1:5173` 未被占用。脚本只启动并回收自己创建的 uvicorn 与 Vite 进程，不终止已有服务。依赖或工具缺失时脚本直接失败，不会自动安装软件。
+
+本地质量门禁用于防止开发回归，**不等于真实硬指标验收**。它不会替代真实 52 份文件、PostgreSQL 16、Docker Compose、OpenClaw、GPU 或功率数据的实机证据，也不会自动提交、推送或部署代码。
+
+
 ## 验收指标
 
 | 指标 | 目标 | 状态 |

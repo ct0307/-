@@ -305,3 +305,17 @@ def test_report_timestamps_are_normalized_to_utc():
     local_time = datetime(2026, 9, 1, 20, 0, tzinfo=timezone(timedelta(hours=8)))
 
     assert quality_gate._iso_utc(local_time) == "2026-09-01T12:00:00Z"
+
+
+def test_quality_gate_artifacts_are_ignored():
+    gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "/.quality-gate/" in gitignore
+
+
+def test_readme_documents_modes_and_evidence_boundary():
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert ".\\scripts\\quality_gate.ps1" in readme
+    assert "-IncludeE2E" in readme
+    assert "不等于真实硬指标验收" in readme
