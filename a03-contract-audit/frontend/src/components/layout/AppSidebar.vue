@@ -135,7 +135,8 @@ watch(mobileOpen, (open) => applyRovingTabindex(open && window.innerWidth <= 768
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 20px 18px 16px;
+  min-height: 72px;
+  padding: 14px 18px 12px;
   border-bottom: 1px solid var(--line);
   overflow: hidden;
   white-space: nowrap;
@@ -151,28 +152,29 @@ watch(mobileOpen, (open) => applyRovingTabindex(open && window.innerWidth <= 768
 }
 .brand-txt b {
   font-family: var(--serif);
-  font-size: 17px;
+  font-size: 18px;
   color: var(--ivory);
 }
 .brand-txt small {
   font-size: 10px;
-  letter-spacing: 0.12em;
+  letter-spacing: 0;
   color: var(--muted);
   font-family: var(--mono);
 }
 
 /* 导航 */
 .nav {
-  padding: 10px 8px;
+  padding: 12px 8px;
   overflow-y: auto;
   overflow-x: hidden;
   /* 必须覆盖 el-menu 默认边框 */
   border-right: none !important;
 }
 .nav .el-menu-item {
-  border-radius: var(--r-md);
+  border-radius: var(--r-sm);
   margin-bottom: 2px;
-  height: 44px;
+  height: 40px;
+  line-height: 40px;
 }
 
 /* 折叠态：菜单居中，padding 缩小 */
@@ -186,7 +188,7 @@ watch(mobileOpen, (open) => applyRovingTabindex(open && window.innerWidth <= 768
 
 /* 底部区域 */
 .sidebar-foot {
-  padding-top: 10px;
+  padding-top: 6px;
   border-top: 1px solid var(--line);
 }
 
@@ -196,7 +198,7 @@ watch(mobileOpen, (open) => applyRovingTabindex(open && window.innerWidth <= 768
   align-items: center;
   justify-content: center;
   width: 100%;
-  height: 36px;
+  height: 34px;
   background: none;
   border: none;
   border-top: 1px solid var(--line);

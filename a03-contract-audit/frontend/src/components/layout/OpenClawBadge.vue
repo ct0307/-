@@ -66,11 +66,11 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-  margin: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--sage-soft);
+  padding: 8px 12px;
+  margin: 0 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
 }
 .pulse {
   position: relative;
@@ -90,7 +90,7 @@ onBeforeUnmount(() => {
   inset: -4px;
   border-radius: 50%;
   border: 2px solid var(--sage);
-  animation: ring 1.8s var(--ease) infinite;
+  animation: ring 2.4s var(--ease) infinite;
 }
 .is-offline .pulse i { background: var(--muted); }
 .is-offline .pulse::after { display: none; }

@@ -4,32 +4,43 @@ import { computed } from 'vue'
 import type { EChartsCoreOption } from 'echarts/core'
 import BaseChart from './BaseChart.vue'
 import type { ReportData } from '@/mock/reports'
+import { readThemePalette, useTheme } from '@/theme/theme'
 
 const props = defineProps<{ data: ReportData['tops'] }>()
+const { effectiveTheme } = useTheme()
 
 const option = computed<EChartsCoreOption>(() => {
+  effectiveTheme.value
+  const palette = readThemePalette()
   const sorted = [...props.data].sort((a, b) => a.value - b.value)
   return {
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    textStyle: { color: palette.textSecondary, fontFamily: 'JetBrains Mono, PingFang SC, sans-serif' },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      backgroundColor: palette.surface,
+      borderColor: palette.lineStrong,
+      textStyle: { color: palette.text },
+    },
     grid: { left: 130, right: 30, top: 10, bottom: 20 },
     xAxis: {
       type: 'value',
-      splitLine: { lineStyle: { color: 'rgba(58,50,34,0.1)' } },
-      axisLabel: { color: '#8c8574' },
+      splitLine: { lineStyle: { color: palette.line } },
+      axisLabel: { color: palette.muted },
     },
     yAxis: {
       type: 'category',
       data: sorted.map((d) => d.name),
-      axisLine: { lineStyle: { color: 'rgba(58,50,34,0.26)' } },
-      axisLabel: { color: '#565e70' },
+      axisLine: { lineStyle: { color: palette.lineStrong } },
+      axisLabel: { color: palette.textSecondary },
     },
     series: [
       {
         type: 'bar',
         data: sorted.map((d) => d.value),
         barWidth: 14,
-        itemStyle: { color: '#b23a2c', borderRadius: [0, 4, 4, 0] },
-        label: { show: true, position: 'right', color: '#8c8574' },
+        itemStyle: { color: palette.seal, borderRadius: [0, 4, 4, 0] },
+        label: { show: true, position: 'right', color: palette.muted },
       },
     ],
   }

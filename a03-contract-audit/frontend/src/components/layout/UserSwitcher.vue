@@ -105,16 +105,17 @@ async function onCommand(cmd: string) {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-  margin: 8px 12px 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--ink-2);
+  padding: 8px 12px;
+  margin: 4px 8px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
   cursor: pointer;
   transition: border-color 0.2s var(--ease);
 }
 .user-card:hover {
-  border-color: var(--brass);
+  border-color: var(--line);
+  background: var(--ink-3);
 }
 .avatar {
   flex: none;

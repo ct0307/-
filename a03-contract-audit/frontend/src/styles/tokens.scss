@@ -1,86 +1,215 @@
 // ============================================================
-// 卷宗风设计令牌 · 迁移自 a03-demo 日间卷宗方向（浅色 / 护眼）
-// 调色板：卷宗纸米 / 信笺白 / 墨蓝字 / 印章朱 / 黄铜金 / 合规绿
-// 同时把卷宗色板映射为 Element Plus 的 --el-* token，实现全局换肤。
+// 契鉴多主题设计令牌：卷宗（默认）/ 企业明亮 / 深灰审阅。
+// 业务组件只使用语义变量，主题切换不改变风险含义与布局结构。
 // ============================================================
 :root {
-  // —— 卷宗底色与文字 ——
-  --ink: #f4f1e8; // 卷宗米 · 页面底（提亮，减少黄度）
-  --ink-2: #fdfcf8; // 信笺白 · 面板底
-  --ink-3: #f5f0e4; // 凹陷块 / 输入框底
-  --line: rgba(58, 50, 34, 0.14); // 淡分隔线
-  --line-strong: rgba(58, 50, 34, 0.26);
-  --ivory: #2a3248; // 深墨蓝 · 主文字（非纯黑，护眼）
-  --ivory-dim: #565e70; // 次级文字
-  --muted: #8c8574; // 弱文字 · 暖墨灰
-
-  // —— 语义强调色（压深保对比）——
-  --seal: #b23a2c; // 印章朱 · 高风险 / 警示
-  --seal-soft: rgba(178, 58, 44, 0.12);
-  --brass: #8a6a1c; // 黄铜金 · 主色 / 激活
-  --brass-lite: #b8912f; // 亮铜 · hover
-  --brass-soft: rgba(138, 106, 28, 0.12);
-  --amber: #b0741a; // 琥珀 · 中风险
-  --amber-soft: rgba(176, 116, 26, 0.14);
-  --sage: #3e7a5c; // 合规绿 · 低风险 / 通过
-  --sage-soft: rgba(62, 122, 92, 0.14);
-
-  // —— 阴影 / 圆角 / 字体 / 缓动 ——
-  --shadow: 0 2px 12px rgba(53, 44, 28, 0.09);
-  --shadow-sm: 0 1px 6px rgba(53, 44, 28, 0.07);
+  // —— 共享结构令牌 ——
   --serif: "Noto Serif SC", "Songti SC", "SimSun", serif;
   --sans: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --mono: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
-  --r-lg: 10px;
-  --r-md: 8px;
-  --r-sm: 6px;
-  --r-xs: 4px;    // 微小高亮块、tag 圆角
-  --r-pill: 20px; // chip/badge 胶囊形
+  --r-lg: 8px;
+  --r-md: 6px;
+  --r-sm: 4px;
+  --r-xs: 3px;
+  --r-pill: 999px;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 
-  // ==========================================================
-  // 映射到 Element Plus token（覆盖默认蓝主题）
-  // ==========================================================
+  // —— Element Plus 语义映射 ——
   --el-color-primary: var(--brass);
-  // primary 派生浅色档：必须一起覆盖，否则 hover/plain/disabled 残留蓝底
+  --el-color-danger: var(--seal);
+  --el-color-error: var(--seal);
+  --el-color-warning: var(--amber);
+  --el-color-success: var(--sage);
+  --el-color-info: var(--info);
+  --el-bg-color: var(--ink-2);
+  --el-bg-color-page: var(--ink);
+  --el-bg-color-overlay: var(--ink-2);
+  --el-fill-color: var(--ink-3);
+  --el-fill-color-light: var(--ink-3);
+  --el-fill-color-lighter: var(--ink-3);
+  --el-fill-color-extra-light: var(--ink-2);
+  --el-fill-color-blank: var(--ink-2);
+  --el-fill-color-dark: var(--line);
+  --el-text-color-primary: var(--ivory);
+  --el-text-color-regular: var(--ivory-dim);
+  --el-text-color-secondary: var(--muted);
+  --el-text-color-placeholder: var(--muted);
+  --el-text-color-disabled: var(--muted);
+  --el-border-color: var(--line);
+  --el-border-color-light: var(--line);
+  --el-border-color-lighter: var(--line);
+  --el-border-color-extra-light: var(--line);
+  --el-border-color-dark: var(--line-strong);
+  --el-border-color-hover: var(--line-strong);
+  --el-disabled-bg-color: var(--ink-3);
+  --el-disabled-border-color: var(--line);
+  --el-disabled-text-color: var(--muted);
+  --el-mask-color: var(--overlay-mask);
+  --el-mask-color-extra-light: var(--overlay-mask-soft);
+  --el-border-radius-base: var(--r-md);
+  --el-border-radius-small: var(--r-sm);
+  --el-box-shadow: var(--shadow);
+  --el-box-shadow-light: var(--shadow-sm);
+  --el-box-shadow-lighter: var(--shadow-sm);
+  --el-font-family: var(--sans);
+}
+
+// —— 卷宗主题（默认）——
+:root,
+:root[data-theme='dossier'] {
+  --ink: #f4f1e8;
+  --ink-2: #fdfcf8;
+  --ink-3: #f5f0e4;
+  --line: rgba(58, 50, 34, 0.14);
+  --line-strong: rgba(58, 50, 34, 0.26);
+  --ivory: #2a3248;
+  --ivory-dim: #565e70;
+  --muted: #8c8574;
+  --seal: #b23a2c;
+  --seal-soft: rgba(178, 58, 44, 0.12);
+  --brass: #8a6a1c;
+  --brass-lite: #b8912f;
+  --brass-soft: rgba(138, 106, 28, 0.12);
+  --amber: #b0741a;
+  --amber-soft: rgba(176, 116, 26, 0.14);
+  --sage: #3e7a5c;
+  --sage-soft: rgba(62, 122, 92, 0.14);
+  --info: #315b72;
+  --info-soft: rgba(49, 91, 114, 0.1);
+  --on-brass: #ffffff;
+  --shadow: 0 2px 12px rgba(53, 44, 28, 0.09);
+  --shadow-sm: 0 1px 6px rgba(53, 44, 28, 0.07);
+  --scroll-thumb: rgba(86, 94, 112, 0.28);
+  --scroll-thumb-hover: rgba(86, 94, 112, 0.44);
+  --brass-hover-soft: rgba(138, 106, 28, 0.05);
+  --login-glow: #f3eee0;
+  --seal-watermark: rgba(178, 58, 44, 0.05);
+  --seal-panel-soft: rgba(178, 58, 44, 0.08);
+  --paper-line: rgba(58, 50, 34, 0.07);
+  --annotation-highlight: rgba(176, 116, 26, 0.4);
+  --overlay-mask: rgba(24, 22, 18, 0.48);
+  --overlay-mask-soft: rgba(24, 22, 18, 0.24);
+  --bg-soft: rgba(58, 50, 34, 0.025);
+
   --el-color-primary-light-3: #a5842f;
   --el-color-primary-light-5: #bfa055;
   --el-color-primary-light-7: #d6c290;
   --el-color-primary-light-8: #e4d7b3;
   --el-color-primary-light-9: #f1e9d3;
   --el-color-primary-dark-2: #6e5416;
-
-  --el-color-danger: var(--seal);
   --el-color-danger-light-3: #c86a5f;
   --el-color-danger-light-5: #d99a92;
   --el-color-danger-light-9: #f6e8e6;
-  --el-color-error: var(--seal);
-
-  --el-color-warning: var(--amber);
   --el-color-warning-light-3: #c4934a;
   --el-color-warning-light-9: #f6ede0;
-
-  --el-color-success: var(--sage);
   --el-color-success-light-3: #6b9a82;
   --el-color-success-light-9: #e7f0eb;
+  --el-color-info-light-3: #6f8998;
+  --el-color-info-light-9: #e8edf0;
+}
 
-  // 中性色 / 背景 / 文字
-  --el-bg-color: var(--ink-2);
-  --el-bg-color-page: var(--ink);
-  --el-bg-color-overlay: var(--ink-2);
-  --el-fill-color-blank: var(--ink-2);
-  --el-fill-color-light: var(--ink-3);
-  --el-text-color-primary: var(--ivory);
-  --el-text-color-regular: var(--ivory-dim);
-  --el-text-color-secondary: var(--muted);
-  --el-text-color-placeholder: var(--muted);
-  --el-border-color: var(--line);
-  --el-border-color-light: var(--line);
-  --el-border-color-lighter: var(--line);
-  --el-border-color-hover: var(--line-strong);
+// —— 企业明亮 ——
+:root[data-theme='light'] {
+  --ink: #f2f4f7;
+  --ink-2: #ffffff;
+  --ink-3: #f7f8fa;
+  --line: rgba(32, 40, 56, 0.12);
+  --line-strong: rgba(32, 40, 56, 0.24);
+  --ivory: #202838;
+  --ivory-dim: #475467;
+  --muted: #667085;
+  --seal: #b42318;
+  --seal-soft: rgba(180, 35, 24, 0.09);
+  --brass: #8a6a1c;
+  --brass-lite: #725716;
+  --brass-soft: rgba(138, 106, 28, 0.08);
+  --amber: #b54708;
+  --amber-soft: rgba(181, 71, 8, 0.09);
+  --sage: #137a54;
+  --sage-soft: rgba(19, 122, 84, 0.09);
+  --info: #315b72;
+  --info-soft: rgba(49, 91, 114, 0.09);
+  --on-brass: #ffffff;
+  --shadow: 0 12px 32px rgba(16, 24, 40, 0.12);
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --scroll-thumb: rgba(71, 84, 103, 0.24);
+  --scroll-thumb-hover: rgba(71, 84, 103, 0.4);
+  --brass-hover-soft: rgba(138, 106, 28, 0.05);
+  --login-glow: #eef1f5;
+  --seal-watermark: rgba(180, 35, 24, 0.045);
+  --seal-panel-soft: rgba(180, 35, 24, 0.07);
+  --paper-line: rgba(32, 40, 56, 0.06);
+  --annotation-highlight: rgba(181, 71, 8, 0.34);
+  --overlay-mask: rgba(16, 24, 40, 0.48);
+  --overlay-mask-soft: rgba(16, 24, 40, 0.24);
+  --bg-soft: rgba(32, 40, 56, 0.025);
 
-  --el-border-radius-base: var(--r-md);
-  --el-border-radius-small: var(--r-sm);
-  --el-box-shadow-light: var(--shadow-sm);
-  --el-font-family: var(--sans);
+  --el-color-primary-light-3: #a1884a;
+  --el-color-primary-light-5: #b8a474;
+  --el-color-primary-light-7: #d5c9aa;
+  --el-color-primary-light-8: #e4dcc8;
+  --el-color-primary-light-9: #f4f1e9;
+  --el-color-primary-dark-2: #6d5316;
+  --el-color-danger-light-3: #c85f57;
+  --el-color-danger-light-5: #d98f89;
+  --el-color-danger-light-9: #f9e9e7;
+  --el-color-warning-light-3: #c67846;
+  --el-color-warning-light-9: #faeee7;
+  --el-color-success-light-3: #559b82;
+  --el-color-success-light-9: #e8f3ef;
+  --el-color-info-light-3: #6f8998;
+  --el-color-info-light-9: #e8edf0;
+}
+
+// —— 深灰审阅 ——
+:root[data-theme='dark'] {
+  --ink: #16181c;
+  --ink-2: #202328;
+  --ink-3: #282c32;
+  --line: rgba(235, 238, 244, 0.12);
+  --line-strong: rgba(235, 238, 244, 0.24);
+  --ivory: #f2f4f7;
+  --ivory-dim: #c2c8d0;
+  --muted: #939ba7;
+  --seal: #ff756a;
+  --seal-soft: rgba(255, 117, 106, 0.12);
+  --brass: #c6a75d;
+  --brass-lite: #d2b66f;
+  --brass-soft: rgba(198, 167, 93, 0.14);
+  --amber: #f0a85a;
+  --amber-soft: rgba(240, 168, 90, 0.13);
+  --sage: #58c799;
+  --sage-soft: rgba(88, 199, 153, 0.12);
+  --info: #78a7bd;
+  --info-soft: rgba(120, 167, 189, 0.12);
+  --on-brass: #181a1e;
+  --shadow: 0 16px 36px rgba(0, 0, 0, 0.28);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
+  --scroll-thumb: rgba(194, 200, 208, 0.22);
+  --scroll-thumb-hover: rgba(194, 200, 208, 0.36);
+  --brass-hover-soft: rgba(198, 167, 93, 0.09);
+  --login-glow: #24272d;
+  --seal-watermark: rgba(255, 117, 106, 0.05);
+  --seal-panel-soft: rgba(255, 117, 106, 0.09);
+  --paper-line: rgba(235, 238, 244, 0.065);
+  --annotation-highlight: rgba(240, 168, 90, 0.38);
+  --overlay-mask: rgba(0, 0, 0, 0.64);
+  --overlay-mask-soft: rgba(0, 0, 0, 0.36);
+  --bg-soft: rgba(235, 238, 244, 0.025);
+
+  --el-color-primary-light-3: #d1b977;
+  --el-color-primary-light-5: #88774f;
+  --el-color-primary-light-7: #5b5138;
+  --el-color-primary-light-8: #443d2e;
+  --el-color-primary-light-9: #302d25;
+  --el-color-primary-dark-2: #ddc77f;
+  --el-color-danger-light-3: #ff9188;
+  --el-color-danger-light-5: #a65c57;
+  --el-color-danger-light-9: #342326;
+  --el-color-warning-light-3: #f3bb7d;
+  --el-color-warning-light-9: #342b22;
+  --el-color-success-light-3: #7bd3ae;
+  --el-color-success-light-9: #21322c;
+  --el-color-info-light-3: #9abccc;
+  --el-color-info-light-9: #222e34;
 }

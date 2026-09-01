@@ -1,11 +1,15 @@
 // ============================================================
-// Element Plus 组件级样式覆盖 · 对齐卷宗风
+// Element Plus 组件级样式覆盖 · 对齐企业法务审阅台
 // token 已在 tokens.scss 映射，这里补组件粒度的质感调整。
 // ============================================================
 @use "./mixins" as *;
 
 // —— 主按钮：黄铜金，hover 亮铜 ——
 .el-button--primary {
+  --el-button-text-color: var(--on-brass);
+  --el-button-hover-text-color: var(--on-brass);
+  --el-button-active-text-color: var(--on-brass);
+  --el-button-disabled-text-color: var(--on-brass);
   --el-button-bg-color: var(--brass);
   --el-button-border-color: var(--brass);
   --el-button-hover-bg-color: var(--brass-lite);
@@ -14,18 +18,22 @@
   font-weight: 600;
 }
 
-// —— 卡片：信笺白底 + 暖棕阴影 ——
+// —— 卡片：只承担内容分区，不作为漂浮装饰 ——
 .el-card {
   --el-card-border-color: var(--line);
   --el-card-border-radius: var(--r-lg);
   background: var(--ink-2);
-  box-shadow: var(--shadow-sm);
+  box-shadow: none;
 }
 .el-card__header {
-  font-family: var(--serif);
+  padding: 14px 16px;
+  font-family: var(--sans);
   font-weight: 600;
   color: var(--ivory);
   border-bottom: 1px solid var(--line);
+}
+.el-card__body {
+  padding: 16px;
 }
 
 // —— 菜单：透明底，激活项黄铜左竖条 ——
@@ -44,9 +52,9 @@
     content: "";
     position: absolute;
     left: 0;
-    top: 8px;
-    bottom: 8px;
-    width: 3px;
+    top: 7px;
+    bottom: 7px;
+    width: 2px;
     background: var(--brass);
     border-radius: 0 2px 2px 0;
   }
@@ -54,8 +62,9 @@
 
 // —— 标签：风险等级软底 ——
 .el-tag {
-  border: none;
+  border-color: transparent;
   font-family: var(--mono);
+  font-weight: 600;
   &.el-tag--danger {
     background: var(--seal-soft);
     color: var(--seal);
@@ -70,15 +79,15 @@
   }
 }
 
-// —— 表格：表头米底、行淡横线 ——
+// —— 表格：紧凑、稳定、适合扫描比较 ——
 .el-table {
   --el-table-border-color: var(--line);
   --el-table-header-bg-color: var(--ink-3);
   --el-table-header-text-color: var(--ivory);
-  --el-table-row-hover-bg-color: var(--brass-soft);
+  --el-table-row-hover-bg-color: var(--brass-hover-soft);
   background: transparent;
   th.el-table__cell {
-    font-family: var(--serif);
+    font-family: var(--sans);
     font-weight: 600;
   }
 }
@@ -86,7 +95,7 @@
 // —— 步骤条 / 抽屉 / 弹窗：圆角与字体对齐 ——
 .el-drawer__header,
 .el-dialog__header {
-  font-family: var(--serif);
+  font-family: var(--sans);
   font-weight: 600;
   color: var(--ivory);
   margin-right: 0;
@@ -98,11 +107,24 @@
   color: var(--ivory-dim);
 }
 
-// —— 输入 / 下拉：凹陷米底 ——
+// —— 输入 / 下拉：中性工作面 ——
 .el-input__wrapper,
 .el-textarea__inner,
 .el-select__wrapper {
   background-color: var(--ink-3);
+  box-shadow: 0 0 0 1px var(--line) inset;
+}
+
+.el-empty {
+  padding: 28px 0;
+}
+.el-empty__description p {
+  color: var(--muted);
+}
+
+.el-drawer,
+.el-dialog {
+  box-shadow: var(--shadow);
 }
 
 // —— 键盘焦点可见性（无障碍）——

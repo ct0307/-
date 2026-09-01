@@ -4,6 +4,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import NotifyBell from './NotifyBell.vue'
+import ThemeSwitcher from './ThemeSwitcher.vue'
 
 const route = useRoute()
 const eyebrow = computed(() => (route.meta.eyebrow as string) || '')
@@ -18,6 +19,7 @@ const title = computed(() => (route.meta.title as string) || '')
     </div>
     <div class="topbar-actions">
       <slot />
+      <ThemeSwitcher />
       <NotifyBell />
     </div>
   </header>
@@ -26,28 +28,47 @@ const title = computed(() => (route.meta.title as string) || '')
 <style scoped>
 .topbar {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  padding: 22px 36px 14px;
-  border-bottom: 2px solid var(--brass);
-  box-shadow: 0 1px 0 var(--line);
-  background: var(--ink);
+  min-height: 72px;
+  padding: 14px 28px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--ink-2);
+  position: relative;
+}
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: 28px;
+  bottom: -1px;
+  width: 48px;
+  height: 2px;
+  background: var(--brass);
 }
 .eyebrow {
   margin: 0;
-  font-size: 11px;
-  letter-spacing: 0.16em;
-  color: var(--brass);
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--muted);
   font-family: var(--mono);
   font-weight: 500;
 }
 .topbar-title h1 {
-  margin: 4px 0 0;
-  font-size: 24px;
+  margin: 2px 0 0;
+  font-size: 21px;
+  line-height: 1.25;
 }
 .topbar-actions {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+@media (max-width: 768px) {
+  .topbar {
+    min-height: 64px;
+    padding: 12px 16px 10px;
+  }
+  .topbar::after { left: 16px; }
+  .topbar-title h1 { font-size: 19px; }
 }
 </style>

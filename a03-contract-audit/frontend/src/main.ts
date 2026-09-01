@@ -8,7 +8,9 @@ import '@/styles/index.scss'
 import App from './App.vue'
 import router from './router'
 import { registerIcons } from './plugins/icons'
+import { initTheme } from './theme/theme'
 
+initTheme()
 const app = createApp(App)
 
 registerIcons(app) // 按需注册项目用到的图标（替代全量注册减包）

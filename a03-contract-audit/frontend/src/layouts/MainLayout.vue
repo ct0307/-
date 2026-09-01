@@ -117,7 +117,7 @@ const sidebarWidth = computed(() => {
 .shell-content {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 36px 40px;
+  padding: 20px 28px 32px;
 }
 
 /* 超宽屏内容区 max-width，防止 2560px 下留白过大 */
@@ -142,7 +142,7 @@ const sidebarWidth = computed(() => {
 }
 .shell-side.mobile-mode.mobile-open {
   transform: translateX(0);
-  box-shadow: 4px 0 20px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow);
 }
 
 /* 遮罩层 */
@@ -150,7 +150,7 @@ const sidebarWidth = computed(() => {
   position: fixed;
   inset: 0;
   z-index: 99;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--overlay-mask);
 }
 .backdrop-fade-enter-active,
 .backdrop-fade-leave-active {
@@ -192,7 +192,7 @@ const sidebarWidth = computed(() => {
     height: auto;
   }
   .shell-content {
-    padding: 18px 20px 32px;
+    padding: 18px 20px 28px;
   }
 }
 
@@ -206,7 +206,7 @@ const sidebarWidth = computed(() => {
     overflow: visible;
   }
   .shell-content {
-    padding: 14px 16px 28px;
+    padding: 14px 16px 24px;
   }
 }
 </style>
