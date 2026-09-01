@@ -19,9 +19,9 @@
 
 | 验证项 | 结果 |
 |---|---|
-| 执行器专项 | `16 passed in 0.27s` |
-| 默认门禁评测专项 | `59 passed in 2.69s` |
-| 默认门禁后端全量 | `207 passed, 1 skipped, 6 warnings in 12.45s` |
+| 执行器专项 | `17 passed in 0.29s` |
+| 默认门禁评测专项 | `59 passed in 2.66s` |
+| 默认门禁后端全量 | `208 passed, 1 skipped, 6 warnings in 12.35s` |
 | 默认门禁前端测试 | `13 passed, 6 skipped in 0.99s`；跳过项均要求显式 `E2E_BASE_URL` |
 | TypeScript 类型检查 | 退出码 0 |
 | Vite 生产构建 | 退出码 0，转换 2352 个模块 |
