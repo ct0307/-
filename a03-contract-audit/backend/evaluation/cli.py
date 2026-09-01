@@ -4,11 +4,19 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Sequence
 import uuid
 
+from evaluation.batch import (
+    BatchTimeout,
+    BatchUnavailable,
+    HttpBatchGateway,
+    load_batch_manifest,
+    run_batch_acceptance,
+)
 from evaluation.elements import evaluate_dataset
 from evaluation.evidence import EvidenceWriter, sha256_file
 
@@ -108,6 +116,68 @@ def _run_elements(args: argparse.Namespace) -> int:
     return EXIT_OK if status == "passed" else EXIT_FAILED
 
 
+def _run_batch(args: argparse.Namespace) -> int:
+    manifest = load_batch_manifest(args.manifest)
+    run_id = args.run_id or _default_run_id("batch")
+    writer = EvidenceWriter.create(
+        args.runs_root,
+        run_id=run_id,
+        command="batch",
+        inputs={
+            "manifest_sha256": sha256_file(args.manifest),
+            "valid_count": 50,
+            "invalid_count": 2,
+        },
+    )
+    token = os.environ.get(args.token_env, "").strip()
+    if not token:
+        writer.append(
+            "batch-events",
+            {"event": "blocked", "reason": f"环境变量 {args.token_env} 未配置"},
+        )
+        writer.write_manifest(status="blocked", modules={"batch": "blocked"})
+        return EXIT_BLOCKED
+
+    gateway = HttpBatchGateway(
+        args.base_url,
+        token=token,
+        timeout_seconds=args.request_timeout,
+    )
+    try:
+        result = run_batch_acceptance(
+            manifest,
+            gateway=gateway,
+            writer=writer,
+            run_id=run_id,
+            poll_interval=args.poll_interval,
+            timeout_seconds=args.timeout_seconds,
+        )
+    except BatchUnavailable as exc:
+        writer.append("batch-events", {"event": "blocked", "reason": str(exc)})
+        writer.write_manifest(status="blocked", modules={"batch": "blocked"})
+        return EXIT_BLOCKED
+    except BatchTimeout as exc:
+        writer.append("batch-events", {"event": "timeout", "reason": str(exc)})
+        writer.write_manifest(status="failed", modules={"batch": "failed"})
+        return EXIT_FAILED
+    finally:
+        gateway.close()
+
+    writer.append(
+        "batch-events",
+        {
+            "event": "summary",
+            "status": result.status,
+            "valid_count": result.valid_count,
+            "invalid_count": result.invalid_count,
+            "valid_batch_id": result.valid_batch_id,
+            "reasons": list(result.reasons),
+        },
+    )
+    writer.write_manifest(status=result.status, modules={"batch": result.status})
+    return EXIT_OK if result.status == "passed" else EXIT_FAILED
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="A03 硬指标证据流水线")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -117,6 +187,15 @@ def build_parser() -> argparse.ArgumentParser:
     elements.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
     elements.add_argument("--run-id")
     elements.add_argument("--min-f1", type=float, default=0.90)
+    batch = subcommands.add_parser("batch", help="执行 50+2 批量验收")
+    batch.add_argument("--manifest", type=Path, required=True)
+    batch.add_argument("--base-url", required=True)
+    batch.add_argument("--token-env", default="A03_EVAL_TOKEN")
+    batch.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
+    batch.add_argument("--run-id")
+    batch.add_argument("--poll-interval", type=float, default=1.0)
+    batch.add_argument("--timeout-seconds", type=float, default=900)
+    batch.add_argument("--request-timeout", type=float, default=120)
     return parser
 
 
@@ -125,6 +204,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "elements":
             return _run_elements(args)
+        if args.command == "batch":
+            return _run_batch(args)
         raise ValueError(f"未知子命令: {args.command}")
     except (FileExistsError, OSError, ValueError) as exc:
         print(f"输入无效: {exc}", file=sys.stderr)

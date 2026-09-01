@@ -1,8 +1,10 @@
 """硬指标 CLI 必须使用稳定退出码并生成脱敏证据。"""
+import hashlib
 import json
 from pathlib import Path
 
-from evaluation.cli import EXIT_FAILED, EXIT_INVALID, EXIT_OK, main
+from evaluation.batch import BatchSubmission
+from evaluation.cli import EXIT_BLOCKED, EXIT_FAILED, EXIT_INVALID, EXIT_OK, main
 
 
 def _gold_row() -> dict:
@@ -54,6 +56,70 @@ def _invoke_elements(tmp_path: Path, *, gold: dict, prediction: dict, run_id: st
             "0.90",
         ]
     )
+
+
+def _write_batch_manifest(tmp_path: Path) -> Path:
+    samples = []
+    for index in range(50):
+        path = tmp_path / f"batch-valid-{index}.txt"
+        path.write_text("合同", encoding="utf-8")
+        samples.append(
+            {
+                "path": path.name,
+                "role": "valid",
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "expected_status": "done",
+            }
+        )
+    for index in range(2):
+        path = tmp_path / f"batch-invalid-{index}.exe"
+        path.write_bytes(b"invalid")
+        samples.append(
+            {
+                "path": path.name,
+                "role": "invalid",
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "expected_status": 400,
+            }
+        )
+    manifest = tmp_path / "batch-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "contract_type": "采购合同",
+                "dimensions": ["legal"],
+                "samples": samples,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+class _CliBatchGateway:
+    def __init__(self, *_args, **_kwargs):
+        self.submission_sizes = []
+
+    def close(self):
+        return None
+
+    def submit(self, samples, **_kwargs):
+        self.submission_sizes.append(len(samples))
+        if samples[0].role == "invalid":
+            return BatchSubmission(None, 400, {})
+        return BatchSubmission(7, 202, {"id": 7})
+
+    def get(self, batch_id):
+        return {
+            "id": batch_id,
+            "status": "done",
+            "total": 50,
+            "completed": 50,
+            "failed": 0,
+            "items": [{"id": index, "status": "done"} for index in range(50)],
+        }
 
 
 def test_elements_command_returns_ok_and_writes_passed_manifest(tmp_path):
@@ -152,3 +218,58 @@ def test_elements_evidence_does_not_store_raw_field_values(tmp_path):
     assert "乙公司" not in evidence
     assert "100万元" not in evidence
     assert "case-1" in evidence
+
+
+def test_batch_command_uses_gateway_and_writes_passed_manifest(monkeypatch, tmp_path):
+    monkeypatch.setenv("A03_EVAL_TOKEN", "secret-token")
+    gateway = _CliBatchGateway()
+    monkeypatch.setattr("evaluation.cli.HttpBatchGateway", lambda *_args, **_kwargs: gateway)
+
+    code = main(
+        [
+            "batch",
+            "--manifest",
+            str(_write_batch_manifest(tmp_path)),
+            "--base-url",
+            "http://127.0.0.1:8000/api/v1",
+            "--runs-root",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "batch-pass",
+            "--poll-interval",
+            "0",
+        ]
+    )
+    manifest = json.loads(
+        (tmp_path / "runs" / "batch-pass" / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert code == EXIT_OK
+    assert gateway.submission_sizes == [50, 1, 1]
+    assert manifest["status"] == "passed"
+    assert manifest["modules"] == {"batch": "passed"}
+
+
+def test_batch_command_is_blocked_when_token_is_missing(monkeypatch, tmp_path):
+    monkeypatch.delenv("A03_EVAL_TOKEN", raising=False)
+
+    code = main(
+        [
+            "batch",
+            "--manifest",
+            str(_write_batch_manifest(tmp_path)),
+            "--base-url",
+            "http://127.0.0.1:8000/api/v1",
+            "--runs-root",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "batch-blocked",
+        ]
+    )
+    manifest = json.loads(
+        (tmp_path / "runs" / "batch-blocked" / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert code == EXIT_BLOCKED
+    assert manifest["status"] == "blocked"
+    assert manifest["modules"] == {"batch": "blocked"}
