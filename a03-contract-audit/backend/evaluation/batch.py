@@ -100,12 +100,12 @@ class HttpBatchGateway:
         dimensions: Sequence[str],
     ) -> BatchSubmission:
         headers = {**self._headers, "Idempotency-Key": idempotency_key}
-        form_data = [("contract_type", contract_type)] + [
-            ("dimensions", dimension) for dimension in dimensions
-        ]
         try:
             with ExitStack() as stack:
                 files = [
+                    ("contract_type", (None, contract_type)),
+                    *[("dimensions", (None, dimension)) for dimension in dimensions],
+                    *[
                     (
                         "files",
                         (
@@ -115,11 +115,11 @@ class HttpBatchGateway:
                         ),
                     )
                     for sample in samples
+                    ],
                 ]
                 response = self._client.post(
                     f"{self._base_url}/batches",
                     headers=headers,
-                    data=form_data,
                     files=files,
                 )
         except httpx.RequestError as exc:

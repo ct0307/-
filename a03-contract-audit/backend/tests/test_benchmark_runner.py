@@ -5,11 +5,13 @@ from threading import Lock
 import time
 
 import pytest
+import httpx
 
 from evaluation.benchmark import BenchmarkConfig
 from evaluation.benchmark_runner import (
     BenchmarkCase,
     InvocationResult,
+    OpenAICompatibleTarget,
     compare_target_results,
     dataset_sha256,
     load_benchmark_manifest,
@@ -203,3 +205,40 @@ def test_benchmark_evidence_omits_prompts_and_response_content(tmp_path):
     assert "response" not in evidence
     assert '"case_id": "case-1"' in evidence
     assert '"phase": "warmup"' in evidence
+
+
+def test_openai_compatible_target_uses_expected_request_contract():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen-test",
+                "choices": [{"message": {"content": "private-response"}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 6},
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    target = OpenAICompatibleTarget(
+        "http://test/v1",
+        api_key="secret-key",
+        model="qwen-test",
+        client=client,
+    )
+
+    result = target.invoke("measured", BenchmarkCase("case-1", "private-prompt"))
+
+    assert captured["path"] == "/v1/chat/completions"
+    assert captured["authorization"] == "Bearer secret-key"
+    assert captured["payload"]["model"] == "qwen-test"
+    assert captured["payload"]["messages"] == [
+        {"role": "user", "content": "private-prompt"}
+    ]
+    assert result.error is None
+    assert result.prompt_tokens == 12
+    assert result.completion_tokens == 6

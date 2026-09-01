@@ -5,10 +5,13 @@ import json
 from pathlib import Path
 
 import pytest
+import httpx
 
 from evaluation.batch import (
+    BatchSample,
     BatchSubmission,
     BatchTimeout,
+    HttpBatchGateway,
     load_batch_manifest,
     run_batch_acceptance,
 )
@@ -177,3 +180,36 @@ def test_batch_evidence_omits_private_filenames_and_payload_details(tmp_path):
     assert "valid-0.txt" not in evidence
     assert '"detail"' not in evidence
     assert '"status": "done"' in evidence
+
+
+def test_http_batch_gateway_sends_streamed_multipart_with_auth(tmp_path):
+    path = tmp_path / "contract.txt"
+    path.write_text("合同", encoding="utf-8")
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["idempotency"] = request.headers.get("Idempotency-Key")
+        captured["content_type"] = request.headers.get("Content-Type")
+        captured["body"] = request.read()
+        return httpx.Response(202, json={"id": 9})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    gateway = HttpBatchGateway(
+        "http://test/api/v1",
+        token="secret-token",
+        client=client,
+    )
+
+    submission = gateway.submit(
+        [BatchSample(path, "valid", _sha256(path), "done")],
+        idempotency_key="request-123",
+        contract_type="采购合同",
+        dimensions=["legal"],
+    )
+
+    assert submission.batch_id == 9
+    assert captured["authorization"] == "Bearer secret-token"
+    assert captured["idempotency"] == "request-123"
+    assert captured["content_type"].startswith("multipart/form-data;")
+    assert b'filename="contract.txt"' in captured["body"]
