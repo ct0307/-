@@ -6,6 +6,47 @@
 
 ---
 
+## 2026-09-01 · 硬指标证据流水线开发与自动化测试（✅ 代码就绪）
+
+### 交付结果
+
+- 要素评测入口强制执行 JSON Schema Draft 2020-12；金标准必须包含两个唯一审核人及明确复核状态，裁决记录必须提供裁决人。
+- 新增版本化 `manifest.json`、追加式 JSONL、SHA-256 输入绑定、递归脱敏和原子报告写入；缺事件、哈希冲突、状态矛盾或轮次不足时拒绝生成有效报告。
+- 新增 `elements`、`batch`、`benchmark`、`report` 四个 CLI 子命令；稳定区分输入无效、执行异常、指标未达和外部条件阻塞。
+- 50+2 批测执行器强制 50 份有效文件同批提交、2 份异常文件隔离提交，覆盖超时、终态刷新和 multipart 文件句柄流式上传。
+- OpenClaw/GPU 执行器强制相同模型/提示词/数据集/并发/输出 Schema，执行 3 个完整预热轮次和 5 个完整正式轮次；能耗缺失时保持 `not_measured`。
+- PostgreSQL 证据状态由“已验证”校准为“代码就绪待实测”，明确现有迁移烟雾测试使用 SQLite。
+
+### 涉及文件
+
+- 评测实现：`backend/evaluation/{elements,evidence,batch,benchmark,benchmark_runner,report,cli}.py`、`backend/evaluation/schema.json`
+- 自动化测试：`backend/tests/test_element_metrics.py`、`test_evaluation_evidence.py`、`test_evaluation_batch.py`、`test_benchmark_stats.py`、`test_benchmark_runner.py`、`test_evaluation_report.py`、`test_evaluation_cli.py`
+- 依赖与文档：`backend/requirements.txt`、`.gitignore`、`docs/evaluation/element-accuracy-protocol.md`、`docs/evaluation/hard-indicator-matrix.md`
+
+### 新鲜验证证据
+
+| 验证项 | 结果 |
+|---|---|
+| 评测专项 | `59 passed in 2.98s`，零失败 |
+| 关键业务回归 | `63 passed, 1 skipped, 5 warnings in 5.48s`，零失败 |
+| 后端全量 | `191 passed, 1 skipped, 6 warnings in 12.40s`，零失败 |
+| 依赖完整性 | `pip check`：`No broken requirements found` |
+| 运行目录隔离 | `/evaluation-runs/` 已由 Git 忽略，不提交原始运行数据 |
+
+警告来自既有 SWIG 类型和 jieba `pkg_resources` 第三方弃用提示。跳过项为既有环境型集成条件，不影响本轮自动化验收结论。
+
+### 依赖安全审计
+
+- 新增 `jsonschema==4.25.1`，来源为官方 PyPI，许可证为 MIT，要求 Python ≥3.9。
+- OSV 以 PyPI 包名和固定版本查询返回空对象 `{}`，未发现公开已知漏洞；安装后未出现依赖冲突。
+
+### 外部验收边界
+
+- 本轮只完成开发和自动化测试，没有执行真实 52 文件、Docker Compose、PostgreSQL 16、OpenClaw 或 GPU 实机验收。
+- 双人复核冻结金标准、50+2 冻结文件、真实模型哈希/数据集、设备凭据和 PostgreSQL 验收环境到位前，硬指标状态保持“代码就绪待实测”或“阻塞”，不得写成达标。
+
+---
+
 ## 2026-09-01 · 代码基线、企业法务工作台与项目概要收口（✅ 已完成）
 
 ### 交付结果
