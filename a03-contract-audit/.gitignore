@@ -31,6 +31,9 @@ storage/
 *.log
 logs/
 
+# 本地硬指标原始证据，可能包含运行环境信息且体积较大
+/evaluation-runs/
+
 # IDE
 .vscode/
 .idea/
