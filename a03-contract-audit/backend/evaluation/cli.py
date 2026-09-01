@@ -1,13 +1,23 @@
-"""要素准确率命令行入口。"""
+"""A03 硬指标证据流水线命令行入口。"""
 from __future__ import annotations
 
 import argparse
-import csv
+from datetime import datetime, timezone
 import json
 from pathlib import Path
-from typing import Any
+import sys
+from typing import Any, Sequence
+import uuid
 
 from evaluation.elements import evaluate_dataset
+from evaluation.evidence import EvidenceWriter, sha256_file
+
+
+EXIT_OK = 0
+EXIT_INVALID = 2
+EXIT_ERROR = 3
+EXIT_FAILED = 4
+EXIT_BLOCKED = 5
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -17,61 +27,111 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             try:
-                records.append(json.loads(line))
+                value = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{line_number} 不是有效 JSON") from exc
+            if not isinstance(value, dict):
+                raise ValueError(f"{path}:{line_number} 必须是 JSON 对象")
+            records.append(value)
     return records
 
 
-def _write_csv(path: Path, report: dict[str, Any]) -> None:
-    with path.open("w", encoding="utf-8-sig", newline="") as target:
-        writer = csv.DictWriter(
-            target,
-            fieldnames=("case_id", "file", "contract_type", "document_kind", "field", "precision", "recall", "f1"),
-        )
-        writer.writeheader()
-        for case in report["cases"]:
-            for field, metrics in case["field_metrics"].items():
-                writer.writerow(
-                    {
-                        "case_id": case["case_id"],
-                        "file": case["file"],
-                        "contract_type": case["contract_type"],
-                        "document_kind": case["document_kind"],
-                        "field": field,
-                        **metrics,
-                    }
-                )
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="基于人工金标准评测合同要素准确率")
-    parser.add_argument("--gold", type=Path, required=True, help="人工金标准 JSONL")
-    parser.add_argument("--predictions", type=Path, required=True, help="预测结果 JSONL")
-    parser.add_argument("--output-json", type=Path, required=True)
-    parser.add_argument("--output-csv", type=Path, required=True)
-    args = parser.parse_args()
-
-    gold_records = _read_jsonl(args.gold)
-    prediction_records = _read_jsonl(args.predictions)
+def _read_predictions(path: Path) -> dict[str, dict[str, Any]]:
     predictions: dict[str, dict[str, Any]] = {}
-    for record in prediction_records:
+    for record in _read_jsonl(path):
         case_id = str(record.get("case_id", ""))
-        if not case_id or not isinstance(record.get("prediction"), dict):
+        prediction = record.get("prediction")
+        if not case_id or not isinstance(prediction, dict):
             raise ValueError("预测记录必须包含 case_id 和 prediction 对象")
         if case_id in predictions:
             raise ValueError(f"预测 case_id 重复: {case_id}")
-        predictions[case_id] = record["prediction"]
+        predictions[case_id] = prediction
+    return predictions
 
+
+def _default_run_id(command: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{command}-{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _safe_elements_summary(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event": "summary",
+        "sample_count": report["sample_count"],
+        "overall": report["overall"],
+        "by_field": report["by_field"],
+        "by_contract_type": report["by_contract_type"],
+        "by_document_kind": report["by_document_kind"],
+        "error_count": len(report["errors"]),
+        "errors": [
+            {"case_id": item["case_id"], "field": item["field"]}
+            for item in report["errors"]
+        ],
+    }
+
+
+def _run_elements(args: argparse.Namespace) -> int:
+    if not 0 <= args.min_f1 <= 1:
+        raise ValueError("--min-f1 必须在 0 到 1 之间")
+    gold_records = _read_jsonl(args.gold)
+    if not gold_records:
+        raise ValueError("金标准 JSONL 不能为空")
+    predictions = _read_predictions(args.predictions)
     report = evaluate_dataset(gold_records, predictions)
-    args.output_json.parent.mkdir(parents=True, exist_ok=True)
-    args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-    args.output_json.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    run_id = args.run_id or _default_run_id("elements")
+    writer = EvidenceWriter.create(
+        args.runs_root,
+        run_id=run_id,
+        command="elements",
+        inputs={
+            "gold_sha256": sha256_file(args.gold),
+            "predictions_sha256": sha256_file(args.predictions),
+            "schema_sha256": sha256_file(Path(__file__).with_name("schema.json")),
+            "sample_count": report["sample_count"],
+            "min_f1": args.min_f1,
+        },
     )
-    _write_csv(args.output_csv, report)
-    return 0
+    for case in report["cases"]:
+        writer.append(
+            "elements",
+            {
+                "event": "case",
+                "case_id": case["case_id"],
+                "contract_type": case["contract_type"],
+                "document_kind": case["document_kind"],
+                "field_metrics": case["field_metrics"],
+            },
+        )
+    writer.append("elements", _safe_elements_summary(report))
+    status = "passed" if report["overall"]["f1"] >= args.min_f1 else "failed"
+    writer.write_manifest(status=status, modules={"elements": status})
+    return EXIT_OK if status == "passed" else EXIT_FAILED
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="A03 硬指标证据流水线")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    elements = subcommands.add_parser("elements", help="评测冻结金标准要素准确率")
+    elements.add_argument("--gold", type=Path, required=True)
+    elements.add_argument("--predictions", type=Path, required=True)
+    elements.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
+    elements.add_argument("--run-id")
+    elements.add_argument("--min-f1", type=float, default=0.90)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        if args.command == "elements":
+            return _run_elements(args)
+        raise ValueError(f"未知子命令: {args.command}")
+    except (FileExistsError, OSError, ValueError) as exc:
+        print(f"输入无效: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    except Exception as exc:
+        print(f"执行异常: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":
