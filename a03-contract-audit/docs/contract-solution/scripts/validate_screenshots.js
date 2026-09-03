@@ -14,6 +14,7 @@ const expected = [
   "07-reports.png",
   "08-knowledge.png",
   "09-admin.png",
+  "10-reports-normal.png",
 ];
 
 async function main() {
@@ -46,7 +47,12 @@ async function main() {
 
   const contactPath = path.join(os.tmpdir(), "contract-solution-screenshots-contact.png");
   await sharp({
-    create: { width: 1620, height: 1020, channels: 3, background: "#F5F3EE" },
+    create: {
+      width: 1620,
+      height: Math.ceil(expected.length / 3) * 340,
+      channels: 3,
+      background: "#F5F3EE",
+    },
   }).composite(layers).png().toFile(contactPath);
   process.stdout.write(`contact sheet ${contactPath}\n`);
 }

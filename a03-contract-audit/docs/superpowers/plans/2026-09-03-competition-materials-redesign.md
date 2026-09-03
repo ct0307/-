@@ -87,6 +87,8 @@ Expected: 未验证事实只出现在“禁止措辞”列。
 
 **Files:**
 - Create: docs/competition-materials/visual-manifest.md
+- Create: docs/contract-solution/assets/screenshots/10-reports-normal.png
+- Modify: docs/contract-solution/scripts/validate_screenshots.js
 - Reference: docs/contract-solution/assets/diagrams/
 - Reference: docs/contract-solution/assets/screenshots/
 
@@ -96,20 +98,26 @@ Expected: 未验证事实只出现在“禁止措辞”列。
 
 Expected: 9 张截图存在、非空且尺寸满足现有规则；不安装或升级依赖。
 
-- [ ] **Step 2: 写入视觉清单**
+- [ ] **Step 2: 检查截图内容并补报表正常状态**
 
-每行记录资源路径、像素尺寸、内容说明、详细方案落点、概要页码、裁切要求和是否含演示数据。详细方案分配 23 幅图，概要介绍从中复用 8 幅；不登记纯装饰图。
+查看现有截图接触表。保留 07-reports.png 作为错误状态证据；启动本地前后端，使用演示数据库的真实接口截取 1600×1000 的正常报表页，保存为 10-reports-normal.png。截图中不得手工合成测试结论或硬件性能数据。
 
-- [ ] **Step 3: 检查源文件完整性**
+- [ ] **Step 3: 写入视觉清单**
+
+每行记录资源路径、像素尺寸、内容说明、详细方案落点、概要页码、裁切要求和是否含演示数据。详细方案使用 14 幅结构图和 9 幅正常/关键状态截图，排除 07-reports.png；概要介绍复用 8 幅，不登记纯装饰图。
+
+- [ ] **Step 4: 检查源文件完整性**
 
     $materialAssets = Get-ChildItem -LiteralPath 'docs/contract-solution/assets/diagrams','docs/contract-solution/assets/screenshots' -Filter '*.png' -File
     $materialAssets | Select-Object FullName,Length | Sort-Object FullName
 
-Expected: 清单中的 23 个文件全部存在且 Length 大于 0。
+Expected: 14 幅结构图和 10 幅截图全部存在且 Length 大于 0；详细方案清单明确选用其中 23 幅。
 
-- [ ] **Step 4: 提交视觉清单**
+再次运行 `npm --prefix docs/contract-solution run validate:screenshots`，应校验 10 张截图并生成 4 行接触表。
 
-    git add docs/competition-materials/visual-manifest.md
+- [ ] **Step 5: 提交视觉清单和新截图**
+
+    git add docs/competition-materials/visual-manifest.md docs/contract-solution/assets/screenshots/10-reports-normal.png docs/contract-solution/scripts/validate_screenshots.js
     git commit -m "docs: map competition material visuals"
 
 ### Task 3: 重写详细方案第一、二章
