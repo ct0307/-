@@ -106,6 +106,11 @@ const PROFILES = {
     keepAsTable: LEGACY_TABLES,
     version: "V1.0",
     date: "2026 年 7 月",
+    bodyLine: 250,
+    eventTitle: "浙江省职业技能大赛 · 外包赛道",
+    eventTitleSize: 24,
+    subject: "浙江省职业技能大赛外包赛道 A03 项目详细方案",
+    chapterPageBreaks: false,
   },
   redesign: {
     contentDir: path.join(ROOT, "content-redesign"),
@@ -116,6 +121,11 @@ const PROFILES = {
     keepAsTable: REDESIGN_TABLES,
     version: "V2.0",
     date: "2026 年 9 月",
+    bodyLine: 280,
+    eventTitle: "2026“数字马力杯”第十三届浙江省大学生服务外包创新应用大赛",
+    eventTitleSize: 20,
+    subject: "2026“数字马力杯”第十三届浙江省大学生服务外包创新应用大赛 A03 项目详细方案",
+    chapterPageBreaks: true,
   },
 };
 
@@ -389,7 +399,7 @@ function tableAsGroupedItems(block) {
 function coverChildren(config) {
   const centered = AlignmentType.CENTER;
   return [
-    new Paragraph({ spacing: { before: 1100, after: 260 }, alignment: centered, children: [new TextRun({ text: "浙江省职业技能大赛 · 外包赛道", bold: true, color: COLOR.accent, font: headingFont(), size: 24 })] }),
+    new Paragraph({ spacing: { before: 1100, after: 260 }, alignment: centered, children: [new TextRun({ text: config.eventTitle, bold: true, color: COLOR.accent, font: headingFont(), size: config.eventTitleSize })] }),
     new Paragraph({ spacing: { before: 0, after: 120 }, alignment: centered, children: [new TextRun({ text: "契鉴", bold: true, color: COLOR.primary, font: headingFont(), size: 58 })] }),
     new Paragraph({ spacing: { before: 0, after: 120 }, alignment: centered, children: [new TextRun({ text: "企业级合同合规审查与多维报表生成智能体系统", bold: true, color: COLOR.text, font: headingFont(), size: 30 })] }),
     new Paragraph({ spacing: { before: 0, after: 420 }, alignment: centered, children: [new TextRun({ text: "项目详细方案", color: COLOR.secondary, font: headingFont(), size: 28 })] }),
@@ -641,6 +651,7 @@ function numbering() {
 
 async function main() {
   const { profile, config } = parseArgs(process.argv.slice(2));
+  STYLE.bodyLine = config.bodyLine;
   const files = fs.readdirSync(config.contentDir).filter((file) => /^\d{2}-.*\.md$/.test(file)).sort();
   if (files.length !== config.expectedFiles) {
     throw new Error(`expected ${config.expectedFiles} chapter files, found ${files.length}`);
@@ -648,7 +659,10 @@ async function main() {
 
   const stats = { chapters: 0, figures: 0, tables: 0, groupedTables: 0 };
   const body = [];
-  for (const file of files) {
+  for (const [fileIndex, file] of files.entries()) {
+    if (config.chapterPageBreaks && fileIndex > 0) {
+      body.push(new Paragraph({ children: [new PageBreak()] }));
+    }
     const blocks = parseMarkdown(path.join(config.contentDir, file));
     for (const block of blocks) body.push(...blockToWord(block, stats, config.keepAsTable));
   }
@@ -664,7 +678,7 @@ async function main() {
 
   const doc = new Document({
     title: "契鉴——企业级合同合规审查与多维报表生成智能体系统项目详细方案",
-    subject: "浙江省职业技能大赛外包赛道 A03 项目详细方案",
+    subject: config.subject,
     creator: "豪到你了团队",
     lastModifiedBy: "豪到你了团队",
     description: "企业级合同合规审查智能体系统的目标态需求、设计、实施与验收方案",

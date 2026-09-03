@@ -13,6 +13,8 @@ from docx import Document
 
 
 BANNED = re.compile(r"当前已|已经完成|截至目前|后续完善|完成度|现有项目|本项目目前")
+CURRENT_EVENT = "2026“数字马力杯”第十三届浙江省大学生服务外包创新应用大赛"
+OUTDATED_EVENT = "浙江省职业技能大赛 · 外包赛道"
 CHAPTER = re.compile(r"^第[一二三四五六七八九十]+章\s")
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 PROFILES = {
@@ -27,6 +29,8 @@ PROFILES = {
         "min_alt": 20,
         "min_bookmarks": 40,
         "include_table_text": False,
+        "required_facts": (),
+        "forbidden_facts": (),
     },
     "redesign": {
         "chapters": 7,
@@ -39,6 +43,8 @@ PROFILES = {
         "min_alt": 22,
         "min_bookmarks": 30,
         "include_table_text": True,
+        "required_facts": (CURRENT_EVENT,),
+        "forbidden_facts": (OUTDATED_EVENT,),
     },
 }
 EXPECTED_IMAGES = {
@@ -79,6 +85,12 @@ def validate_docx(path: Path, profile: str) -> dict[str, int]:
         fail(f"一级章节应为 {config['chapters']} 个，实际 {len(chapter_titles)} 个")
     if len(set(chapter_titles)) != config["chapters"]:
         fail("一级章节标题存在重复")
+    for fact in config["required_facts"]:
+        if fact not in paragraph_text:
+            fail(f"缺少必要事实：{fact}")
+    for fact in config["forbidden_facts"]:
+        if fact in paragraph_text:
+            fail(f"发现过期事实：{fact}")
 
     counted_text = paragraph_text
     if config["include_table_text"]:
@@ -177,10 +189,30 @@ def validate_pdf(path: Path, profile: str) -> int:
         fail(f"PDF 不存在或为空：{path}")
     from pypdf import PdfReader
 
-    pages = len(PdfReader(str(path)).pages)
+    reader = PdfReader(str(path))
+    pages = len(reader.pages)
     page_min, page_max = PROFILES[profile]["pages"]
     if not page_min <= pages <= page_max:
         fail(f"PDF 页数应为 {page_min}～{page_max}，实际 {pages}")
+    if profile == "redesign":
+        chapter_pages: list[int] = []
+        for page_number, page in enumerate(reader.pages[2:], start=3):
+            lines = [line.strip() for line in (page.extract_text() or "").splitlines()]
+            for line_number, line in enumerate(lines):
+                if not CHAPTER.match(line):
+                    continue
+                leading_lines = [
+                    value
+                    for value in lines[:line_number]
+                    if value
+                    and not (value.startswith("契鉴") and "项目详细方案" in value)
+                    and not (value.startswith("V2.0") and "第" in value and "页" in value)
+                ]
+                if leading_lines:
+                    fail(f"{line} 未独立起页，位于 PDF 第 {page_number} 页正文中部")
+                chapter_pages.append(page_number)
+        if len(chapter_pages) != PROFILES[profile]["chapters"]:
+            fail(f"PDF 中应识别 {PROFILES[profile]['chapters']} 个独立起页章节，实际 {len(chapter_pages)}")
     return pages
 
 
