@@ -14,7 +14,33 @@ from docx import Document
 
 BANNED = re.compile(r"当前已|已经完成|截至目前|后续完善|完成度|现有项目|本项目目前")
 CHAPTER = re.compile(r"^第[一二三四五六七八九十]+章\s")
-SOURCE = re.compile(r"\[S(?:0[1-9]|1[0-3])\]")
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+PROFILES = {
+    "legacy": {
+        "chapters": 17,
+        "chars": (25000, 35000),
+        "tables": (10, 15),
+        "images": (20, 30),
+        "pages": (40, 50),
+        "sources": tuple(range(1, 14)),
+        "banned": BANNED,
+        "min_alt": 20,
+        "min_bookmarks": 40,
+        "include_table_text": False,
+    },
+    "redesign": {
+        "chapters": 7,
+        "chars": (27000, 33000),
+        "tables": (8, 10),
+        "images": (22, 28),
+        "pages": (35, 40),
+        "sources": tuple(range(1, 7)),
+        "banned": None,
+        "min_alt": 22,
+        "min_bookmarks": 30,
+        "include_table_text": True,
+    },
+}
 EXPECTED_IMAGES = {
     *(f"{index:02d}-{name}.png" for index, name in enumerate([
         "problem-solution", "user-collaboration", "functional-architecture",
@@ -24,7 +50,7 @@ EXPECTED_IMAGES = {
     ], start=1)),
     "01-login.png", "02-dashboard.png", "03-audit.png", "04-risk-review.png",
     "05-collaboration.png", "06-rectify.png", "07-reports.png", "08-knowledge.png",
-    "09-admin.png",
+    "09-admin.png", "10-reports-normal.png",
 }
 NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -41,29 +67,43 @@ def xml_text(archive: zipfile.ZipFile, name: str) -> str:
     return archive.read(name).decode("utf-8")
 
 
-def validate_docx(path: Path) -> dict[str, int]:
+def validate_docx(path: Path, profile: str) -> dict[str, int]:
     if not path.exists() or path.stat().st_size == 0:
         fail(f"DOCX 不存在或为空：{path}")
 
     doc = Document(path)
     paragraph_text = "\n".join(p.text for p in doc.paragraphs)
     chapter_titles = [p.text.strip() for p in doc.paragraphs if CHAPTER.match(p.text.strip())]
-    if len(chapter_titles) != 17:
-        fail(f"一级章节应为 17 个，实际 {len(chapter_titles)} 个")
-    if len(set(chapter_titles)) != 17:
+    config = PROFILES[profile]
+    if len(chapter_titles) != config["chapters"]:
+        fail(f"一级章节应为 {config['chapters']} 个，实际 {len(chapter_titles)} 个")
+    if len(set(chapter_titles)) != config["chapters"]:
         fail("一级章节标题存在重复")
 
-    chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", paragraph_text))
-    if not 25000 <= chinese_chars <= 35000:
-        fail(f"正文中文字符应为 25000～35000，实际 {chinese_chars}")
-    if BANNED.search(paragraph_text):
-        fail(f"发现禁用表述：{BANNED.search(paragraph_text).group(0)}")
-    if not all(f"[S{index:02d}]" in paragraph_text for index in range(1, 14)):
-        fail("参考文献 [S01]～[S13] 不完整")
+    counted_text = paragraph_text
+    if config["include_table_text"]:
+        table_text = "\n".join(
+            cell.text for table in doc.tables for row in table.rows for cell in row.cells
+        )
+        counted_text = f"{counted_text}\n{table_text}"
+    chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", counted_text))
+    char_min, char_max = config["chars"]
+    if not char_min <= chinese_chars <= char_max:
+        fail(f"正文中文字符应为 {char_min}～{char_max}，实际 {chinese_chars}")
+    banned = config["banned"]
+    if banned is not None and banned.search(paragraph_text):
+        fail(f"发现禁用表述：{banned.search(paragraph_text).group(0)}")
+    missing_sources = [
+        f"[S{index:02d}]" for index in config["sources"]
+        if f"[S{index:02d}]" not in paragraph_text
+    ]
+    if missing_sources:
+        fail(f"参考文献不完整：{', '.join(missing_sources)}")
 
     table_count = len(doc.tables)
-    if not 10 <= table_count <= 15:
-        fail(f"表格数应为 10～15，实际 {table_count}")
+    table_min, table_max = config["tables"]
+    if not table_min <= table_count <= table_max:
+        fail(f"表格数应为 {table_min}～{table_max}，实际 {table_count}")
 
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
@@ -79,8 +119,9 @@ def validate_docx(path: Path) -> dict[str, int]:
         if "PAGE" not in "".join(xml_text(archive, name) for name in footers):
             fail("页脚缺少页码域")
         media = [name for name in names if name.startswith("word/media/") and not name.endswith("/")]
-        if not 20 <= len(media) <= 30:
-            fail(f"有效图片数应为 20～30，实际 {len(media)}")
+        image_min, image_max = config["images"]
+        if not image_min <= len(media) <= image_max:
+            fail(f"有效图片数应为 {image_min}～{image_max}，实际 {len(media)}")
         if "TargetMode=\"External\"" not in rels_xml:
             fail("参考文献 URL 未生成外部超链接")
 
@@ -110,14 +151,13 @@ def validate_docx(path: Path) -> dict[str, int]:
                     fail(f"第 {index} 张表 tcW 与 tblGrid 不一致")
 
         alt_descriptions = [node.get("descr", "") for node in root.findall(".//wp:docPr", NS)]
-        if len([value for value in alt_descriptions if value.strip()]) < 20:
+        if len([value for value in alt_descriptions if value.strip()]) < config["min_alt"]:
             fail("图片替代文字不足")
-        if len(root.findall(".//w:bookmarkStart", NS)) < 40:
+        if len(root.findall(".//w:bookmarkStart", NS)) < config["min_bookmarks"]:
             fail("章节与图题书签不足")
 
-    source_root = path.parent
     actual_images = {
-        item.name for folder in (source_root / "assets" / "diagrams", source_root / "assets" / "screenshots")
+        item.name for folder in (SOURCE_ROOT / "assets" / "diagrams", SOURCE_ROOT / "assets" / "screenshots")
         for item in folder.glob("*.png")
     }
     missing = EXPECTED_IMAGES - actual_images
@@ -132,27 +172,29 @@ def validate_docx(path: Path) -> dict[str, int]:
     }
 
 
-def validate_pdf(path: Path) -> int:
+def validate_pdf(path: Path, profile: str) -> int:
     if not path.exists() or path.stat().st_size == 0:
         fail(f"PDF 不存在或为空：{path}")
     from pypdf import PdfReader
 
     pages = len(PdfReader(str(path)).pages)
-    if not 40 <= pages <= 50:
-        fail(f"PDF 页数应为 40～50，实际 {pages}")
+    page_min, page_max = PROFILES[profile]["pages"]
+    if not page_min <= pages <= page_max:
+        fail(f"PDF 页数应为 {page_min}～{page_max}，实际 {pages}")
     return pages
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", choices=PROFILES, default="legacy")
     parser.add_argument("docx", type=Path)
     parser.add_argument("pdf", nargs="?", type=Path)
     args = parser.parse_args()
 
     try:
-        result = validate_docx(args.docx.resolve())
+        result = validate_docx(args.docx.resolve(), args.profile)
         if args.pdf:
-            result["pages"] = validate_pdf(args.pdf.resolve())
+            result["pages"] = validate_pdf(args.pdf.resolve(), args.profile)
     except (AssertionError, zipfile.BadZipFile, KeyError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

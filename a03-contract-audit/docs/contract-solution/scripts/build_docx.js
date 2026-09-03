@@ -27,8 +27,6 @@ const {
 } = require("docx");
 
 const ROOT = path.resolve(__dirname, "..");
-const CONTENT_DIR = path.join(ROOT, "content");
-const OUTPUT_PATH = path.join(ROOT, "契鉴_项目详细方案.docx");
 
 const PAGE = {
   width: 11906,
@@ -68,7 +66,7 @@ const STYLE = {
   captionSize: 17,
 };
 
-const KEEP_AS_TABLE = new Set([
+const LEGACY_TABLES = new Set([
   "02-industry-market.md|痛点|根因|直接影响|方案响应",
   "02-industry-market.md|能力维度|e签宝|法大大 iContract|百度合同智能处理|契鉴目标方案",
   "03-users-requirements.md|角色|主要目标|核心任务|关注信息|责任边界",
@@ -85,6 +83,61 @@ const KEEP_AS_TABLE = new Set([
   "14-testing-acceptance.md|指标|目标阈值|失败判定",
   "15-feasibility-risk.md|风险|概率/影响|触发信号|预防措施|应急措施|责任角色",
 ]);
+
+const REDESIGN_TABLES = new Set([
+  "01-project-overview.md|赛题要求|契鉴的回应|对应证据",
+  "02-requirements-goals.md|角色|需要完成的判断|现有障碍|系统支持|最终责任",
+  "03-overall-solution.md|层级|核心职责|主要输入|主要输出|失败处理",
+  "04-core-functions.md|处理阶段|用户动作|系统处理|可见结果|异常出口",
+  "04-core-functions.md|异常场景|系统反应|用户可采取的动作|保留证据",
+  "05-key-technology.md|技术环节|选择依据|实际处理|输出|限制",
+  "05-key-technology.md|证据状态|触发条件|系统处置|人工动作",
+  "06-implementation-application.md|环境或组件|项目用途|当前证据|交付条件",
+  "07-verification-conclusion.md|赛题指标|当前状态|本轮证据摘要|仍需条件",
+]);
+
+const PROFILES = {
+  legacy: {
+    contentDir: path.join(ROOT, "content"),
+    outputPath: path.join(ROOT, "契鉴_项目详细方案.docx"),
+    expectedFiles: 17,
+    expectedChapters: 17,
+    expectedFigures: 23,
+    keepAsTable: LEGACY_TABLES,
+    version: "V1.0",
+    date: "2026 年 7 月",
+  },
+  redesign: {
+    contentDir: path.join(ROOT, "content-redesign"),
+    outputPath: path.resolve(ROOT, "../..", "契鉴_项目详细方案_重构版.docx"),
+    expectedFiles: 7,
+    expectedChapters: 7,
+    expectedFigures: 23,
+    keepAsTable: REDESIGN_TABLES,
+    version: "V2.0",
+    date: "2026 年 9 月",
+  },
+};
+
+function parseArgs(argv) {
+  let profile = "legacy";
+  let output;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg.startsWith("--profile=")) profile = arg.slice("--profile=".length);
+    else if (arg === "--profile") profile = argv[++index];
+    else if (arg.startsWith("--output=")) output = arg.slice("--output=".length);
+    else if (arg === "--output") output = argv[++index];
+    else throw new Error(`unknown argument: ${arg}`);
+  }
+  if (!PROFILES[profile]) throw new Error(`unknown profile: ${profile}`);
+  if (output === undefined) return { profile, config: PROFILES[profile] };
+  if (!output) throw new Error("--output requires a path");
+  return {
+    profile,
+    config: { ...PROFILES[profile], outputPath: path.resolve(ROOT, output) },
+  };
+}
 
 function eastAsiaFont() {
   return { ascii: "Arial", hAnsi: "Arial", eastAsia: "宋体", cs: "Arial" };
@@ -333,7 +386,7 @@ function tableAsGroupedItems(block) {
   return children;
 }
 
-function coverChildren() {
+function coverChildren(config) {
   const centered = AlignmentType.CENTER;
   return [
     new Paragraph({ spacing: { before: 1100, after: 260 }, alignment: centered, children: [new TextRun({ text: "浙江省职业技能大赛 · 外包赛道", bold: true, color: COLOR.accent, font: headingFont(), size: 24 })] }),
@@ -343,8 +396,8 @@ function coverChildren() {
     new Paragraph({ spacing: { before: 0, after: 100 }, alignment: centered, children: [new TextRun({ text: "赛题编号  A03", bold: true, color: COLOR.primary, font: eastAsiaFont(), size: 22 })] }),
     new Paragraph({ spacing: { before: 0, after: 100 }, alignment: centered, children: [new TextRun({ text: "命题单位  海康-南湖研究院", color: COLOR.text, font: eastAsiaFont(), size: 22 })] }),
     new Paragraph({ spacing: { before: 0, after: 100 }, alignment: centered, children: [new TextRun({ text: "参赛团队  豪到你了团队", color: COLOR.text, font: eastAsiaFont(), size: 22 })] }),
-    new Paragraph({ spacing: { before: 0, after: 100 }, alignment: centered, children: [new TextRun({ text: "文档版本  V1.0", color: COLOR.text, font: eastAsiaFont(), size: 22 })] }),
-    new Paragraph({ spacing: { before: 180, after: 0 }, alignment: centered, children: [new TextRun({ text: "2026 年 7 月", color: COLOR.muted, font: eastAsiaFont(), size: 20 })] }),
+    new Paragraph({ spacing: { before: 0, after: 100 }, alignment: centered, children: [new TextRun({ text: `文档版本  ${config.version}`, color: COLOR.text, font: eastAsiaFont(), size: 22 })] }),
+    new Paragraph({ spacing: { before: 180, after: 0 }, alignment: centered, children: [new TextRun({ text: config.date, color: COLOR.muted, font: eastAsiaFont(), size: 20 })] }),
     new Paragraph({ children: [new PageBreak()] }),
     new Paragraph({ alignment: centered, spacing: { before: 80, after: 260 }, children: [new TextRun({ text: "目录", bold: true, color: COLOR.primary, font: headingFont(), size: 34 })] }),
     new TableOfContents("目录", { hyperlink: true, headingStyleRange: "1-2" }),
@@ -362,13 +415,13 @@ function runningHeader() {
   });
 }
 
-function runningFooter() {
+function runningFooter(config) {
   return new Footer({
     children: [new Paragraph({
       alignment: AlignmentType.CENTER,
       spacing: { before: 0, after: 0 },
       children: [
-        new TextRun({ text: "V1.0  |  契鉴项目详细方案  |  第 ", color: COLOR.muted, font: eastAsiaFont(), size: 16 }),
+        new TextRun({ text: `${config.version}  |  契鉴项目详细方案  |  第 `, color: COLOR.muted, font: eastAsiaFont(), size: 16 }),
         new TextRun({ children: [PageNumber.CURRENT], color: COLOR.muted, font: eastAsiaFont(), size: 16 }),
         new TextRun({ text: " 页", color: COLOR.muted, font: eastAsiaFont(), size: 16 }),
       ],
@@ -384,7 +437,7 @@ function emptyFooter() {
   return new Footer({ children: [new Paragraph({ text: "" })] });
 }
 
-function blockToWord(block, stats) {
+function blockToWord(block, stats, keepAsTable) {
   if (block.type === "heading") {
     const headingMap = { 1: HeadingLevel.HEADING_1, 2: HeadingLevel.HEADING_2, 3: HeadingLevel.HEADING_3 };
     const bookmarkId = sanitizeBookmark(`${block.file}_${block.lineNumber}_${block.text}`);
@@ -417,7 +470,7 @@ function blockToWord(block, stats) {
   }
   if (block.type === "table") {
     const key = `${block.file}|${block.header.join("|")}`;
-    if (KEEP_AS_TABLE.has(key)) {
+    if (keepAsTable.has(key)) {
       stats.tables += 1;
       return [makeTable(block), new Paragraph({ text: "", spacing: { before: 0, after: 100 } })];
     }
@@ -587,18 +640,27 @@ function numbering() {
 }
 
 async function main() {
-  const files = fs.readdirSync(CONTENT_DIR).filter((file) => /^\d{2}-.*\.md$/.test(file)).sort();
-  if (files.length !== 17) throw new Error(`expected 17 chapter files, found ${files.length}`);
+  const { profile, config } = parseArgs(process.argv.slice(2));
+  const files = fs.readdirSync(config.contentDir).filter((file) => /^\d{2}-.*\.md$/.test(file)).sort();
+  if (files.length !== config.expectedFiles) {
+    throw new Error(`expected ${config.expectedFiles} chapter files, found ${files.length}`);
+  }
 
   const stats = { chapters: 0, figures: 0, tables: 0, groupedTables: 0 };
   const body = [];
   for (const file of files) {
-    const blocks = parseMarkdown(path.join(CONTENT_DIR, file));
-    for (const block of blocks) body.push(...blockToWord(block, stats));
+    const blocks = parseMarkdown(path.join(config.contentDir, file));
+    for (const block of blocks) body.push(...blockToWord(block, stats, config.keepAsTable));
   }
-  if (stats.chapters !== 17) throw new Error(`expected 17 chapter headings, found ${stats.chapters}`);
-  if (stats.figures !== 23) throw new Error(`expected 23 figures, found ${stats.figures}`);
-  if (stats.tables !== KEEP_AS_TABLE.size) throw new Error(`expected ${KEEP_AS_TABLE.size} Word tables, found ${stats.tables}`);
+  if (stats.chapters !== config.expectedChapters) {
+    throw new Error(`expected ${config.expectedChapters} chapter headings, found ${stats.chapters}`);
+  }
+  if (stats.figures !== config.expectedFigures) {
+    throw new Error(`expected ${config.expectedFigures} figures, found ${stats.figures}`);
+  }
+  if (stats.tables !== config.keepAsTable.size) {
+    throw new Error(`expected ${config.keepAsTable.size} Word tables, found ${stats.tables}`);
+  }
 
   const doc = new Document({
     title: "契鉴——企业级合同合规审查与多维报表生成智能体系统项目详细方案",
@@ -627,15 +689,16 @@ async function main() {
         },
       },
       headers: { first: emptyHeader(), default: runningHeader() },
-      footers: { first: emptyFooter(), default: runningFooter() },
-      children: [...coverChildren(), ...body],
+      footers: { first: emptyFooter(), default: runningFooter(config) },
+      children: [...coverChildren(config), ...body],
     }],
   });
 
   const buffer = await Packer.toBuffer(doc);
-  fs.writeFileSync(OUTPUT_PATH, buffer);
-  process.stdout.write(`generated ${OUTPUT_PATH}\n`);
-  process.stdout.write(`chapters=${stats.chapters} figures=${stats.figures} tables=${stats.tables} groupedTables=${stats.groupedTables} bytes=${buffer.length}\n`);
+  fs.mkdirSync(path.dirname(config.outputPath), { recursive: true });
+  fs.writeFileSync(config.outputPath, buffer);
+  process.stdout.write(`generated ${config.outputPath}\n`);
+  process.stdout.write(`profile=${profile} chapters=${stats.chapters} figures=${stats.figures} tables=${stats.tables} groupedTables=${stats.groupedTables} bytes=${buffer.length}\n`);
 }
 
 main().catch((error) => {

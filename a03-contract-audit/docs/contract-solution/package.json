@@ -5,6 +5,7 @@
   "scripts": {
     "generate:diagrams": "node scripts/generate_diagrams.js",
     "build:docx": "node scripts/build_docx.js",
+    "build:docx:redesign": "node scripts/build_docx.js --profile=redesign",
     "build": "npm run generate:diagrams && npm run build:docx",
     "validate:screenshots": "node scripts/validate_screenshots.js"
   },
