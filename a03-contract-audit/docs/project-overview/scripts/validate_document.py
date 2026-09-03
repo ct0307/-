@@ -17,31 +17,66 @@ NS = {
     "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
 }
 W = f"{{{NS['w']}}}"
-PAGE_TITLES = [
-    "前言",
-    "项目创意",
-    "系统总体方案",
-    "功能简介",
-    "核心业务流程",
-    "技术架构与开发环境",
-    "应用对象与典型场景",
-    "项目优势与安全体系",
-    "验证情况与责任边界",
-    "结语与发展方向",
-    "系统关键界面展示",
-]
-REQUIRED_FACTS = [
-    "2026“数字马力杯”第十三届浙江省大学生服务外包创新应用大赛",
-    "契鉴",
-    "双 Agent",
-    "RAG",
-    "13 张数据库表",
-    "40 条 /api/ 路由",
-    "125 passed",
-    "11 passed",
-    "待实测",
-    "辅助审查意见",
-]
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+PROFILES = {
+    "legacy": {
+        "pages": 12,
+        "images": 12,
+        "chars": (2500, 6500),
+        "source": SOURCE_ROOT / "content" / "overview.md",
+        "page_titles": (
+            "前言",
+            "项目创意",
+            "系统总体方案",
+            "功能简介",
+            "核心业务流程",
+            "技术架构与开发环境",
+            "应用对象与典型场景",
+            "项目优势与安全体系",
+            "验证情况与责任边界",
+            "结语与发展方向",
+            "系统关键界面展示",
+        ),
+        "required_facts": (
+            "2026“数字马力杯”第十三届浙江省大学生服务外包创新应用大赛",
+            "契鉴",
+            "双 Agent",
+            "RAG",
+            "13 张数据库表",
+            "40 条 /api/ 路由",
+            "125 passed",
+            "11 passed",
+            "待实测",
+            "辅助审查意见",
+        ),
+    },
+    "redesign": {
+        "pages": 9,
+        "images": 8,
+        "chars": (1600, 2200),
+        "source": SOURCE_ROOT / "content" / "overview-redesign.md",
+        "page_titles": (
+            "为什么做“契鉴”",
+            "“契鉴”是什么",
+            "一份合同如何完成审查",
+            "风险如何被发现和解释",
+            "系统如何协同判断",
+            "批量任务与多维报表",
+            "谁来使用",
+            "当前成果与验证边界",
+        ),
+        "required_facts": (
+            "契鉴",
+            "双 Agent",
+            "风险原文",
+            "人工复核",
+            "批量任务",
+            "多维报表",
+            "待真实环境验证",
+            "辅助审查意见",
+        ),
+    },
+}
 BANNED = re.compile(
     r"浙江省职业技能大赛\s*[·|｜]?\s*外包赛道|"
     r"OCR\s*准确率已达|已有客户|客户数量|已实现收入|营业收入|市场份额|"
@@ -73,14 +108,15 @@ def validate_table_geometry(root: ET.Element) -> int:
     return len(tables)
 
 
-def validate_source_images(docx_path: Path) -> int:
-    source_path = docx_path.parent / "content" / "overview.md"
+def validate_source_images(profile: str) -> int:
+    config = PROFILES[profile]
+    source_path = config["source"]
     if not source_path.exists():
         fail(f"缺少内容源：{source_path}")
     text = source_path.read_text(encoding="utf-8")
     image_refs = re.findall(r"!\[[^]]+\]\(([^)]+)\)", text)
-    if len(image_refs) != 12:
-        fail(f"内容源应引用 12 张图片，实际 {len(image_refs)}")
+    if len(image_refs) != config["images"]:
+        fail(f"内容源应引用 {config['images']} 张图片，实际 {len(image_refs)}")
     for image_ref in image_refs:
         image_path = (source_path.parent / image_ref).resolve()
         if not image_path.exists() or image_path.stat().st_size == 0:
@@ -88,7 +124,7 @@ def validate_source_images(docx_path: Path) -> int:
     return len(image_refs)
 
 
-def validate_docx(path: Path) -> dict[str, int]:
+def validate_docx(path: Path, profile: str) -> dict[str, int]:
     if not path.exists() or path.stat().st_size == 0:
         fail(f"DOCX 不存在或为空：{path}")
 
@@ -97,17 +133,18 @@ def validate_docx(path: Path) -> dict[str, int]:
         *(paragraph.text for paragraph in doc.paragraphs),
         *(cell.text for table in doc.tables for row in table.rows for cell in row.cells),
     ])
+    config = PROFILES[profile]
     headings = [
         paragraph.text.strip()
         for paragraph in doc.paragraphs
         if paragraph.style and paragraph.style.name == "Heading 1"
     ]
-    if len(headings) != len(PAGE_TITLES):
-        fail(f"正文页标题应为 {len(PAGE_TITLES)} 个，实际 {len(headings)}")
-    for title in PAGE_TITLES:
+    if len(headings) != len(config["page_titles"]):
+        fail(f"正文页标题应为 {len(config['page_titles'])} 个，实际 {len(headings)}")
+    for title in config["page_titles"]:
         if not any(title in heading for heading in headings):
             fail(f"缺少页面标题：{title}")
-    for fact in REQUIRED_FACTS:
+    for fact in config["required_facts"]:
         if fact not in paragraph_text:
             fail(f"缺少关键事实或边界：{fact}")
     match = BANNED.search(paragraph_text)
@@ -115,8 +152,9 @@ def validate_docx(path: Path) -> dict[str, int]:
         fail(f"发现禁用或不可证实表述：{match.group(0)}")
 
     chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", paragraph_text))
-    if not 2500 <= chinese_chars <= 6500:
-        fail(f"正文中文字符应为 2500～6500，实际 {chinese_chars}")
+    char_min, char_max = config["chars"]
+    if not char_min <= chinese_chars <= char_max:
+        fail(f"正文中文字符应为 {char_min}～{char_max}，实际 {chinese_chars}")
 
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
@@ -126,8 +164,9 @@ def validate_docx(path: Path) -> dict[str, int]:
             node for node in root.findall(".//w:br", NS)
             if node.get(W + "type") == "page"
         ]
-        if len(page_breaks) != 11:
-            fail(f"显式分页符应为 11 个，实际 {len(page_breaks)}")
+        expected_breaks = config["pages"] - 1
+        if len(page_breaks) != expected_breaks:
+            fail(f"显式分页符应为 {expected_breaks} 个，实际 {len(page_breaks)}")
 
         section = root.find(".//w:sectPr", NS)
         page_size = section.find("w:pgSz", NS) if section is not None else None
@@ -146,19 +185,19 @@ def validate_docx(path: Path) -> dict[str, int]:
             fail("正文页脚缺少 PAGE 域")
 
         media = [name for name in names if name.startswith("word/media/") and not name.endswith("/")]
-        if len(media) != 12:
-            fail(f"嵌入图片应为 12 张，实际 {len(media)}")
+        if len(media) != config["images"]:
+            fail(f"嵌入图片应为 {config['images']} 张，实际 {len(media)}")
         alt_descriptions = [node.get("descr", "") for node in root.findall(".//wp:docPr", NS)]
-        if len(alt_descriptions) != 12 or any(not value.strip() for value in alt_descriptions):
+        if len(alt_descriptions) != config["images"] or any(not value.strip() for value in alt_descriptions):
             fail("图片替代文字缺失或数量不一致")
 
         table_count = validate_table_geometry(root)
         if table_count != len(doc.tables):
             fail("python-docx 与 OOXML 表格计数不一致")
 
-    source_images = validate_source_images(path)
+    source_images = validate_source_images(profile)
     return {
-        "pages": 12,
+        "pages": config["pages"],
         "headings": len(headings),
         "tables": len(doc.tables),
         "images": source_images,
@@ -166,27 +205,29 @@ def validate_docx(path: Path) -> dict[str, int]:
     }
 
 
-def validate_pdf(path: Path) -> int:
+def validate_pdf(path: Path, profile: str) -> int:
     if not path.exists() or path.stat().st_size == 0:
         fail(f"PDF 不存在或为空：{path}")
     from pypdf import PdfReader
 
     pages = len(PdfReader(str(path)).pages)
-    if pages != 12:
-        fail(f"PDF 应为 12 页，实际 {pages}")
+    expected_pages = PROFILES[profile]["pages"]
+    if pages != expected_pages:
+        fail(f"PDF 应为 {expected_pages} 页，实际 {pages}")
     return pages
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", choices=PROFILES, default="legacy")
     parser.add_argument("docx", type=Path)
     parser.add_argument("pdf", nargs="?", type=Path)
     args = parser.parse_args()
 
     try:
-        result = validate_docx(args.docx.resolve())
+        result = validate_docx(args.docx.resolve(), args.profile)
         if args.pdf:
-            result["pages"] = validate_pdf(args.pdf.resolve())
+            result["pages"] = validate_pdf(args.pdf.resolve(), args.profile)
     except (AssertionError, zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

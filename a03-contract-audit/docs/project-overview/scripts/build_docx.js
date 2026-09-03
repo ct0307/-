@@ -4,8 +4,6 @@ const { createRequire } = require('module')
 
 const ROOT = path.resolve(__dirname, '..')
 const DOCS_ROOT = path.resolve(ROOT, '..')
-const CONTENT_PATH = path.join(ROOT, 'content', 'overview.md')
-const OUTPUT_PATH = path.join(ROOT, '契鉴_项目概要介绍.docx')
 const requireFromSolution = createRequire(path.join(DOCS_ROOT, 'contract-solution', 'package.json'))
 const {
   AlignmentType,
@@ -52,6 +50,41 @@ const COLOR = {
   white: 'FFFFFF',
 }
 
+const PROFILES = {
+  legacy: {
+    contentPath: path.join(ROOT, 'content', 'overview.md'),
+    outputPath: path.join(ROOT, '契鉴_项目概要介绍.docx'),
+    expectedPages: 12,
+    expectedFigures: 12,
+  },
+  redesign: {
+    contentPath: path.join(ROOT, 'content', 'overview-redesign.md'),
+    outputPath: path.join(ROOT, '契鉴_项目概要介绍_重构版.docx'),
+    expectedPages: 9,
+    expectedFigures: 8,
+  },
+}
+
+function parseArgs(argv) {
+  let profile = 'legacy'
+  let output
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]
+    if (arg.startsWith('--profile=')) profile = arg.slice('--profile='.length)
+    else if (arg === '--profile') profile = argv[++index]
+    else if (arg.startsWith('--output=')) output = arg.slice('--output='.length)
+    else if (arg === '--output') output = argv[++index]
+    else throw new Error(`unknown argument: ${arg}`)
+  }
+  if (!PROFILES[profile]) throw new Error(`unknown profile: ${profile}`)
+  if (output === undefined) return { profile, config: PROFILES[profile] }
+  if (!output) throw new Error('--output requires a path')
+  return {
+    profile,
+    config: { ...PROFILES[profile], outputPath: path.resolve(ROOT, output) },
+  }
+}
+
 function chineseFont() {
   return { ascii: 'Microsoft YaHei', hAnsi: 'Microsoft YaHei', eastAsia: '微软雅黑' }
 }
@@ -68,7 +101,7 @@ function isSeparator(line) {
   return splitCells(line).every((cell) => /^:?-{3,}:?$/.test(cell))
 }
 
-function parseContent(sourcePath) {
+function parseContent(sourcePath, expectedPages) {
   const lines = fs.readFileSync(sourcePath, 'utf8').replace(/\r\n/g, '\n').split('\n')
   const pages = []
   let page = null
@@ -148,7 +181,7 @@ function parseContent(sourcePath) {
     page.blocks.push({ type: 'paragraph', text: line })
   }
 
-  if (pages.length !== 12) throw new Error(`expected 12 pages, found ${pages.length}`)
+  if (pages.length !== expectedPages) throw new Error(`expected ${expectedPages} pages, found ${pages.length}`)
   return pages
 }
 
@@ -294,12 +327,13 @@ function pageTitle(title, pageNumber) {
 }
 
 function coverChildren(page) {
-  const values = Object.fromEntries(page.blocks.filter((block) => block.type !== 'meta').map((block) => [block.type, block.text]))
+  const values = Object.fromEntries(page.blocks.filter((block) => block.text && block.type !== 'meta').map((block) => [block.type, block.text]))
   const metas = page.blocks.filter((block) => block.type === 'meta').map((block) => block.text)
-  return [
+  const coverImage = page.blocks.find((block) => block.type === 'image')
+  const children = [
     new Paragraph({
       alignment: AlignmentType.CENTER,
-      spacing: { before: 850, after: 260 },
+      spacing: { before: coverImage ? 260 : 850, after: coverImage ? 150 : 260 },
       children: [new TextRun({ text: values.eyebrow, bold: true, color: COLOR.gold, size: 22, font: titleFont() })],
     }),
     new Paragraph({
@@ -314,9 +348,28 @@ function coverChildren(page) {
     }),
     new Paragraph({
       alignment: AlignmentType.CENTER,
-      spacing: { before: 0, after: 430 },
+      spacing: { before: 0, after: coverImage ? 140 : 430 },
       children: [new TextRun({ text: values.doctype, color: COLOR.red, size: 28, bold: true, font: titleFont() })],
     }),
+  ]
+
+  if (coverImage) {
+    if (!fs.existsSync(coverImage.imagePath)) throw new Error(`missing image: ${coverImage.imagePath}`)
+    const data = fs.readFileSync(coverImage.imagePath)
+    const size = pngDimensions(data)
+    children.push(new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { before: 0, after: 140 },
+      children: [new ImageRun({
+        type: 'png',
+        data,
+        transformation: fitImage(size.width, size.height, 560, 350),
+        altText: { title: coverImage.caption, description: coverImage.caption, name: path.basename(coverImage.imagePath) },
+      })],
+    }))
+  }
+
+  children.push(
     new Paragraph({
       border: {
         top: { style: BorderStyle.SINGLE, color: COLOR.gold, size: 8, space: 8 },
@@ -335,10 +388,11 @@ function coverChildren(page) {
     }),
     new Paragraph({
       alignment: AlignmentType.CENTER,
-      spacing: { before: 520, after: 0 },
+      spacing: { before: coverImage ? 120 : 520, after: 0 },
       children: [new TextRun({ text: values.date, color: COLOR.muted, size: 19, font: chineseFont() })],
     }),
-  ]
+  )
+  return children
 }
 
 function blockToWord(block) {
@@ -492,7 +546,15 @@ function numbering() {
 }
 
 async function main() {
-  const pages = parseContent(CONTENT_PATH)
+  const { profile, config } = parseArgs(process.argv.slice(2))
+  const pages = parseContent(config.contentPath, config.expectedPages)
+  const figures = pages.reduce(
+    (count, page) => count + page.blocks.filter((block) => block.type === 'image').length,
+    0,
+  )
+  if (figures !== config.expectedFigures) {
+    throw new Error(`expected ${config.expectedFigures} figures, found ${figures}`)
+  }
   const children = []
   pages.forEach((page, index) => {
     if (index > 0) children.push(new Paragraph({ children: [new PageBreak()] }))
@@ -525,8 +587,9 @@ async function main() {
   })
 
   const buffer = await Packer.toBuffer(doc)
-  fs.writeFileSync(OUTPUT_PATH, buffer)
-  process.stdout.write(`generated=${OUTPUT_PATH} pages=${pages.length} bytes=${buffer.length}\n`)
+  fs.mkdirSync(path.dirname(config.outputPath), { recursive: true })
+  fs.writeFileSync(config.outputPath, buffer)
+  process.stdout.write(`generated=${config.outputPath} profile=${profile} pages=${pages.length} figures=${figures} bytes=${buffer.length}\n`)
 }
 
 main().catch((error) => {
