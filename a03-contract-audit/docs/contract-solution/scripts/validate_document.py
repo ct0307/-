@@ -147,6 +147,18 @@ def validate_redesign_layout(archive: zipfile.ZipFile, root: ET.Element) -> None
     if colored_fills:
         fail(f"表格仍包含彩色底纹：{colored_fills[0]}")
 
+    image_paragraphs = [
+        paragraph
+        for paragraph in root.findall(".//w:p", NS)
+        if paragraph.find(".//w:drawing", NS) is not None
+    ]
+    if any(
+        (spacing := paragraph.find("w:pPr/w:spacing", NS)) is None
+        or spacing.get(W + "lineRule") != "auto"
+        for paragraph in image_paragraphs
+    ):
+        fail("图片段落必须显式使用自动行距，避免继承正文固定行距后被裁切")
+
 
 def validate_docx(path: Path, profile: str) -> dict[str, int]:
     if not path.exists() or path.stat().st_size == 0:

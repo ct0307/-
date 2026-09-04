@@ -300,7 +300,7 @@ function imageParagraph(block, maxWidth = 590, maxHeight = 330) {
   return [
     new Paragraph({
       alignment: AlignmentType.CENTER,
-      spacing: { before: 70, after: 35 },
+      spacing: { before: 70, after: 35, line: 240, lineRule: LineRuleType.AUTO },
       keepNext: true,
       children: [new ImageRun({
         type: 'png',
@@ -387,7 +387,7 @@ function coverChildren(page) {
       const size = pngDimensions(data)
       children.push(new Paragraph({
         alignment: AlignmentType.CENTER,
-        spacing: { before: 0, after: 140 },
+        spacing: { before: 0, after: 140, line: 240, lineRule: LineRuleType.AUTO },
         children: [new ImageRun({
           type: 'png',
           data,
@@ -432,7 +432,7 @@ function coverChildren(page) {
     const size = pngDimensions(data)
     children.push(new Paragraph({
       alignment: AlignmentType.CENTER,
-      spacing: { before: 0, after: 140 },
+      spacing: { before: 0, after: 140, line: 240, lineRule: LineRuleType.AUTO },
       children: [new ImageRun({
         type: 'png',
         data,
