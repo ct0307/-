@@ -6,6 +6,39 @@
 
 ---
 
+## 2026-09-04 · 工作区外围目录治理（✓ 已完成，工作树清理待确认）
+
+### 交付结果
+
+- 新增仓库根入口和项目级 `AGENTS.md`，明确唯一正式项目、参考资料、交付物、历史归档和本地过程目录边界。
+- 三份比赛输入附件移动到 `references/`；废弃原生 JavaScript 原型完整归档到 `archive/a03-demo/`，不再与正式项目并列。
+- 新增 `deliverables/README.md` 作为参赛材料唯一索引；两份重构版 DOCX 为当前推荐材料，原 17 章和 12 页材料保留为历史版本。
+- 根忽略规则覆盖 `.planning/`、所有临时工作树和 `a03-contract-audit/outputs/`；新增自动检查脚本验证目标结构、旧路径、忽略规则和有效引用。
+
+### 完整性验证
+
+| 验证项 | 结果 |
+|---|---|
+| 三份参考附件 SHA-256 | 移动前后一致；Git 均识别为 100% rename |
+| 原型三个源文件 SHA-256 | 移动前后一致；Git 均识别为 100% rename |
+| 目录治理检查 | `PASS workspace organization` |
+| 材料语言审计 | `8 tests`，全部通过 |
+| 评测专项 | `59 passed in 2.73s` |
+| 后端全量 | `208 passed, 1 skipped, 6 warnings in 12.54s` |
+| 前端测试 | `13 passed, 6 skipped in 1.0s` |
+| TypeScript 类型检查 | 退出码 0 |
+| Vite 生产构建 | 退出码 0，转换 2352 个模块 |
+| 质量门禁汇总 | `status=passed`、`exit_code=0`，提交 `2f26e99` |
+
+### 工作树边界
+
+- 本轮没有删除工作树、分支或未跟踪产物，也没有推送或修改远端。
+- 已合并的 `materials-redesign` 工作树仍含 280 个未跟踪文件，共 123.04 MB；清单 SHA-256 和保留条件见 `docs/worktree-cleanup-inventory.md`。
+- `contract-solution` 为 Git 标记的失效登记；`enterprise-hard-indicators` 按既定边界保留；`collaboration-acceptance-package` 尚有未合并提交，必须保留。
+- 工作树移除与失效登记修剪必须在用户再次明确确认后单独执行。
+
+---
+
 ## 2026-09-01 · 本地一键质量门禁（✓ 开发与自动化验收完成）
 
 ### 交付结果
