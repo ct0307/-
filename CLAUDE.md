@@ -28,7 +28,7 @@
   - `backend/` — FastAPI + SQLAlchemy + SQLite，JWT+RBAC，LLM Adapter，RAG
   - `backend/storage/` — 合同加密文件 + `a03_dev.db` 数据库
   - `PROGRESS.md` — 详细改动日志（每次功能闭环后追加）
-- `a03-demo/` — 原生 JS 静态原型（已废弃，仅作交互参考）
+- `archive/a03-demo/` — 原生 JS 静态原型（已废弃，仅作交互参考）
 - `references/A03企业合同合规审查系统实施方案.docx` — 完整实施方案
 - `references/浙江省外包赛-2026赛题手册.pdf` — 官方赛题手册
 
@@ -60,7 +60,7 @@
 ## 技术栈取舍（企业交付视角，已重评）
 - **保留（企业刚需）**：FastAPI、LLM Adapter、PostgreSQL、Docker Compose、RBAC+JWT+审计日志（升为 P1）、Celery+Redis 队列（企业真实批量/长任务/失败重试/任务可观测都需要，不砍）。
 - **简化**：向量库**直接一套 pgvector 到底**，去掉 Chroma，少一套运维组件和中途迁移成本。
-- **前端迁移决策**：现有 `a03-demo` 是**原生 JS 原型（1586 行、模拟数据）**，与方案里的 Vue3 冲突。企业交付以可维护、组件化、长期迭代为准，**已迁移到 Vue3 + TypeScript + Element Plus**（用户非初学者，上 TS）；原生 demo 降级为原型/交互参考。
+- **前端迁移决策**：`archive/a03-demo/` 是**原生 JS 归档原型（1586 行、模拟数据）**，与方案里的 Vue3 冲突。企业交付以可维护、组件化、长期迭代为准，**已迁移到 Vue3 + TypeScript + Element Plus**（用户非初学者，上 TS）；归档原型仅作交互参考。
 - **重投入方向**：RAG 可解释性 + 规则库深度（对应企业责任边界，也是竞赛技术分核心）。
 
 ## 安全禁用清单（依赖审计结论，别加回去）

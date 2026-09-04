@@ -15,7 +15,7 @@ export interface RoleProfile {
   dotColor: string
 }
 
-// 迁移自 a03-demo：三角色画像
+// 迁移自 archive/a03-demo 归档原型：三角色画像
 export const ROLE_PROFILES: Record<ViewRole, RoleProfile> = {
   legal: {
     key: 'legal',
