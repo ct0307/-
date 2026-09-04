@@ -11,6 +11,7 @@ const {
   HeadingLevel,
   ImageRun,
   LevelFormat,
+  LineRuleType,
   PageBreak,
   PageNumber,
   Packer,
@@ -39,9 +40,9 @@ const PAGE = {
   footer: 560,
 };
 
-const CONTENT_WIDTH_DXA = PAGE.width - PAGE.marginLeft - PAGE.marginRight;
+let CONTENT_WIDTH_DXA = PAGE.width - PAGE.marginLeft - PAGE.marginRight;
 const TABLE_INDENT_DXA = 120;
-const TABLE_WIDTH_DXA = CONTENT_WIDTH_DXA - TABLE_INDENT_DXA;
+let TABLE_WIDTH_DXA = CONTENT_WIDTH_DXA - TABLE_INDENT_DXA;
 
 const COLOR = {
   primary: "245B78",
@@ -64,6 +65,10 @@ const STYLE = {
   h3Size: 24,
   tableSize: 17,
   captionSize: 17,
+  headerSize: 16,
+  codeSize: 17,
+  firstLine: 0,
+  winningStyle: false,
 };
 
 const LEGACY_TABLES = new Set([
@@ -126,6 +131,11 @@ const PROFILES = {
     eventTitleSize: 20,
     subject: "2026“数字马力杯”第十三届浙江省大学生服务外包创新应用大赛 A03 项目详细方案",
     chapterPageBreaks: true,
+    layout: {
+      page: { marginTop: 1134, marginBottom: 1134, marginLeft: 1134, marginRight: 1134, header: 851, footer: 992 },
+      color: { primary: "000000", secondary: "000000", accent: "000000", text: "000000", muted: "555555", border: "000000", tableHeader: "FFFFFF", panel: "FFFFFF" },
+      style: { bodySize: 24, bodyAfter: 100, bodyLine: 360, h1Size: 30, h2Size: 28, h3Size: 24, tableSize: 21, captionSize: 21, headerSize: 18, codeSize: 21, firstLine: 480, winningStyle: true },
+    },
   },
 };
 
@@ -150,11 +160,16 @@ function parseArgs(argv) {
 }
 
 function eastAsiaFont() {
-  return { ascii: "Arial", hAnsi: "Arial", eastAsia: "宋体", cs: "Arial" };
+  return { ascii: "Arial", hAnsi: "Arial", eastAsia: STYLE.winningStyle ? "楷体" : "宋体", cs: "Arial" };
 }
 
-function headingFont() {
-  return { ascii: "Arial", hAnsi: "Arial", eastAsia: "微软雅黑", cs: "Arial" };
+function headingFont(level = 2) {
+  const eastAsia = STYLE.winningStyle ? (level === 1 ? "黑体" : "宋体") : "微软雅黑";
+  return { ascii: "Arial", hAnsi: "Arial", eastAsia, cs: "Arial" };
+}
+
+function tableFont() {
+  return { ascii: "Arial", hAnsi: "Arial", eastAsia: STYLE.winningStyle ? "宋体" : "宋体", cs: "Arial" };
 }
 
 function sanitizeBookmark(value) {
@@ -203,16 +218,16 @@ function inlineRuns(value, options = {}) {
     if (part.type === "url") {
       return new ExternalHyperlink({
         link: part.value,
-        children: [new TextRun({ text: part.value, style: "Hyperlink", font: eastAsiaFont(), size: options.size || STYLE.bodySize })],
+        children: [new TextRun({ text: part.value, style: "Hyperlink", font: options.font || eastAsiaFont(), size: options.size || STYLE.bodySize })],
       });
     }
     return new TextRun({
       text: part.value,
       bold: part.type === "bold" || options.bold,
-      font: part.type === "code" ? { ascii: "Consolas", hAnsi: "Consolas", eastAsia: "等线" } : eastAsiaFont(),
-      size: options.size || STYLE.bodySize,
-      color: part.type === "code" ? COLOR.primary : options.color || COLOR.text,
-      shading: part.type === "code" ? { type: ShadingType.CLEAR, fill: "EEF3F6" } : undefined,
+      font: part.type === "code" ? { ascii: "Consolas", hAnsi: "Consolas", eastAsia: "等线" } : (options.font || eastAsiaFont()),
+      size: options.size || (part.type === "code" ? STYLE.codeSize : STYLE.bodySize),
+      color: options.color || COLOR.text,
+      shading: !STYLE.winningStyle && part.type === "code" ? { type: ShadingType.CLEAR, fill: "EEF3F6" } : undefined,
     });
   });
 }
@@ -343,9 +358,9 @@ function calculateColumnWidths(header, rows) {
 
 function tableParagraph(value, bold = false) {
   return new Paragraph({
-    children: inlineRuns(value, { size: STYLE.tableSize, bold }),
+    children: inlineRuns(value, { size: STYLE.tableSize, bold, font: tableFont() }),
     alignment: AlignmentType.LEFT,
-    spacing: { before: 0, after: 0, line: 260 },
+    spacing: { before: 0, after: 0, line: STYLE.winningStyle ? 240 : 260 },
   });
 }
 
@@ -360,7 +375,7 @@ function makeTable(block) {
       width: { size: widths[index], type: WidthType.DXA },
       verticalAlign: VerticalAlign.CENTER,
       margins: { top: 70, bottom: 70, left: 100, right: 100 },
-      shading: header ? { type: ShadingType.CLEAR, fill: COLOR.tableHeader } : undefined,
+      shading: header && !STYLE.winningStyle ? { type: ShadingType.CLEAR, fill: COLOR.tableHeader } : undefined,
       children: [tableParagraph(cell, header)],
     })),
   });
@@ -385,12 +400,12 @@ function tableAsGroupedItems(block) {
       .join("；");
     children.push(new Paragraph({
       children: [
-        new TextRun({ text: label, bold: true, color: COLOR.primary, font: eastAsiaFont(), size: STYLE.bodySize }),
-        new TextRun({ text: details ? `｜${details}` : "", color: COLOR.text, font: eastAsiaFont(), size: STYLE.bodySize }),
+        new TextRun({ text: label, bold: true, color: COLOR.text, font: eastAsiaFont(), size: STYLE.bodySize }),
+        new TextRun({ text: details ? `${STYLE.winningStyle ? "：" : "｜"}${details}` : "", color: COLOR.text, font: eastAsiaFont(), size: STYLE.bodySize }),
       ],
-      spacing: { before: 0, after: 40, line: 250 },
-      indent: { left: 260, hanging: 0 },
-      border: { left: { style: BorderStyle.SINGLE, color: COLOR.border, size: 8, space: 8 } },
+      spacing: { before: 0, after: STYLE.winningStyle ? 80 : 40, line: STYLE.bodyLine, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined },
+      indent: STYLE.winningStyle ? { firstLine: STYLE.firstLine } : { left: 260, hanging: 0 },
+      border: STYLE.winningStyle ? undefined : { left: { style: BorderStyle.SINGLE, color: COLOR.border, size: 8, space: 8 } },
     }));
   });
   return children;
@@ -398,6 +413,25 @@ function tableAsGroupedItems(block) {
 
 function coverChildren(config) {
   const centered = AlignmentType.CENTER;
+  if (STYLE.winningStyle) {
+    return [
+      new Paragraph({ spacing: { before: 900, after: 300 }, alignment: centered, children: [new TextRun({ text: config.eventTitle, color: COLOR.text, font: headingFont(2), size: 24 })] }),
+      new Paragraph({ spacing: { before: 0, after: 140 }, alignment: centered, children: [new TextRun({ text: "契鉴", bold: true, color: COLOR.text, font: headingFont(1), size: 44 })] }),
+      new Paragraph({ spacing: { before: 0, after: 140 }, alignment: centered, children: [new TextRun({ text: "企业级合同合规审查与多维报表生成智能体系统", bold: true, color: COLOR.text, font: headingFont(2), size: 30 })] }),
+      new Paragraph({ spacing: { before: 0, after: 480 }, alignment: centered, children: [new TextRun({ text: "项目详细方案", color: COLOR.text, font: headingFont(2), size: 30 })] }),
+      ...[
+        "赛题编号  A03",
+        "命题单位  海康-南湖研究院",
+        "参赛团队  豪到你了团队",
+        `文档版本  ${config.version}`,
+      ].map((text) => new Paragraph({ spacing: { before: 0, after: 100 }, alignment: centered, children: [new TextRun({ text, color: COLOR.text, font: headingFont(2), size: 24 })] })),
+      new Paragraph({ spacing: { before: 180, after: 0 }, alignment: centered, children: [new TextRun({ text: config.date, color: COLOR.text, font: headingFont(2), size: 24 })] }),
+      new Paragraph({ children: [new PageBreak()] }),
+      new Paragraph({ alignment: centered, spacing: { before: 80, after: 260 }, children: [new TextRun({ text: "目录", bold: true, color: COLOR.text, font: headingFont(1), size: 32 })] }),
+      new TableOfContents("目录", { hyperlink: true, headingStyleRange: "1-2" }),
+      new Paragraph({ children: [new PageBreak()] }),
+    ];
+  }
   return [
     new Paragraph({ spacing: { before: 1100, after: 260 }, alignment: centered, children: [new TextRun({ text: config.eventTitle, bold: true, color: COLOR.accent, font: headingFont(), size: config.eventTitleSize })] }),
     new Paragraph({ spacing: { before: 0, after: 120 }, alignment: centered, children: [new TextRun({ text: "契鉴", bold: true, color: COLOR.primary, font: headingFont(), size: 58 })] }),
@@ -418,9 +452,9 @@ function coverChildren(config) {
 function runningHeader() {
   return new Header({
     children: [new Paragraph({
-      alignment: AlignmentType.RIGHT,
+      alignment: STYLE.winningStyle ? AlignmentType.CENTER : AlignmentType.RIGHT,
       spacing: { after: 0 },
-      children: [new TextRun({ text: "契鉴  |  项目详细方案", color: COLOR.muted, font: headingFont(), size: 17 })],
+      children: [new TextRun({ text: STYLE.winningStyle ? "契鉴项目详细方案" : "契鉴  |  项目详细方案", color: COLOR.muted, font: headingFont(2), size: STYLE.headerSize })],
     })],
   });
 }
@@ -430,11 +464,13 @@ function runningFooter(config) {
     children: [new Paragraph({
       alignment: AlignmentType.CENTER,
       spacing: { before: 0, after: 0 },
-      children: [
-        new TextRun({ text: `${config.version}  |  契鉴项目详细方案  |  第 `, color: COLOR.muted, font: eastAsiaFont(), size: 16 }),
-        new TextRun({ children: [PageNumber.CURRENT], color: COLOR.muted, font: eastAsiaFont(), size: 16 }),
-        new TextRun({ text: " 页", color: COLOR.muted, font: eastAsiaFont(), size: 16 }),
-      ],
+      children: STYLE.winningStyle
+        ? [new TextRun({ children: [PageNumber.CURRENT], color: COLOR.muted, font: headingFont(2), size: STYLE.headerSize })]
+        : [
+          new TextRun({ text: `${config.version}  |  契鉴项目详细方案  |  第 `, color: COLOR.muted, font: eastAsiaFont(), size: 16 }),
+          new TextRun({ children: [PageNumber.CURRENT], color: COLOR.muted, font: eastAsiaFont(), size: 16 }),
+          new TextRun({ text: " 页", color: COLOR.muted, font: eastAsiaFont(), size: 16 }),
+        ],
     })],
   });
 }
@@ -461,13 +497,15 @@ function blockToWord(block, stats, keepAsTable) {
   if (block.type === "paragraph") {
     const isSourceEntry = /^\[S\d{2}\]\s/.test(block.text);
     return [new Paragraph({
-      children: inlineRuns(block.text, { size: isSourceEntry ? 17 : STYLE.bodySize }),
+      children: inlineRuns(block.text, { size: isSourceEntry ? (STYLE.winningStyle ? STYLE.captionSize : 17) : STYLE.bodySize }),
       alignment: AlignmentType.JUSTIFIED,
       widowControl: true,
+      indent: !isSourceEntry && STYLE.firstLine ? { firstLine: STYLE.firstLine } : undefined,
       spacing: {
         before: 0,
-        after: isSourceEntry ? 30 : STYLE.bodyAfter,
-        line: isSourceEntry ? 220 : STYLE.bodyLine,
+        after: isSourceEntry ? (STYLE.winningStyle ? 60 : 30) : STYLE.bodyAfter,
+        line: isSourceEntry ? (STYLE.winningStyle ? 300 : 220) : STYLE.bodyLine,
+        lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined,
       },
     })];
   }
@@ -475,7 +513,12 @@ function blockToWord(block, stats, keepAsTable) {
     return [new Paragraph({
       children: inlineRuns(block.text),
       numbering: { reference: block.ordered ? "numbered-list" : "bullet-list", level: 0 },
-      spacing: { before: 0, after: 30, line: 250 },
+      spacing: {
+        before: 0,
+        after: STYLE.winningStyle ? STYLE.bodyAfter : 30,
+        line: STYLE.winningStyle ? STYLE.bodyLine : 250,
+        lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined,
+      },
     })];
   }
   if (block.type === "table") {
@@ -509,7 +552,7 @@ function blockToWord(block, stats, keepAsTable) {
         style: "Caption",
         alignment: AlignmentType.CENTER,
         keepLines: true,
-        spacing: { before: 0, after: 180, line: 260 },
+        spacing: { before: 0, after: 180, line: STYLE.winningStyle ? 300 : 260, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined },
         children: [new Bookmark({ id: bookmarkId, children: [new TextRun({ text: block.caption })] })],
       }),
     ];
@@ -521,17 +564,17 @@ function blockToWord(block, stats, keepAsTable) {
         text: line || " ",
         break: index === 0 ? undefined : 1,
         font: { ascii: "Consolas", hAnsi: "Consolas", eastAsia: "等线" },
-        size: 17,
+        size: STYLE.codeSize,
         color: COLOR.text,
       })),
-      shading: { type: ShadingType.CLEAR, fill: "EEF3F6" },
+      shading: STYLE.winningStyle ? undefined : { type: ShadingType.CLEAR, fill: "EEF3F6" },
       border: {
         top: { style: BorderStyle.SINGLE, color: COLOR.border, size: 4, space: 6 },
         bottom: { style: BorderStyle.SINGLE, color: COLOR.border, size: 4, space: 6 },
-        left: { style: BorderStyle.SINGLE, color: COLOR.primary, size: 12, space: 8 },
+        left: { style: BorderStyle.SINGLE, color: STYLE.winningStyle ? COLOR.border : COLOR.primary, size: STYLE.winningStyle ? 4 : 12, space: STYLE.winningStyle ? 6 : 8 },
         right: { style: BorderStyle.SINGLE, color: COLOR.border, size: 4, space: 6 },
       },
-      spacing: { before: 80, after: 160, line: 260 },
+      spacing: { before: 80, after: 160, line: STYLE.winningStyle ? 300 : 260, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined },
       indent: { left: 160, right: 160 },
       keepLines: true,
     })];
@@ -543,12 +586,36 @@ function blockToWord(block, stats, keepAsTable) {
 }
 
 function documentStyles() {
+  const bodyParagraph = {
+    spacing: {
+      before: 0,
+      after: STYLE.bodyAfter,
+      line: STYLE.bodyLine,
+      lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined,
+    },
+    alignment: AlignmentType.JUSTIFIED,
+  };
+  const heading1 = {
+    run: { font: headingFont(1), size: STYLE.h1Size, bold: true, color: STYLE.winningStyle ? COLOR.text : COLOR.primary },
+    paragraph: { spacing: { before: STYLE.winningStyle ? 360 : 260, after: STYLE.winningStyle ? 160 : 140 }, keepNext: true, outlineLevel: 0 },
+  };
+  const heading2 = {
+    run: { font: headingFont(2), size: STYLE.h2Size, bold: true, color: STYLE.winningStyle ? COLOR.text : COLOR.primary },
+    paragraph: { spacing: { before: STYLE.winningStyle ? 240 : 180, after: STYLE.winningStyle ? 120 : 80 }, keepNext: true, outlineLevel: 1 },
+  };
+  const heading3 = {
+    run: { font: headingFont(3), size: STYLE.h3Size, bold: true, color: STYLE.winningStyle ? COLOR.text : COLOR.secondary },
+    paragraph: { spacing: { before: STYLE.winningStyle ? 160 : 120, after: STYLE.winningStyle ? 80 : 60 }, keepNext: true, outlineLevel: 2 },
+  };
   return {
     default: {
       document: {
         run: { font: eastAsiaFont(), size: STYLE.bodySize, color: COLOR.text },
-        paragraph: { spacing: { after: STYLE.bodyAfter, line: STYLE.bodyLine }, alignment: AlignmentType.JUSTIFIED },
+        paragraph: bodyParagraph,
       },
+      heading1,
+      heading2,
+      heading3,
     },
     paragraphStyles: [
       {
@@ -558,34 +625,7 @@ function documentStyles() {
         next: "Normal",
         quickFormat: true,
         run: { font: eastAsiaFont(), size: STYLE.bodySize, color: COLOR.text },
-        paragraph: { spacing: { before: 0, after: STYLE.bodyAfter, line: STYLE.bodyLine }, alignment: AlignmentType.JUSTIFIED },
-      },
-      {
-        id: "Heading1",
-        name: "Heading 1",
-        basedOn: "Normal",
-        next: "Normal",
-        quickFormat: true,
-        run: { font: headingFont(), size: STYLE.h1Size, bold: true, color: COLOR.primary },
-        paragraph: { spacing: { before: 260, after: 140 }, keepNext: true, outlineLevel: 0 },
-      },
-      {
-        id: "Heading2",
-        name: "Heading 2",
-        basedOn: "Normal",
-        next: "Normal",
-        quickFormat: true,
-        run: { font: headingFont(), size: STYLE.h2Size, bold: true, color: COLOR.primary },
-        paragraph: { spacing: { before: 180, after: 80 }, keepNext: true, outlineLevel: 1 },
-      },
-      {
-        id: "Heading3",
-        name: "Heading 3",
-        basedOn: "Normal",
-        next: "Normal",
-        quickFormat: true,
-        run: { font: headingFont(), size: STYLE.h3Size, bold: true, color: COLOR.secondary },
-        paragraph: { spacing: { before: 120, after: 60 }, keepNext: true, outlineLevel: 2 },
+        paragraph: bodyParagraph,
       },
       {
         id: "Caption",
@@ -594,23 +634,23 @@ function documentStyles() {
         next: "Normal",
         quickFormat: true,
         run: { font: eastAsiaFont(), size: STYLE.captionSize, color: COLOR.muted },
-        paragraph: { spacing: { before: 0, after: 180, line: 260 }, alignment: AlignmentType.CENTER },
+        paragraph: { spacing: { before: 0, after: 180, line: STYLE.winningStyle ? 300 : 260, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined }, alignment: AlignmentType.CENTER },
       },
       {
         id: "TOC1",
         name: "toc 1",
         basedOn: "Normal",
         next: "Normal",
-        run: { font: eastAsiaFont(), size: 17, color: COLOR.text },
-        paragraph: { spacing: { before: 0, after: 0, line: 200 }, keepLines: true },
+        run: { font: eastAsiaFont(), size: STYLE.winningStyle ? 21 : 17, color: COLOR.text },
+        paragraph: { spacing: { before: 0, after: 0, line: STYLE.winningStyle ? 300 : 200, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined }, keepLines: true },
       },
       {
         id: "TOC2",
         name: "toc 2",
         basedOn: "Normal",
         next: "Normal",
-        run: { font: eastAsiaFont(), size: 16, color: COLOR.muted },
-        paragraph: { indent: { left: 260 }, spacing: { before: 0, after: 0, line: 190 }, keepLines: true },
+        run: { font: eastAsiaFont(), size: STYLE.winningStyle ? 21 : 16, color: COLOR.muted },
+        paragraph: { indent: { left: 260 }, spacing: { before: 0, after: 0, line: STYLE.winningStyle ? 300 : 190, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined }, keepLines: true },
       },
     ],
   };
@@ -627,8 +667,8 @@ function numbering() {
           text: "•",
           alignment: AlignmentType.LEFT,
           style: {
-            paragraph: { indent: { left: 500, hanging: 260 }, spacing: { after: 30, line: 250 } },
-            run: { font: eastAsiaFont(), size: STYLE.bodySize, color: COLOR.primary },
+            paragraph: { indent: { left: 500, hanging: 260 }, spacing: { after: STYLE.winningStyle ? STYLE.bodyAfter : 30, line: STYLE.winningStyle ? STYLE.bodyLine : 250, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined } },
+            run: { font: eastAsiaFont(), size: STYLE.bodySize, color: STYLE.winningStyle ? COLOR.text : COLOR.primary },
           },
         }],
       },
@@ -640,8 +680,8 @@ function numbering() {
           text: "%1.",
           alignment: AlignmentType.LEFT,
           style: {
-            paragraph: { indent: { left: 500, hanging: 260 }, spacing: { after: 30, line: 250 } },
-            run: { font: eastAsiaFont(), size: STYLE.bodySize, color: COLOR.primary },
+            paragraph: { indent: { left: 500, hanging: 260 }, spacing: { after: STYLE.winningStyle ? STYLE.bodyAfter : 30, line: STYLE.winningStyle ? STYLE.bodyLine : 250, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined } },
+            run: { font: eastAsiaFont(), size: STYLE.bodySize, color: STYLE.winningStyle ? COLOR.text : COLOR.primary },
           },
         }],
       },
@@ -651,7 +691,15 @@ function numbering() {
 
 async function main() {
   const { profile, config } = parseArgs(process.argv.slice(2));
-  STYLE.bodyLine = config.bodyLine;
+  if (config.layout) {
+    Object.assign(PAGE, config.layout.page);
+    Object.assign(COLOR, config.layout.color);
+    Object.assign(STYLE, config.layout.style);
+  } else {
+    STYLE.bodyLine = config.bodyLine;
+  }
+  CONTENT_WIDTH_DXA = PAGE.width - PAGE.marginLeft - PAGE.marginRight;
+  TABLE_WIDTH_DXA = CONTENT_WIDTH_DXA - TABLE_INDENT_DXA;
   const files = fs.readdirSync(config.contentDir).filter((file) => /^\d{2}-.*\.md$/.test(file)).sort();
   if (files.length !== config.expectedFiles) {
     throw new Error(`expected ${config.expectedFiles} chapter files, found ${files.length}`);
