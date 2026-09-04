@@ -24,6 +24,9 @@ PROFILES = {
         "tables": (10, 15),
         "images": (20, 30),
         "pages": (40, 50),
+        "margins": {"top": "1080", "bottom": "1080", "left": "1080", "right": "1080"},
+        "header": "560",
+        "footer": "560",
         "sources": tuple(range(1, 14)),
         "banned": BANNED,
         "min_alt": 20,
@@ -37,7 +40,10 @@ PROFILES = {
         "chars": (27000, 33000),
         "tables": (8, 10),
         "images": (22, 28),
-        "pages": (35, 40),
+        "pages": (42, 46),
+        "margins": {"top": "1134", "bottom": "1134", "left": "1134", "right": "1134"},
+        "header": "851",
+        "footer": "992",
         "sources": tuple(range(1, 7)),
         "banned": None,
         "min_alt": 22,
@@ -71,6 +77,41 @@ def fail(message: str) -> None:
 
 def xml_text(archive: zipfile.ZipFile, name: str) -> str:
     return archive.read(name).decode("utf-8")
+
+
+def require_style(styles_root: ET.Element, style_id: str, font: str, size: str) -> None:
+    style = styles_root.find(f".//w:style[@w:styleId='{style_id}']", NS)
+    if style is None:
+        fail(f"缺少样式：{style_id}")
+    fonts = style.find("w:rPr/w:rFonts", NS)
+    size_node = style.find("w:rPr/w:sz", NS)
+    if fonts is None or fonts.get(W + "eastAsia") != font:
+        fail(f"{style_id} 东亚字体应为 {font}")
+    if size_node is None or size_node.get(W + "val") != size:
+        fail(f"{style_id} 字号应为 {int(size) / 2:g}pt")
+
+
+def validate_redesign_layout(archive: zipfile.ZipFile, root: ET.Element) -> None:
+    styles_xml = xml_text(archive, "word/styles.xml")
+    styles_root = ET.fromstring(styles_xml)
+    require_style(styles_root, "Normal", "楷体", "24")
+    require_style(styles_root, "Heading1", "黑体", "30")
+    require_style(styles_root, "Heading2", "宋体", "28")
+    require_style(styles_root, "Heading3", "宋体", "24")
+    require_style(styles_root, "Caption", "楷体", "21")
+
+    document_xml = ET.tostring(root, encoding="unicode")
+    forbidden_colors = ("245B78", "4C7A92", "C48A2C", "E8F0F4", "F4F6F9")
+    if any(color in styles_xml or color in document_xml for color in forbidden_colors):
+        fail("redesign 仍包含旧版主题色")
+
+    colored_fills = [
+        node.get(W + "fill")
+        for node in root.findall(".//w:tbl//w:shd", NS)
+        if node.get(W + "fill") not in (None, "auto", "FFFFFF")
+    ]
+    if colored_fills:
+        fail(f"表格仍包含彩色底纹：{colored_fills[0]}")
 
 
 def validate_docx(path: Path, profile: str) -> dict[str, int]:
@@ -142,9 +183,13 @@ def validate_docx(path: Path, profile: str) -> dict[str, int]:
         page_margin = section.find("w:pgMar", NS) if section is not None else None
         if page_size is None or page_size.get(W + "w") != "11906" or page_size.get(W + "h") != "16838":
             fail("页面尺寸不是 A4")
-        expected_margins = {"top": "1080", "bottom": "1080", "left": "1080", "right": "1080"}
+        expected_margins = config["margins"]
         if page_margin is None or any(page_margin.get(W + key) != value for key, value in expected_margins.items()):
-            fail("页边距与设计令牌不一致")
+            fail("页边距与 profile 不一致")
+        if page_margin.get(W + "header") != config["header"] or page_margin.get(W + "footer") != config["footer"]:
+            fail("页眉页脚距离与 profile 不一致")
+        if profile == "redesign":
+            validate_redesign_layout(archive, root)
 
         xml_tables = root.findall(".//w:tbl", NS)
         if len(xml_tables) != table_count:
