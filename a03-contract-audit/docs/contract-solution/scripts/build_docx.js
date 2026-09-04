@@ -131,10 +131,28 @@ const PROFILES = {
     eventTitleSize: 20,
     subject: "2026“数字马力杯”第十三届浙江省大学生服务外包创新应用大赛 A03 项目详细方案",
     chapterPageBreaks: true,
+    sectionPageBreaks: new Set([
+      "3.2 功能按业务对象划分",
+      "3.3 技术分层与失败处理",
+      "3.6 部署形态与信任边界",
+      "4.2 上传与文件预检",
+      "4.3 要素提取与审查启动",
+      "4.4 风险原文、依据和建议同屏核对",
+      "4.5 双 Agent 协同处理",
+      "4.6 整改、复审与关闭",
+      "5.2 文档解析先做质量判断",
+      "5.4 双 Agent 保留专业分工和冲突",
+      "5.5 规则、知识和模型各自负责什么",
+      "5.7 数据模型支撑追溯而非只支撑页面",
+      "5.8 权限、安全与运行审计",
+      "6.2 开发、演示与交付环境分开",
+      "6.5 实施顺序与交付物",
+      "6.6 应用与交付边界",
+    ]),
     layout: {
       page: { marginTop: 1134, marginBottom: 1134, marginLeft: 1134, marginRight: 1134, header: 851, footer: 992 },
       color: { primary: "000000", secondary: "000000", accent: "000000", text: "000000", muted: "555555", border: "000000", tableHeader: "FFFFFF", panel: "FFFFFF" },
-      style: { bodySize: 24, bodyAfter: 100, bodyLine: 360, h1Size: 30, h2Size: 28, h3Size: 24, tableSize: 21, captionSize: 21, headerSize: 18, codeSize: 21, firstLine: 480, winningStyle: true },
+      style: { bodySize: 24, bodyAfter: 120, bodyLine: 360, h1Size: 30, h2Size: 28, h3Size: 24, tableSize: 21, captionSize: 21, headerSize: 18, codeSize: 21, firstLine: 480, winningStyle: true },
     },
   },
 };
@@ -186,7 +204,7 @@ function pngDimensions(buffer) {
 
 function fitImage(width, height) {
   const maxWidth = 540;
-  const maxHeight = 610;
+  const maxHeight = 640;
   const scale = Math.min(maxWidth / width, maxHeight / height, 1);
   return { width: Math.round(width * scale), height: Math.round(height * scale) };
 }
@@ -483,13 +501,14 @@ function emptyFooter() {
   return new Footer({ children: [new Paragraph({ text: "" })] });
 }
 
-function blockToWord(block, stats, keepAsTable) {
+function blockToWord(block, stats, keepAsTable, sectionPageBreaks = new Set()) {
   if (block.type === "heading") {
     const headingMap = { 1: HeadingLevel.HEADING_1, 2: HeadingLevel.HEADING_2, 3: HeadingLevel.HEADING_3 };
     const bookmarkId = sanitizeBookmark(`${block.file}_${block.lineNumber}_${block.text}`);
     if (block.level === 1) stats.chapters += 1;
     return [new Paragraph({
       heading: headingMap[block.level],
+      pageBreakBefore: block.level === 2 && sectionPageBreaks.has(block.text),
       keepNext: true,
       children: [new Bookmark({ id: bookmarkId, children: [new TextRun({ text: block.text })] })],
     })];
@@ -712,7 +731,7 @@ async function main() {
       body.push(new Paragraph({ children: [new PageBreak()] }));
     }
     const blocks = parseMarkdown(path.join(config.contentDir, file));
-    for (const block of blocks) body.push(...blockToWord(block, stats, config.keepAsTable));
+    for (const block of blocks) body.push(...blockToWord(block, stats, config.keepAsTable, config.sectionPageBreaks));
   }
   if (stats.chapters !== config.expectedChapters) {
     throw new Error(`expected ${config.expectedChapters} chapter headings, found ${stats.chapters}`);

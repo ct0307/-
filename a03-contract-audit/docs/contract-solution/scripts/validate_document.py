@@ -79,15 +79,49 @@ def xml_text(archive: zipfile.ZipFile, name: str) -> str:
     return archive.read(name).decode("utf-8")
 
 
-def require_style(styles_root: ET.Element, style_id: str, font: str, size: str) -> None:
+def style_by_identity(styles_root: ET.Element, style_id: str) -> ET.Element | None:
     style = styles_root.find(f".//w:style[@w:styleId='{style_id}']", NS)
+    if style is not None:
+        return style
+    expected_name = {
+        "Normal": "normal",
+        "Heading1": "heading 1",
+        "Heading2": "heading 2",
+        "Heading3": "heading 3",
+        "Caption": "caption",
+    }[style_id]
+    return next((
+        candidate
+        for candidate in styles_root.findall(".//w:style", NS)
+        if (candidate.find("w:name", NS) is not None)
+        and candidate.find("w:name", NS).get(W + "val", "").lower() == expected_name
+    ), None)
+
+
+def effective_style_value(styles_root: ET.Element, style: ET.Element, tag: str, attribute: str) -> str | None:
+    visited: set[str] = set()
+    current = style
+    while current is not None:
+        node = current.find(f"w:rPr/w:{tag}", NS)
+        if node is not None and node.get(W + attribute):
+            return node.get(W + attribute)
+        based_on = current.find("w:basedOn", NS)
+        based_on_id = based_on.get(W + "val") if based_on is not None else None
+        if not based_on_id or based_on_id in visited:
+            break
+        visited.add(based_on_id)
+        current = styles_root.find(f".//w:style[@w:styleId='{based_on_id}']", NS)
+    default_node = styles_root.find(f"w:docDefaults/w:rPrDefault/w:rPr/w:{tag}", NS)
+    return default_node.get(W + attribute) if default_node is not None else None
+
+
+def require_style(styles_root: ET.Element, style_id: str, font: str, size: str) -> None:
+    style = style_by_identity(styles_root, style_id)
     if style is None:
         fail(f"缺少样式：{style_id}")
-    fonts = style.find("w:rPr/w:rFonts", NS)
-    size_node = style.find("w:rPr/w:sz", NS)
-    if fonts is None or fonts.get(W + "eastAsia") != font:
+    if effective_style_value(styles_root, style, "rFonts", "eastAsia") != font:
         fail(f"{style_id} 东亚字体应为 {font}")
-    if size_node is None or size_node.get(W + "val") != size:
+    if effective_style_value(styles_root, style, "sz", "val") != size:
         fail(f"{style_id} 字号应为 {int(size) / 2:g}pt")
 
 
@@ -244,7 +278,7 @@ def validate_pdf(path: Path, profile: str) -> int:
         for page_number, page in enumerate(reader.pages[2:], start=3):
             lines = [line.strip() for line in (page.extract_text() or "").splitlines()]
             for line_number, line in enumerate(lines):
-                if not CHAPTER.match(line):
+                if not CHAPTER.match(line) or re.search(r"\.{3,}", line):
                     continue
                 leading_lines = [
                     value
@@ -252,6 +286,7 @@ def validate_pdf(path: Path, profile: str) -> int:
                     if value
                     and not (value.startswith("契鉴") and "项目详细方案" in value)
                     and not (value.startswith("V2.0") and "第" in value and "页" in value)
+                    and not re.fullmatch(r"\d+", value)
                 ]
                 if leading_lines:
                     fail(f"{line} 未独立起页，位于 PDF 第 {page_number} 页正文中部")
