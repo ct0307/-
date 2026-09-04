@@ -14,6 +14,7 @@ const {
   HeadingLevel,
   ImageRun,
   LevelFormat,
+  LineRuleType,
   PageBreak,
   PageNumber,
   Packer,
@@ -50,18 +51,42 @@ const COLOR = {
   white: 'FFFFFF',
 }
 
+const STYLE = {
+  bodySize: 19,
+  bodyLine: 260,
+  bodyAfter: 75,
+  h1Size: 34,
+  h2Size: 24,
+  tableSize: 17,
+  tableHeaderSize: 18,
+  captionSize: 16,
+  headerSize: 15,
+  firstLine: 0,
+  winningStyle: false,
+}
+
 const PROFILES = {
   legacy: {
     contentPath: path.join(ROOT, 'content', 'overview.md'),
     outputPath: path.join(ROOT, '契鉴_项目概要介绍.docx'),
     expectedPages: 12,
     expectedFigures: 12,
+    layout: {
+      page: { margin: 1134, header: 560, footer: 560, contentWidth: 9638 },
+      color: { navy: '28364A', navySoft: 'E8EDF2', red: 'A33A32', gold: '9A7628', goldSoft: 'F4EFDF', text: '30343B', secondary: '5F6772', muted: '7C8490', line: 'CBD2D9', surface: 'F7F8F9', white: 'FFFFFF' },
+      style: { bodySize: 19, bodyLine: 260, bodyAfter: 75, h1Size: 34, h2Size: 24, tableSize: 17, tableHeaderSize: 18, captionSize: 16, headerSize: 15, firstLine: 0, winningStyle: false },
+    },
   },
   redesign: {
     contentPath: path.join(ROOT, 'content', 'overview-redesign.md'),
     outputPath: path.join(ROOT, '契鉴_项目概要介绍_重构版.docx'),
     expectedPages: 9,
     expectedFigures: 8,
+    layout: {
+      page: { margin: 1134, header: 851, footer: 992, contentWidth: 9638 },
+      color: { navy: '000000', navySoft: 'FFFFFF', red: '000000', gold: '000000', goldSoft: 'FFFFFF', text: '000000', secondary: '555555', muted: '555555', line: '000000', surface: 'FFFFFF', white: 'FFFFFF' },
+      style: { bodySize: 24, bodyLine: 360, bodyAfter: 80, h1Size: 30, h2Size: 28, tableSize: 21, tableHeaderSize: 21, captionSize: 21, headerSize: 18, firstLine: 480, winningStyle: true },
+    },
   },
 }
 
@@ -86,11 +111,22 @@ function parseArgs(argv) {
 }
 
 function chineseFont() {
+  return STYLE.winningStyle
+    ? { ascii: 'Arial', hAnsi: 'Arial', eastAsia: '楷体' }
+    : { ascii: 'Microsoft YaHei', hAnsi: 'Microsoft YaHei', eastAsia: '微软雅黑' }
+}
+
+function titleFont(level = 2) {
+  if (STYLE.winningStyle) {
+    return { ascii: 'Arial', hAnsi: 'Arial', eastAsia: level === 1 ? '黑体' : '宋体' }
+  }
   return { ascii: 'Microsoft YaHei', hAnsi: 'Microsoft YaHei', eastAsia: '微软雅黑' }
 }
 
-function titleFont() {
-  return { ascii: 'Microsoft YaHei', hAnsi: 'Microsoft YaHei', eastAsia: '微软雅黑' }
+function tableFont() {
+  return STYLE.winningStyle
+    ? { ascii: 'Arial', hAnsi: 'Arial', eastAsia: '宋体' }
+    : chineseFont()
 }
 
 function splitCells(line) {
@@ -192,7 +228,7 @@ function inlineRuns(text, options = {}) {
   let match
   while ((match = regex.exec(text)) !== null) {
     if (match.index > cursor) runs.push(new TextRun({ text: text.slice(cursor, match.index), ...options }))
-    runs.push(new TextRun({ text: match[1], bold: true, color: COLOR.navy, ...options }))
+    runs.push(new TextRun({ text: match[1], bold: true, color: STYLE.winningStyle ? COLOR.text : COLOR.navy, ...options }))
     cursor = regex.lastIndex
   }
   if (cursor < text.length) runs.push(new TextRun({ text: text.slice(cursor), ...options }))
@@ -226,11 +262,11 @@ function tableWidths(columnCount) {
   return Array.from({ length: columnCount }, (_, index) => index === columnCount - 1 ? PAGE.contentWidth - base * index : base)
 }
 
-function cellParagraph(text, bold = false, color = COLOR.text, size = 18) {
+function cellParagraph(text, bold = false, color = COLOR.text, size = STYLE.tableSize) {
   return new Paragraph({
-    children: inlineRuns(text, { bold, color, size, font: chineseFont() }),
+    children: inlineRuns(text, { bold, color, size, font: tableFont() }),
     alignment: AlignmentType.LEFT,
-    spacing: { before: 0, after: 0, line: 235 },
+    spacing: { before: 0, after: 0, line: STYLE.winningStyle ? 240 : 235, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined },
     widowControl: true,
   })
 }
@@ -243,10 +279,10 @@ function makeTable(block) {
     children: values.map((value, cellIndex) => new TableCell({
       width: { size: widths[cellIndex], type: WidthType.DXA },
       verticalAlign: VerticalAlign.CENTER,
-      shading: { type: ShadingType.CLEAR, fill: rowIndex === 0 ? COLOR.navySoft : (rowIndex % 2 === 0 ? COLOR.surface : COLOR.white) },
+      shading: STYLE.winningStyle ? undefined : { type: ShadingType.CLEAR, fill: rowIndex === 0 ? COLOR.navySoft : (rowIndex % 2 === 0 ? COLOR.surface : COLOR.white) },
       margins: { top: 70, bottom: 70, left: 110, right: 110 },
       borders: borders(),
-      children: [cellParagraph(value, rowIndex === 0, rowIndex === 0 ? COLOR.navy : COLOR.text, rowIndex === 0 ? 18 : 17)],
+      children: [cellParagraph(value, rowIndex === 0, rowIndex === 0 ? COLOR.navy : COLOR.text, rowIndex === 0 ? STYLE.tableHeaderSize : STYLE.tableSize)],
     })),
   }))
 
@@ -277,7 +313,7 @@ function imageParagraph(block, maxWidth = 590, maxHeight = 330) {
       style: 'Caption',
       alignment: AlignmentType.CENTER,
       spacing: { before: 0, after: 90 },
-      children: [new TextRun({ text: block.caption, font: chineseFont(), size: 16, color: COLOR.muted })],
+      children: [new TextRun({ text: block.caption, font: chineseFont(), size: STYLE.captionSize, color: COLOR.muted })],
     }),
   ]
 }
@@ -308,6 +344,14 @@ function makeImageGrid(imageBlocks) {
 }
 
 function pageTitle(title, pageNumber) {
+  if (STYLE.winningStyle) {
+    return [new Paragraph({
+      heading: HeadingLevel.HEADING_1,
+      keepNext: true,
+      spacing: { before: 40, after: 120 },
+      children: [new TextRun({ text: title, color: COLOR.text, size: STYLE.h1Size, bold: true, font: titleFont(1) })],
+    })]
+  }
   return [
     new Paragraph({
       heading: HeadingLevel.HEADING_1,
@@ -330,6 +374,35 @@ function coverChildren(page) {
   const values = Object.fromEntries(page.blocks.filter((block) => block.text && block.type !== 'meta').map((block) => [block.type, block.text]))
   const metas = page.blocks.filter((block) => block.type === 'meta').map((block) => block.text)
   const coverImage = page.blocks.find((block) => block.type === 'image')
+  if (STYLE.winningStyle) {
+    const children = [
+      new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: coverImage ? 240 : 820, after: 150 }, children: [new TextRun({ text: values.eyebrow, color: COLOR.text, size: 24, font: titleFont(2) })] }),
+      new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 0, after: 80 }, children: [new TextRun({ text: page.title, bold: true, color: COLOR.text, size: 44, font: titleFont(1) })] }),
+      new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 0, after: 160 }, children: [new TextRun({ text: values.subtitle, bold: true, color: COLOR.text, size: 30, font: titleFont(2) })] }),
+      new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 0, after: coverImage ? 120 : 400 }, children: [new TextRun({ text: values.doctype, color: COLOR.text, size: 30, font: titleFont(2) })] }),
+    ]
+    if (coverImage) {
+      if (!fs.existsSync(coverImage.imagePath)) throw new Error(`missing image: ${coverImage.imagePath}`)
+      const data = fs.readFileSync(coverImage.imagePath)
+      const size = pngDimensions(data)
+      children.push(new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 0, after: 140 },
+        children: [new ImageRun({
+          type: 'png',
+          data,
+          transformation: fitImage(size.width, size.height, 560, 350),
+          altText: { title: coverImage.caption, description: coverImage.caption, name: path.basename(coverImage.imagePath) },
+        })],
+      }))
+    }
+    children.push(
+      new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 0, after: 100 }, children: [new TextRun({ text: metas[0], color: COLOR.text, size: 24, font: titleFont(2) })] }),
+      new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 0, after: 90 }, children: [new TextRun({ text: metas[1], color: COLOR.text, size: 24, font: titleFont(2) })] }),
+      new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: coverImage ? 100 : 500, after: 0 }, children: [new TextRun({ text: values.date, color: COLOR.text, size: 24, font: titleFont(2) })] }),
+    )
+    return children
+  }
   const children = [
     new Paragraph({
       alignment: AlignmentType.CENTER,
@@ -401,31 +474,33 @@ function blockToWord(block) {
       heading: HeadingLevel.HEADING_2,
       keepNext: true,
       spacing: { before: 120, after: 60 },
-      children: [new TextRun({ text: block.text, bold: true, color: COLOR.red, size: 24, font: titleFont() })],
+      children: [new TextRun({ text: block.text, bold: true, color: STYLE.winningStyle ? COLOR.text : COLOR.red, size: STYLE.h2Size, font: titleFont(2) })],
     })]
   }
   if (block.type === 'callout') {
     return [new Paragraph({
-      shading: { type: ShadingType.CLEAR, fill: COLOR.goldSoft },
-      border: { left: { style: BorderStyle.SINGLE, color: COLOR.gold, size: 14, space: 8 } },
-      indent: { left: 160, right: 120 },
-      spacing: { before: 0, after: 120, line: 260 },
-      children: [new TextRun({ text: block.text, bold: true, color: COLOR.navy, size: 20, font: chineseFont() })],
+      shading: STYLE.winningStyle ? undefined : { type: ShadingType.CLEAR, fill: COLOR.goldSoft },
+      border: STYLE.winningStyle ? undefined : { left: { style: BorderStyle.SINGLE, color: COLOR.gold, size: 14, space: 8 } },
+      indent: STYLE.winningStyle ? { firstLine: STYLE.firstLine } : { left: 160, right: 120 },
+      alignment: STYLE.winningStyle ? AlignmentType.JUSTIFIED : undefined,
+      spacing: { before: 0, after: STYLE.winningStyle ? STYLE.bodyAfter : 120, line: STYLE.winningStyle ? STYLE.bodyLine : 260, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined },
+      children: [new TextRun({ text: STYLE.winningStyle ? `说明：${block.text}` : block.text, bold: !STYLE.winningStyle, color: STYLE.winningStyle ? COLOR.text : COLOR.navy, size: STYLE.bodySize, font: chineseFont() })],
     })]
   }
   if (block.type === 'paragraph') {
     return [new Paragraph({
       alignment: AlignmentType.JUSTIFIED,
       widowControl: true,
-      spacing: { before: 0, after: 75, line: 260 },
-      children: inlineRuns(block.text, { size: 19, color: COLOR.text, font: chineseFont() }),
+      indent: STYLE.firstLine ? { firstLine: STYLE.firstLine } : undefined,
+      spacing: { before: 0, after: STYLE.bodyAfter, line: STYLE.bodyLine, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined },
+      children: inlineRuns(block.text, { size: STYLE.bodySize, color: COLOR.text, font: chineseFont() }),
     })]
   }
   if (block.type === 'list') {
     return [new Paragraph({
       numbering: { reference: block.ordered ? 'numbered-list' : 'bullet-list', level: 0 },
-      spacing: { before: 0, after: 42, line: 240 },
-      children: inlineRuns(block.text, { size: 18, color: COLOR.text, font: chineseFont() }),
+      spacing: { before: 0, after: STYLE.winningStyle ? STYLE.bodyAfter : 42, line: STYLE.winningStyle ? STYLE.bodyLine : 240, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined },
+      children: inlineRuns(block.text, { size: STYLE.winningStyle ? STYLE.bodySize : 18, color: COLOR.text, font: chineseFont() }),
     })]
   }
   if (block.type === 'table') return [makeTable(block), new Paragraph({ text: '', spacing: { after: 80 } })]
@@ -456,10 +531,10 @@ function renderPage(page, pageIndex) {
 function runningHeader() {
   return new Header({
     children: [new Paragraph({
-      alignment: AlignmentType.RIGHT,
-      border: { bottom: { style: BorderStyle.SINGLE, color: COLOR.line, size: 4, space: 3 } },
+      alignment: STYLE.winningStyle ? AlignmentType.CENTER : AlignmentType.RIGHT,
+      border: STYLE.winningStyle ? undefined : { bottom: { style: BorderStyle.SINGLE, color: COLOR.line, size: 4, space: 3 } },
       spacing: { after: 0 },
-      children: [new TextRun({ text: '契鉴  |  企业合同合规智能审查系统', color: COLOR.muted, size: 15, font: chineseFont() })],
+      children: [new TextRun({ text: STYLE.winningStyle ? '契鉴项目概要介绍' : '契鉴  |  企业合同合规智能审查系统', color: COLOR.muted, size: STYLE.headerSize, font: STYLE.winningStyle ? titleFont(2) : chineseFont() })],
     })],
   })
 }
@@ -469,10 +544,12 @@ function runningFooter() {
     children: [new Paragraph({
       alignment: AlignmentType.CENTER,
       spacing: { before: 0, after: 0 },
-      children: [
-        new TextRun({ text: '项目概要介绍  |  ', color: COLOR.muted, size: 15, font: chineseFont() }),
-        new TextRun({ children: [PageNumber.CURRENT], color: COLOR.muted, size: 15, font: chineseFont() }),
-      ],
+      children: STYLE.winningStyle
+        ? [new TextRun({ children: [PageNumber.CURRENT], color: COLOR.muted, size: STYLE.headerSize, font: titleFont(2) })]
+        : [
+          new TextRun({ text: '项目概要介绍  |  ', color: COLOR.muted, size: 15, font: chineseFont() }),
+          new TextRun({ children: [PageNumber.CURRENT], color: COLOR.muted, size: 15, font: chineseFont() }),
+        ],
     })],
   })
 }
@@ -486,33 +563,35 @@ function emptyFooter() {
 }
 
 function styles() {
+  const bodyParagraph = {
+    spacing: { after: STYLE.bodyAfter, line: STYLE.bodyLine, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined },
+    alignment: AlignmentType.JUSTIFIED,
+  }
   return {
     default: {
       document: {
-        run: { font: chineseFont(), size: 19, color: COLOR.text },
-        paragraph: { spacing: { after: 75, line: 260 }, alignment: AlignmentType.JUSTIFIED },
+        run: { font: chineseFont(), size: STYLE.bodySize, color: COLOR.text },
+        paragraph: bodyParagraph,
+      },
+      heading1: {
+        run: { font: titleFont(1), size: STYLE.h1Size, bold: true, color: STYLE.winningStyle ? COLOR.text : COLOR.navy },
+        paragraph: { spacing: { before: 40, after: STYLE.winningStyle ? 120 : 80 }, outlineLevel: 0, keepNext: true },
+      },
+      heading2: {
+        run: { font: titleFont(2), size: STYLE.h2Size, bold: true, color: STYLE.winningStyle ? COLOR.text : COLOR.red },
+        paragraph: { spacing: { before: 120, after: 60 }, outlineLevel: 1, keepNext: true },
       },
     },
     paragraphStyles: [
       {
         id: 'Normal', name: 'Normal', basedOn: 'Normal', next: 'Normal', quickFormat: true,
-        run: { font: chineseFont(), size: 19, color: COLOR.text },
-        paragraph: { spacing: { after: 75, line: 260 }, alignment: AlignmentType.JUSTIFIED },
-      },
-      {
-        id: 'Heading1', name: 'Heading 1', basedOn: 'Normal', next: 'Normal', quickFormat: true,
-        run: { font: titleFont(), size: 34, bold: true, color: COLOR.navy },
-        paragraph: { spacing: { before: 40, after: 80 }, outlineLevel: 0, keepNext: true },
-      },
-      {
-        id: 'Heading2', name: 'Heading 2', basedOn: 'Normal', next: 'Normal', quickFormat: true,
-        run: { font: titleFont(), size: 24, bold: true, color: COLOR.red },
-        paragraph: { spacing: { before: 120, after: 60 }, outlineLevel: 1, keepNext: true },
+        run: { font: chineseFont(), size: STYLE.bodySize, color: COLOR.text },
+        paragraph: bodyParagraph,
       },
       {
         id: 'Caption', name: 'Caption', basedOn: 'Normal', next: 'Normal', quickFormat: true,
-        run: { font: chineseFont(), size: 16, color: COLOR.muted },
-        paragraph: { spacing: { before: 0, after: 90, line: 220 }, alignment: AlignmentType.CENTER },
+        run: { font: chineseFont(), size: STYLE.captionSize, color: COLOR.muted },
+        paragraph: { spacing: { before: 0, after: 90, line: STYLE.winningStyle ? 300 : 220, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined }, alignment: AlignmentType.CENTER },
       },
     ],
   }
@@ -528,7 +607,7 @@ function numbering() {
           format: LevelFormat.BULLET,
           text: '•',
           alignment: AlignmentType.LEFT,
-          style: { paragraph: { indent: { left: 460, hanging: 240 } }, run: { font: chineseFont(), color: COLOR.red, size: 18 } },
+          style: { paragraph: { indent: { left: 460, hanging: 240 } }, run: { font: chineseFont(), color: STYLE.winningStyle ? COLOR.text : COLOR.red, size: STYLE.winningStyle ? STYLE.bodySize : 18 } },
         }],
       },
       {
@@ -538,7 +617,7 @@ function numbering() {
           format: LevelFormat.DECIMAL,
           text: '%1.',
           alignment: AlignmentType.LEFT,
-          style: { paragraph: { indent: { left: 500, hanging: 260 } }, run: { font: chineseFont(), color: COLOR.red, size: 18 } },
+          style: { paragraph: { indent: { left: 500, hanging: 260 } }, run: { font: chineseFont(), color: STYLE.winningStyle ? COLOR.text : COLOR.red, size: STYLE.winningStyle ? STYLE.bodySize : 18 } },
         }],
       },
     ],
@@ -547,6 +626,9 @@ function numbering() {
 
 async function main() {
   const { profile, config } = parseArgs(process.argv.slice(2))
+  Object.assign(PAGE, config.layout.page)
+  Object.assign(COLOR, config.layout.color)
+  Object.assign(STYLE, config.layout.style)
   const pages = parseContent(config.contentPath, config.expectedPages)
   const figures = pages.reduce(
     (count, page) => count + page.blocks.filter((block) => block.type === 'image').length,
