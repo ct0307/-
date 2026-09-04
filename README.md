@@ -29,4 +29,3 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\quality_gate.ps1
 ```
 
 质量门禁不替代真实 52 文件、PostgreSQL、OCR 准确率、OpenClaw/GPU 或能耗实测。
-

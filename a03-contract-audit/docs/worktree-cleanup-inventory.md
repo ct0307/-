@@ -9,7 +9,7 @@
 | 项目 | 状态 |
 |---|---|
 | 当前整理分支 | `codex/workspace-organization` |
-| 整理分支相对 `master` | 完成本次验收提交后领先 7 个提交 |
+| 整理分支相对 `master` | 完成格式收口提交后领先 8 个提交 |
 | `master` 相对 `origin/master` | 领先 22 个提交 |
 | 主工作区未跟踪内容 | `.planning/`、`a03-contract-audit/outputs/`；新规则合并后将被忽略 |
 
