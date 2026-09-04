@@ -40,7 +40,8 @@ foreach ($relativePath in $forbidden) {
 
 $ignored = @('.planning', 'a03-contract-audit/outputs')
 foreach ($relativePath in $ignored) {
-    & git -C $repoRoot check-ignore -q -- $relativePath
+    $sentinelPath = "$relativePath/.workspace-organization-check"
+    & git -C $repoRoot check-ignore -q --no-index -- $sentinelPath
     if ($LASTEXITCODE -ne 0) {
         $errors.Add("未被 Git 忽略：$relativePath")
     }
@@ -48,7 +49,8 @@ foreach ($relativePath in $ignored) {
 
 $excluded = @(
     ':!a03-contract-audit/docs/superpowers/specs/2026-09-04-workspace-organization-design.md',
-    ':!a03-contract-audit/docs/superpowers/plans/2026-09-04-workspace-organization.md'
+    ':!a03-contract-audit/docs/superpowers/plans/2026-09-04-workspace-organization.md',
+    ':!a03-contract-audit/docs/workspace-organization-check.ps1'
 )
 $patterns = @(
     '浙江省外包赛-2026赛题手册.pdf',

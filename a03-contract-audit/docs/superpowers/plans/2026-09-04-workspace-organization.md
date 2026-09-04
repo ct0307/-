@@ -190,11 +190,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\quality_gate.ps1
 - [ ] **Step 4：验证忽略规则和 Markdown 格式**
 
 ```powershell
-git check-ignore -v -- .planning a03-contract-audit/outputs
+git check-ignore -v --no-index -- .planning/.workspace-organization-check a03-contract-audit/outputs/.workspace-organization-check
 git diff --check -- .gitignore README.md AGENTS.md
 ```
 
-Expected: 两个路径均显示匹配的根忽略规则；`git diff --check` 退出码 0。
+Expected: 两个哨兵路径均显示匹配的根忽略规则；不创建哨兵文件；`git diff --check` 退出码 0。
 
 - [ ] **Step 5：提交根入口**
 
