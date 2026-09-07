@@ -9,8 +9,7 @@
 | `a03-contract-audit/` | 前后端源码、部署配置、测试和可追溯文档源 | 是 |
 | `references/` | 官方赛题与原始需求资料 | 输入资料 |
 | `deliverables/` | 最终参赛材料索引 | 是 |
-| `archive/` | 已废弃原型，仅供历史参考 | 否 |
-| `.planning/` | 本地 Agent 工作记录 | 否，不入库 |
+| `.planning/` | 本地 Agent 过程记录 | 否，不入库 |
 | `.worktrees/` | 临时 Git 工作树 | 否，不入库 |
 
 ## 常用入口

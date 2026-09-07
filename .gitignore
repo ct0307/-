@@ -18,6 +18,7 @@ build/
 out/
 .next/
 .vite/
+a03-contract-audit/docs/project-overview/rendered/
 
 # Logs
 logs/
