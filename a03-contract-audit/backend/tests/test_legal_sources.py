@@ -223,21 +223,30 @@ def test_article_set_rejects_missing_or_wrong_count(ranges, count, message):
 
 def test_repository_legal_sources_match_verified_manifest():
     specs = load_manifest(REAL_SOURCES / "manifest.json")
+    specs_by_source = {spec.source_id: spec for spec in specs}
+    assert specs_by_source["civil-code-2020"].included_ranges == ((1, 1260),)
+
     counts = {}
     parsed_by_source = {}
     for spec in specs:
         articles = parse_articles(spec, verify_source_file(spec, REAL_SOURCES))
         validate_article_set(spec, articles)
         counts[spec.source_id] = len(articles)
-        parsed_by_source[spec.source_id] = {item.article_number: item for item in articles}
+        parsed_by_source[spec.source_id] = articles
 
     assert counts == {
-        "civil-code-2020": 802,
+        "civil-code-2020": 1260,
         "civil-code-contract-interpretation-2023": 69,
     }
-    civil_code = parsed_by_source["civil-code-2020"]
+    civil_code_articles = parsed_by_source["civil-code-2020"]
+    assert civil_code_articles[0].article_number == "第一条"
+    assert civil_code_articles[-1].article_number == "第一千二百六十条"
+    civil_code = {item.article_number: item for item in civil_code_articles}
     assert {"第一条", "第二百零四条", "第三百八十六条", "第五百一十一条", "第九百八十八条"} <= civil_code.keys()
     assert "（六）履行费用的负担不明确的" in civil_code["第五百一十一条"].content
-    interpretation = parsed_by_source["civil-code-contract-interpretation-2023"]
+    interpretation = {
+        item.article_number: item
+        for item in parsed_by_source["civil-code-contract-interpretation-2023"]
+    }
     assert interpretation["第一条"].content.startswith("第一条")
     assert "本解释自2023年12月5日起施行" in interpretation["第六十九条"].content
