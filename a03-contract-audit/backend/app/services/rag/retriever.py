@@ -281,7 +281,12 @@ def _parse_stored_vector(raw: str) -> np.ndarray | None:
     return _coerce_vector(value)
 
 
-def _validate_vectors(vectors: list[list[float]], expected_count: int) -> int:
+def _validate_vectors(
+    vectors: list[list[float]],
+    expected_count: int,
+    *,
+    expected_dimension: int | None = None,
+) -> int:
     """校验整批 embedding 数量、数值和维度，返回统一维度。"""
     if len(vectors) != expected_count:
         raise LLMError(
@@ -293,13 +298,41 @@ def _validate_vectors(vectors: list[list[float]], expected_count: int) -> int:
     dimensions = {vector.size for vector in parsed if vector is not None}
     if len(dimensions) != 1:
         raise LLMError("embedding 返回向量维度不一致")
-    return dimensions.pop()
+    dimension = dimensions.pop()
+    if expected_dimension is not None and dimension != expected_dimension:
+        raise LLMError(
+            f"embedding 返回维度与配置不一致：expected={expected_dimension}, actual={dimension}"
+        )
+    return dimension
 
 
 def _configured_embedding_model() -> str:
     if settings.EMBED_BACKEND.lower() == "local":
         return settings.LOCAL_EMBED_MODEL
     return settings.EMBED_MODEL
+
+
+def _configured_normalization() -> str:
+    return "l2" if settings.EMBED_BACKEND.lower() == "local" else "provider-default"
+
+
+def embedding_signature(
+    *,
+    backend: str,
+    model: str,
+    dimension: int,
+    normalization: str,
+    chunk_schema_version: str,
+) -> str:
+    payload = {
+        "backend": backend,
+        "model": model,
+        "dimension": dimension,
+        "normalization": normalization,
+        "chunk_schema_version": chunk_schema_version,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _bm25_search(query: str, docs: list[tuple]) -> dict[int, int]:
@@ -411,23 +444,70 @@ def index_documents(chunks: list[dict], db: Session | None = None) -> int:
             db.close()
 
 
-def prepare_documents(chunks: list[dict]) -> list[KnowledgeChunk]:
+def prepare_documents(
+    chunks: list[dict],
+    *,
+    embedding_cache: dict[tuple[str, str], list[float]] | None = None,
+) -> list[KnowledgeChunk]:
     """在数据库事务外生成并校验全部向量，返回尚未持久化的 ORM 行。"""
     if not chunks:
         return []
     chunks = [_normalize_chunk_scope(chunk) for chunk in chunks]
-    adapter = get_embedding_adapter()
-    vectors = adapter.embed([chunk["content"] for chunk in chunks])
-    dimension = _validate_vectors(vectors, len(chunks))
+    embedding_cache = embedding_cache or {}
     embedding_model = _configured_embedding_model()
+    embedding_inputs = [chunk.get("retrieval_text") or chunk["content"] for chunk in chunks]
+    content_hashes = [
+        hashlib.sha256(text.encode("utf-8")).hexdigest() for text in embedding_inputs
+    ]
+    signatures: list[str | None] = []
+    vectors: list[list[float] | None] = [None] * len(chunks)
+    missing_indexes: list[int] = []
+
+    for index, (chunk, content_hash) in enumerate(zip(chunks, content_hashes)):
+        schema_version = chunk.get("chunk_schema_version")
+        signature = None
+        if schema_version:
+            signature = embedding_signature(
+                backend=settings.EMBED_BACKEND.lower(),
+                model=embedding_model,
+                dimension=settings.EMBED_DIM,
+                normalization=_configured_normalization(),
+                chunk_schema_version=schema_version,
+            )
+            cached = embedding_cache.get((content_hash, signature))
+            parsed = _coerce_vector(cached) if cached is not None else None
+            if parsed is not None and parsed.size == settings.EMBED_DIM:
+                vectors[index] = cached
+        signatures.append(signature)
+        if vectors[index] is None:
+            missing_indexes.append(index)
+
+    if missing_indexes:
+        adapter = get_embedding_adapter()
+        generated = adapter.embed([embedding_inputs[index] for index in missing_indexes])
+        _validate_vectors(generated, len(missing_indexes))
+        for index, vector in zip(missing_indexes, generated):
+            if signatures[index] and len(vector) != settings.EMBED_DIM:
+                raise LLMError(
+                    "embedding 返回维度与配置不一致："
+                    f"expected={settings.EMBED_DIM}, actual={len(vector)}"
+                )
+            vectors[index] = vector
+
+    complete_vectors = [vector for vector in vectors if vector is not None]
+    dimension = _validate_vectors(complete_vectors, len(chunks))
     return [
         _knowledge_row(
             chunk,
             embedding=json.dumps(vector),
             embedding_model=embedding_model,
             embedding_dimension=dimension,
+            embedding_signature_value=signature,
+            content_hash_value=content_hash,
         )
-        for chunk, vector in zip(chunks, vectors)
+        for chunk, vector, signature, content_hash in zip(
+            chunks, complete_vectors, signatures, content_hashes
+        )
     ]
 
 
@@ -493,6 +573,8 @@ def _knowledge_row(
     embedding: str,
     embedding_model: str | None,
     embedding_dimension: int | None,
+    embedding_signature_value: str | None = None,
+    content_hash_value: str | None = None,
 ) -> KnowledgeChunk:
     return KnowledgeChunk(
         category=chunk.get("category", "rule"),
@@ -512,5 +594,13 @@ def _knowledge_row(
         scope_mode=chunk.get("scope_mode", "unclassified"),
         embedding_model=embedding_model,
         embedding_dimension=embedding_dimension,
-        content_hash=hashlib.sha256(chunk["content"].encode("utf-8")).hexdigest(),
+        content_hash=content_hash_value or hashlib.sha256(
+            (chunk.get("retrieval_text") or chunk["content"]).encode("utf-8")
+        ).hexdigest(),
+        legal_article_id=chunk.get("legal_article_id"),
+        chunk_index=chunk.get("chunk_index"),
+        chunk_count=chunk.get("chunk_count"),
+        chunk_schema_version=chunk.get("chunk_schema_version"),
+        retrieval_text=chunk.get("retrieval_text"),
+        embedding_signature=embedding_signature_value,
     )
