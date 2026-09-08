@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -72,6 +73,12 @@ def _load_bundle(manifest_path: Path) -> LegalBundle:
 
 
 def _embedding_cache(db: Session) -> dict[tuple[str, str], list[float]]:
+    inspector = inspect(db.get_bind())
+    if "knowledge_chunks" not in inspector.get_table_names():
+        return {}
+    columns = {column["name"] for column in inspector.get_columns("knowledge_chunks")}
+    if not {"content_hash", "embedding_signature", "embedding"}.issubset(columns):
+        return {}
     cache: dict[tuple[str, str], list[float]] = {}
     rows = db.query(
         KnowledgeChunk.content_hash,
@@ -115,15 +122,27 @@ def _report(
 ) -> tuple[SyncReport, dict[tuple[str, str], list[float]]]:
     cache = _embedding_cache(db)
     reuse_count = sum(1 for chunk in bundle.chunks if _chunk_cache_key(chunk) in cache)
-    source_ids = [spec.source_id for spec in bundle.specs]
-    article_ids = db.query(LegalArticle.id).filter(LegalArticle.source_id.in_(source_ids))
-    replace_count = db.query(KnowledgeChunk).filter(
-        KnowledgeChunk.legal_article_id.in_(article_ids)
-    ).count()
-    if replace_legacy:
-        replace_count += db.query(KnowledgeChunk).filter(
-            KnowledgeChunk.source.in_(_LEGACY_SOURCES)
+    inspector = inspect(db.get_bind())
+    tables = set(inspector.get_table_names())
+    knowledge_columns = (
+        {column["name"] for column in inspector.get_columns("knowledge_chunks")}
+        if "knowledge_chunks" in tables else set()
+    )
+    replace_count = 0
+    if "legal_articles" in tables and "legal_article_id" in knowledge_columns:
+        source_ids = [spec.source_id for spec in bundle.specs]
+        article_ids = db.query(LegalArticle.id).filter(LegalArticle.source_id.in_(source_ids))
+        replace_count = db.query(KnowledgeChunk).filter(
+            KnowledgeChunk.legal_article_id.in_(article_ids)
         ).count()
+    if replace_legacy and {"source"}.issubset(knowledge_columns):
+        replace_count += sum(
+            db.execute(
+                text("SELECT COUNT(*) FROM knowledge_chunks WHERE source = :source"),
+                {"source": source},
+            ).scalar_one()
+            for source in _LEGACY_SOURCES
+        )
     return SyncReport(
         source_count=len(bundle.specs),
         article_count=len(bundle.articles),

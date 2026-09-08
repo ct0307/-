@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.db.session import Base
@@ -169,6 +169,32 @@ def test_sync_plan_is_read_only_and_reports_target_counts(db):
     assert report.rebuild_embedding_count == 3
     assert adapter.inputs == []
     assert db.query(LegalSource).count() == 0
+
+
+def test_sync_plan_supports_pre_migration_database():
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE knowledge_chunks ("
+            "id INTEGER PRIMARY KEY, category VARCHAR(32), source VARCHAR(255), "
+            "content TEXT, embedding TEXT)"
+        ))
+        connection.execute(text(
+            "INSERT INTO knowledge_chunks "
+            "(category, source, content, embedding) VALUES "
+            "('law', '民法典-合同编.txt', '旧合同编', '')"
+        ))
+    session = sessionmaker(bind=engine)()
+    try:
+        report = plan_legal_sync(session, MANIFEST, replace_legacy=True)
+    finally:
+        session.close()
+        engine.dispose()
+
+    assert report.article_count == 3
+    assert report.reuse_embedding_count == 0
+    assert report.rebuild_embedding_count == 3
+    assert report.replace_chunk_count == 1
 
 
 def test_first_and_repeated_sync_are_idempotent(db):
