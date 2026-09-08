@@ -20,6 +20,7 @@ from app.services.rag.retriever import (
     normalize_scope_metadata,
     prepare_documents,
 )
+from app.services.rag.legal_sources import split_structured_text
 
 router = APIRouter()
 
@@ -250,7 +251,7 @@ def _smart_split(text: str) -> SplitResult:
             if len(art) <= _MAX_CHUNK_CHARS:
                 final.append(art)
             else:
-                final.extend(_split_paragraph(art))
+                final.extend(split_structured_text(art, _MAX_CHUNK_CHARS))
         final, ph = _filter(final)
         return SplitResult(final, "article", len(articles), 0, ph)
 

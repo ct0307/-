@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 from app.services.rag.legal_sources import (
+    LegalChunk,
     LegalSourceError,
     SourceSpec,
     chinese_number_to_int,
     int_to_chinese_number,
     load_manifest,
     parse_articles,
+    split_legal_article,
     validate_article_set,
     verify_source_file,
 )
@@ -46,6 +48,58 @@ def _spec(**overrides) -> SourceSpec:
 def test_article_number_conversion_covers_target_ranges(number, label):
     assert int_to_chinese_number(number) == label
     assert chinese_number_to_int(label) == number
+
+
+def test_short_article_produces_one_complete_child_chunk():
+    article = parse_articles(_spec(), "第一条 当事人应当遵循诚信原则。")[0]
+
+    chunks = split_legal_article(article, source_title="示例规则", max_chars=380)
+
+    assert chunks == (
+        LegalChunk(
+            article_key=("sample-law", "第一条"),
+            article_number="第一条",
+            chunk_index=0,
+            chunk_count=1,
+            display_content="第一条 当事人应当遵循诚信原则。",
+            retrieval_text="示例规则 第一条 当事人应当遵循诚信原则。",
+        ),
+    )
+
+
+def test_long_article_splits_on_paragraphs_and_items_without_losing_text():
+    body = """第五百一十一条 当事人就有关合同内容约定不明确，依据前条规定仍不能确定的，适用下列规定：
+（一）质量要求不明确的，按照强制性国家标准履行；没有强制性国家标准的，按照推荐性国家标准履行。
+（二）价款或者报酬不明确的，按照订立合同时履行地的市场价格履行；依法应当执行政府定价或者政府指导价的，依照规定履行。
+（三）履行地点不明确，给付货币的，在接受货币一方所在地履行；交付不动产的，在不动产所在地履行。
+（四）履行期限不明确的，债务人可以随时履行，债权人也可以随时请求履行，但是应当给对方必要的准备时间。
+（五）履行方式不明确的，按照有利于实现合同目的的方式履行。
+（六）履行费用的负担不明确的，由履行义务一方负担；因债权人原因增加的履行费用，由债权人负担。"""
+    spec = _spec(included_ranges=((511, 511),), expected_article_count=1)
+    article = parse_articles(spec, body)[0]
+
+    chunks = split_legal_article(article, source_title="中华人民共和国民法典", max_chars=180)
+
+    assert len(chunks) > 1
+    assert all(len(chunk.display_content) <= 180 for chunk in chunks)
+    assert all(chunk.article_number == "第五百一十一条" for chunk in chunks)
+    assert [chunk.chunk_index for chunk in chunks] == list(range(len(chunks)))
+    assert all(chunk.chunk_count == len(chunks) for chunk in chunks)
+    assert all(chunk.article_key == ("sample-law", "第五百一十一条") for chunk in chunks)
+    assert all("中华人民共和国民法典" in chunk.retrieval_text for chunk in chunks)
+    reconstructed = "\n".join(chunk.display_content for chunk in chunks)
+    assert reconstructed == article.content
+
+
+def test_oversized_unstructured_clause_uses_hard_limit_as_last_resort():
+    content = "第一条 " + "连续正文" * 120
+    article = parse_articles(_spec(), content)[0]
+
+    chunks = split_legal_article(article, source_title="示例规则", max_chars=90)
+
+    assert len(chunks) > 1
+    assert all(len(chunk.display_content) <= 90 for chunk in chunks)
+    assert "".join(chunk.display_content for chunk in chunks) == article.content
 
 
 def test_load_manifest_and_verify_authoritative_file():

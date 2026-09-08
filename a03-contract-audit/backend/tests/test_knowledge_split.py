@@ -135,3 +135,20 @@ def test_article_with_leading_whitespace():
     result = _smart_split(text)
     assert result.mode == "article"
     assert result.article_count == 3
+
+
+def test_long_legal_article_keeps_item_boundaries():
+    text = "第一条 总则。\n" + "\n".join(
+        f"（{label}）" + "条款内容" * 35
+        for label in ("一", "二", "三")
+    ) + "\n第二条 另一条完整法条内容用于触发法条模式。"
+
+    result = _smart_split(text)
+
+    first_article_chunks = [chunk for chunk in result.chunks if "第二条" not in chunk]
+    assert result.mode == "article"
+    assert len(first_article_chunks) >= 2
+    assert all(len(chunk) <= 380 for chunk in first_article_chunks)
+    for label in ("一", "二", "三"):
+        item = f"（{label}）" + "条款内容" * 35
+        assert sum(item in chunk for chunk in first_article_chunks) == 1

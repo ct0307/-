@@ -40,6 +40,17 @@ class ParsedArticle:
     content_hash: str
 
 
+@dataclass(frozen=True)
+class LegalChunk:
+    article_key: tuple[str, str]
+    article_number: str
+    chunk_index: int
+    chunk_count: int
+    display_content: str
+    retrieval_text: str
+    chunk_schema_version: str = "legal-v1"
+
+
 _OFFICIAL_HOSTS = {
     "flk.npc.gov.cn",
     "npc.gov.cn",
@@ -62,6 +73,7 @@ _HEADING_RE = re.compile(
 _DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3,
            "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _UNITS = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[。；;！？!?])")
 
 
 def chinese_number_to_int(value: str) -> int:
@@ -276,3 +288,83 @@ def validate_article_set(spec: SourceSpec, articles: tuple[ParsedArticle, ...]) 
             f"{spec.source_id} 条数不一致：expected={spec.expected_article_count}, "
             f"actual={len(articles)}"
         )
+
+
+def _split_oversized_unit(text: str, max_chars: int) -> list[str]:
+    sentences = [part for part in _SENTENCE_BOUNDARY_RE.split(text) if part]
+    if len(sentences) == 1:
+        return [text[index:index + max_chars] for index in range(0, len(text), max_chars)]
+    parts: list[str] = []
+    buffer = ""
+    for sentence in sentences:
+        if len(sentence) > max_chars:
+            if buffer:
+                parts.append(buffer)
+                buffer = ""
+            parts.extend(
+                sentence[index:index + max_chars]
+                for index in range(0, len(sentence), max_chars)
+            )
+        elif buffer and len(buffer) + len(sentence) > max_chars:
+            parts.append(buffer)
+            buffer = sentence
+        else:
+            buffer += sentence
+    if buffer:
+        parts.append(buffer)
+    return parts
+
+
+def split_structured_text(text: str, max_chars: int) -> tuple[str, ...]:
+    """优先按换行款项、再按句界拆分，最后才按字符硬切。"""
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+    if len(text) <= max_chars:
+        return (text,)
+
+    lines = text.splitlines()
+    if len(lines) == 1:
+        return tuple(_split_oversized_unit(text, max_chars))
+
+    units: list[str] = []
+    for line in lines:
+        units.extend(
+            [line] if len(line) <= max_chars else _split_oversized_unit(line, max_chars)
+        )
+
+    chunks: list[str] = []
+    buffer = ""
+    for unit in units:
+        candidate = f"{buffer}\n{unit}" if buffer else unit
+        if len(candidate) <= max_chars:
+            buffer = candidate
+        else:
+            if buffer:
+                chunks.append(buffer)
+            buffer = unit
+    if buffer:
+        chunks.append(buffer)
+    return tuple(chunks)
+
+
+def split_legal_article(
+    article: ParsedArticle,
+    *,
+    source_title: str,
+    max_chars: int = 380,
+) -> tuple[LegalChunk, ...]:
+    pieces = split_structured_text(article.content, max_chars)
+    count = len(pieces)
+    chunks = []
+    for index, content in enumerate(pieces):
+        article_context = "" if content.startswith(article.article_number) else article.article_number
+        context = [source_title, article.chapter_title, article_context, content]
+        chunks.append(LegalChunk(
+            article_key=(article.source_id, article.article_number),
+            article_number=article.article_number,
+            chunk_index=index,
+            chunk_count=count,
+            display_content=content,
+            retrieval_text=" ".join(part for part in context if part),
+        ))
+    return tuple(chunks)
