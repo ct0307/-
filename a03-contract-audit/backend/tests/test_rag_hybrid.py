@@ -52,6 +52,8 @@ def test_keyword_fallback():
     # 违约类命中3词，应排第一
     assert "违约" in res[0]["content"]
     assert all("score" in r and "content" in r and "source" in r for r in res)
+    assert res[0]["matched_content"] == res[0]["content"]
+    assert res[0]["legal_article_id"] is None
 
 
 def test_bm25_index_cache_fingerprint():

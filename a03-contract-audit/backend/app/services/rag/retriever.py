@@ -27,7 +27,8 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.llm.base import LLMError
 from app.llm.factory import get_embedding_adapter
-from app.models.models import KnowledgeChunk
+from app.models.models import KnowledgeChunk, LegalArticle
+from app.services.rag.legal_sources import chinese_number_to_int, int_to_chinese_number
 
 log = get_logger("rag")
 
@@ -91,6 +92,10 @@ def retrieve(
             KnowledgeChunk.expiry_date, KnowledgeChunk.applicable_contract_types,
             KnowledgeChunk.applicable_dimensions, KnowledgeChunk.embedding_model,
             KnowledgeChunk.embedding_dimension, KnowledgeChunk.scope_mode,
+            KnowledgeChunk.legal_article_id, KnowledgeChunk.chunk_index,
+            KnowledgeChunk.chunk_count, LegalArticle.content,
+        ).outerjoin(
+            LegalArticle, KnowledgeChunk.legal_article_id == LegalArticle.id
         ).all()
     finally:
         db.close()
@@ -113,6 +118,23 @@ def retrieve(
     if not docs:
         log.info("rag.retrieve", mode="filtered_empty", matched=0)
         return []
+
+    article_number = parse_article_reference(query)
+    if article_number:
+        exact_docs = [
+            doc for doc in docs
+            if (_doc_value(doc, 5) or _extract_article_number(doc[1])) == article_number
+        ]
+        if not exact_docs:
+            return []
+        exact_docs.sort(key=lambda doc: (
+            _doc_value(doc, 14) is None,
+            _doc_value(doc, 15, 0) or 0,
+            doc[0],
+        ))
+        result = _result_from_doc(exact_docs[0], score=1.0, retrieval_mode="exact")
+        log.info("rag.retrieve", mode="exact", matched=1)
+        return [result]
 
     # —— BM25 路（全部切片参与）——
     bm25_rank = _bm25_search(query, docs)
@@ -137,23 +159,45 @@ def retrieve(
         log.info("rag.retrieve", mode="keyword", matched=len(results))
         return results
 
-    results = []
-    for doc_id, score in fused[:top_k]:
-        doc = id_to_doc[doc_id]
-        results.append({
-            "chunk_id": doc_id,
-            "content": doc[1],
-            "source": doc[2],
-            "score": round(score, 4),
-            "article_number": _doc_value(doc, 5) or _extract_article_number(doc[1]),
-            "version": _doc_value(doc, 6),
-            "retrieval_mode": "hybrid" if vec_ok else "bm25",
-            "reliable": _doc_value(doc, 13) in {"global", "scoped"},
-        })
-
     mode = "hybrid" if vec_ok else "bm25"
+    results = collapse_by_article([
+        _result_from_doc(id_to_doc[doc_id], score=score, retrieval_mode=mode)
+        for doc_id, score in fused
+    ])[:top_k]
     log.info("rag.retrieve", mode=mode, matched=len(results))
     return results
+
+
+def _result_from_doc(doc: tuple, *, score: float, retrieval_mode: str) -> dict:
+    matched_content = doc[1]
+    return {
+        "chunk_id": doc[0],
+        "matched_content": matched_content,
+        "content": _doc_value(doc, 17) or matched_content,
+        "source": doc[2],
+        "score": round(score, 4),
+        "article_number": _doc_value(doc, 5) or _extract_article_number(matched_content),
+        "version": _doc_value(doc, 6),
+        "retrieval_mode": retrieval_mode,
+        "reliable": _doc_value(doc, 13) in {"global", "scoped"},
+        "legal_article_id": _doc_value(doc, 14),
+        "chunk_index": _doc_value(doc, 15),
+        "chunk_count": _doc_value(doc, 16),
+    }
+
+
+def collapse_by_article(results: list[dict]) -> list[dict]:
+    """同一父法条只保留排名最靠前的命中，旧知识记录互不合并。"""
+    seen_article_ids: set[int] = set()
+    collapsed: list[dict] = []
+    for result in results:
+        article_id = result.get("legal_article_id")
+        if article_id is not None:
+            if article_id in seen_article_ids:
+                continue
+            seen_article_ids.add(article_id)
+        collapsed.append(result)
+    return collapsed
 
 
 def _doc_value(doc: tuple, index: int, default=None):
@@ -388,6 +432,39 @@ def _docs_fingerprint(docs: list[tuple]) -> str:
 _ARTICLE_NUMBER_RE = re.compile(
     r"第[一二三四五六七八九十百千零两\d]{1,7}条(?:之[一二三四五六七八九十\d]+)?"
 )
+_ARTICLE_NUMERAL_CHARS = "零〇一二两三四五六七八九十百千万"
+_ARTICLE_REFERENCE_RE = re.compile(
+    rf"(?<![\d{_ARTICLE_NUMERAL_CHARS}])(?:第)?"
+    rf"(?P<number>\d{{1,4}}|[{_ARTICLE_NUMERAL_CHARS}]{{1,7}})条"
+    rf"(?:之(?P<suffix>\d{{1,4}}|[{_ARTICLE_NUMERAL_CHARS}]{{1,7}}))?"
+    rf"(?![之\d{_ARTICLE_NUMERAL_CHARS}])"
+)
+
+
+def parse_article_reference(query: str) -> str | None:
+    """从查询中提取条号并统一为中文规范形式。"""
+    match = _ARTICLE_REFERENCE_RE.search(query or "")
+    if not match:
+        return None
+    raw_number = match.group("number")
+    try:
+        number = int(raw_number) if raw_number.isdigit() else chinese_number_to_int(raw_number)
+        raw_suffix = match.group("suffix")
+        suffix = (
+            int(raw_suffix) if raw_suffix and raw_suffix.isdigit()
+            else chinese_number_to_int(raw_suffix) if raw_suffix
+            else None
+        )
+    except ValueError:
+        return None
+    if not 1 <= number < 10000:
+        return None
+    normalized = f"第{int_to_chinese_number(number)}条"
+    if suffix is not None:
+        if not 1 <= suffix < 10000:
+            return None
+        normalized += f"之{int_to_chinese_number(suffix)}"
+    return normalized
 
 
 def _extract_article_number(content: str) -> str | None:
@@ -411,12 +488,16 @@ def _keyword_search(query: str, top_k: int) -> list[dict]:
             scored.append({
                 "chunk_id": None,
                 "content": rule["content"],
+                "matched_content": rule["content"],
                 "source": rule["source"],
                 "source_type": "fallback_rule",
                 "article_number": None,
                 "score": hits,
                 "retrieval_mode": "fallback",
                 "reliable": False,
+                "legal_article_id": None,
+                "chunk_index": None,
+                "chunk_count": None,
             })
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:top_k]
