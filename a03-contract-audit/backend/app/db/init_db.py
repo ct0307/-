@@ -64,6 +64,12 @@ _DEV_COLUMNS = {
         ("embedding_model", "VARCHAR(255)"),
         ("embedding_dimension", "INTEGER"),
         ("content_hash", "VARCHAR(64)"),
+        ("legal_article_id", "INTEGER"),
+        ("chunk_index", "INTEGER"),
+        ("chunk_count", "INTEGER"),
+        ("chunk_schema_version", "VARCHAR(32)"),
+        ("retrieval_text", "TEXT"),
+        ("embedding_signature", "VARCHAR(64)"),
     ],
 }
 

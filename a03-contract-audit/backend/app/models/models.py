@@ -139,6 +139,45 @@ class Risk(Base):
     contract: Mapped["Contract"] = relationship(back_populates="risks")
 
 
+class LegalSource(Base):
+    """经核验的权威法律文件。"""
+
+    __tablename__ = "legal_sources"
+    source_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    issuing_authority: Mapped[str] = mapped_column(String(255), nullable=False)
+    official_url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    publication_date: Mapped[date] = mapped_column(Date, nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    version_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    retrieved_at: Mapped[date] = mapped_column(Date, nullable=False)
+    file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    articles: Mapped[list["LegalArticle"]] = relationship(
+        back_populates="legal_source", cascade="all, delete-orphan"
+    )
+
+
+class LegalArticle(Base):
+    """权威法源中的完整法条父记录。"""
+
+    __tablename__ = "legal_articles"
+    __table_args__ = (
+        UniqueConstraint("source_id", "article_number", name="uq_legal_article_source_number"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("legal_sources.source_id"), index=True)
+    article_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    article_sort: Mapped[int] = mapped_column(Integer, nullable=False)
+    chapter_title: Mapped[str] = mapped_column(String(255), default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    legal_source: Mapped["LegalSource"] = relationship(back_populates="articles")
+    chunks: Mapped[list["KnowledgeChunk"]] = relationship(back_populates="legal_article")
+
+
 class KnowledgeChunk(Base):
     """知识库切片：法规/行业规则/合同模板，供 RAG 检索。
 
@@ -163,7 +202,17 @@ class KnowledgeChunk(Base):
     embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     embedding_dimension: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    legal_article_id: Mapped[int | None] = mapped_column(
+        ForeignKey("legal_articles.id"), nullable=True, index=True
+    )
+    chunk_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chunk_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chunk_schema_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    retrieval_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    embedding_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    legal_article: Mapped["LegalArticle | None"] = relationship(back_populates="chunks")
 
 
 class AuditLog(Base):
