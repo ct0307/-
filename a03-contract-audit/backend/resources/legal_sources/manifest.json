@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "source_id": "civil-code-2020",
+      "title": "中华人民共和国民法典",
+      "issuing_authority": "全国人民代表大会",
+      "official_url": "https://flk.npc.gov.cn/detail?title=%E4%B8%AD%E5%8D%8E%E4%BA%BA%E6%B0%91%E5%85%B1%E5%92%8C%E5%9B%BD%E6%B0%91%E6%B3%95%E5%85%B8&id=ff808081729d1efe01729d50b5c500bf",
+      "file": "civil-code.txt",
+      "file_sha256": "90ec77751e4192d640db49dd671fbf00a9528dadcc13dd5294737143d2c1c629",
+      "source_artifact_sha256": "6926a597a66c5aad4803591ce9a51a8eebe847260f5ba2805210b608ded78353",
+      "included_ranges": [[1, 204], [386, 457], [463, 988]],
+      "expected_article_count": 802,
+      "publication_date": "2020-05-28",
+      "effective_date": "2021-01-01",
+      "version_status": "现行有效",
+      "retrieved_at": "2026-09-08"
+    },
+    {
+      "source_id": "civil-code-contract-interpretation-2023",
+      "title": "最高人民法院关于适用《中华人民共和国民法典》合同编通则若干问题的解释",
+      "issuing_authority": "最高人民法院",
+      "official_url": "http://gongbao.court.gov.cn/Details/f4722cf61c92a585f04b2ecd334f5b.html",
+      "file": "contract-interpretation-2023.txt",
+      "file_sha256": "949134ef436be7cd9b6d544b41888648ae0907af37998f8dfbec627ffe75ca56",
+      "source_artifact_sha256": "cc1860fb66d0454f54a155a3492a00b535d53b2ea4befb129145924fce205fd1",
+      "included_ranges": [[1, 69]],
+      "expected_article_count": 69,
+      "publication_date": "2023-12-04",
+      "effective_date": "2023-12-05",
+      "version_status": "现行有效",
+      "retrieved_at": "2026-09-08"
+    }
+  ]
+}

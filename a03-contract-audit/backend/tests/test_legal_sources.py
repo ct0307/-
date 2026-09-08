@@ -21,6 +21,7 @@ from app.services.rag.legal_sources import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legal_sources"
+REAL_SOURCES = Path(__file__).parents[1] / "resources" / "legal_sources"
 
 
 def _spec(**overrides) -> SourceSpec:
@@ -218,3 +219,25 @@ def test_article_set_rejects_missing_or_wrong_count(ranges, count, message):
 
     with pytest.raises(LegalSourceError, match=message):
         validate_article_set(spec, articles)
+
+
+def test_repository_legal_sources_match_verified_manifest():
+    specs = load_manifest(REAL_SOURCES / "manifest.json")
+    counts = {}
+    parsed_by_source = {}
+    for spec in specs:
+        articles = parse_articles(spec, verify_source_file(spec, REAL_SOURCES))
+        validate_article_set(spec, articles)
+        counts[spec.source_id] = len(articles)
+        parsed_by_source[spec.source_id] = {item.article_number: item for item in articles}
+
+    assert counts == {
+        "civil-code-2020": 802,
+        "civil-code-contract-interpretation-2023": 69,
+    }
+    civil_code = parsed_by_source["civil-code-2020"]
+    assert {"第一条", "第二百零四条", "第三百八十六条", "第五百一十一条", "第九百八十八条"} <= civil_code.keys()
+    assert "（六）履行费用的负担不明确的" in civil_code["第五百一十一条"].content
+    interpretation = parsed_by_source["civil-code-contract-interpretation-2023"]
+    assert interpretation["第一条"].content.startswith("第一条")
+    assert "本解释自2023年12月5日起施行" in interpretation["第六十九条"].content
