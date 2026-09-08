@@ -1,10 +1,16 @@
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+from app.db.session import Base
 from app.llm.base import LLMError
+from app.models.models import KnowledgeChunk, LegalArticle, LegalSource
 from app.services.rag import retriever
+from app.services.rag.legal_sync import apply_legal_sync, plan_legal_sync
 
 
 class FakeEmbeddingAdapter:
@@ -15,6 +21,18 @@ class FakeEmbeddingAdapter:
     def embed(self, texts):
         self.inputs.append(list(texts))
         return self.vectors
+
+
+class DynamicEmbeddingAdapter:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.inputs = []
+
+    def embed(self, texts):
+        self.inputs.append(list(texts))
+        if self.fail:
+            raise LLMError("测试向量服务不可用")
+        return [[1.0, 0.0] for _ in texts]
 
 
 def _legal_chunk(**overrides):
@@ -30,6 +48,21 @@ def _legal_chunk(**overrides):
         "scope_mode": "global",
     }
     return {**chunk, **overrides}
+
+
+MANIFEST = Path(__file__).parent / "fixtures" / "legal_sources" / "manifest.json"
+
+
+@pytest.fixture
+def db():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()
 
 
 def test_embedding_signature_is_stable_and_version_sensitive():
@@ -123,3 +156,79 @@ def test_changed_retrieval_text_rebuilds_embedding():
 
     assert adapter.inputs == [["修改后的检索文本"]]
     assert json.loads(row.embedding) == [0.0, 1.0]
+
+
+def test_sync_plan_is_read_only_and_reports_target_counts(db):
+    adapter = DynamicEmbeddingAdapter()
+    with patch.object(retriever, "get_embedding_adapter", return_value=adapter):
+        report = plan_legal_sync(db, MANIFEST)
+
+    assert report.source_count == 1
+    assert report.article_count == 3
+    assert report.chunk_count == 3
+    assert report.rebuild_embedding_count == 3
+    assert adapter.inputs == []
+    assert db.query(LegalSource).count() == 0
+
+
+def test_first_and_repeated_sync_are_idempotent(db):
+    adapter = DynamicEmbeddingAdapter()
+    with (
+        patch.object(retriever, "get_embedding_adapter", return_value=adapter),
+        patch.object(retriever.settings, "EMBED_DIM", 2),
+    ):
+        first = apply_legal_sync(db, MANIFEST)
+        second = apply_legal_sync(db, MANIFEST)
+
+    assert first.article_count == second.article_count == 3
+    assert db.query(LegalSource).count() == 1
+    assert db.query(LegalArticle).count() == 3
+    assert db.query(KnowledgeChunk).filter(KnowledgeChunk.category == "law").count() == 3
+    assert second.reuse_embedding_count == 3
+
+
+def test_embedding_failure_keeps_existing_legal_knowledge(db):
+    with (
+        patch.object(
+            retriever, "get_embedding_adapter", return_value=DynamicEmbeddingAdapter()
+        ),
+        patch.object(retriever.settings, "EMBED_DIM", 2),
+    ):
+        apply_legal_sync(db, MANIFEST)
+    before = [row.content for row in db.query(KnowledgeChunk).order_by(KnowledgeChunk.id)]
+
+    with (
+        patch.object(
+            retriever,
+            "get_embedding_adapter",
+            return_value=DynamicEmbeddingAdapter(fail=True),
+        ),
+        patch.object(retriever.settings, "EMBED_DIM", 3),
+    ):
+        with pytest.raises(LLMError, match="测试向量服务不可用"):
+            apply_legal_sync(db, MANIFEST)
+
+    assert [row.content for row in db.query(KnowledgeChunk).order_by(KnowledgeChunk.id)] == before
+
+
+def test_sync_preserves_uncontrolled_knowledge_and_requires_legacy_flag(db):
+    db.add_all([
+        KnowledgeChunk(category="rule", source="人工规则", content="保留规则", embedding=""),
+        KnowledgeChunk(
+            category="law", source="民法典-合同编.txt", content="旧合同编", embedding=""
+        ),
+    ])
+    db.commit()
+
+    with (
+        patch.object(
+            retriever, "get_embedding_adapter", return_value=DynamicEmbeddingAdapter()
+        ),
+        patch.object(retriever.settings, "EMBED_DIM", 2),
+    ):
+        apply_legal_sync(db, MANIFEST, replace_legacy=False)
+        assert db.query(KnowledgeChunk).filter_by(source="民法典-合同编.txt").count() == 1
+        apply_legal_sync(db, MANIFEST, replace_legacy=True)
+
+    assert db.query(KnowledgeChunk).filter_by(source="民法典-合同编.txt").count() == 0
+    assert db.query(KnowledgeChunk).filter_by(source="人工规则").count() == 1
