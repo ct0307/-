@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "source_id": "sample-law",
+      "title": "示例规则",
+      "issuing_authority": "全国人民代表大会",
+      "official_url": "https://flk.npc.gov.cn/sample-law",
+      "file": "sample-law.txt",
+      "file_sha256": "40a1ef623dc6a1f0817695dfe3979bc11829a22e52a58e7fc5059417dff56b3e",
+      "included_ranges": [[1, 3]],
+      "expected_article_count": 3,
+      "publication_date": "2020-05-28",
+      "effective_date": "2021-01-01",
+      "version_status": "现行有效",
+      "retrieved_at": "2026-09-08"
+    }
+  ]
+}

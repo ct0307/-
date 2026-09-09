@@ -2,15 +2,13 @@
 // 合同合规审查（真实接口核心闭环）：上传→解析→审查→复核→生成整改。
 // 闭环逻辑迁移自 WorkbenchView，数据落 audit-session store。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ArrowRight, WarningFilled } from '@element-plus/icons-vue'
+import { ArrowRight, RefreshRight, Switch, WarningFilled } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type UploadRawFile } from 'element-plus'
 import { getLookups } from '@/api/admin'
 
-// 用户选文件后立即显示名称（不等后端返回），上传完成后由 session.filename 接管
-const pendingFilename = ref('')
 import type { RiskOut } from '@/api/types'
-import { useAuditSessionStore } from '@/stores/audit-session'
+import { useAuditSessionStore, type UploadRecord, type UploadStatus } from '@/stores/audit-session'
 import { useRectifyStore } from '@/stores/rectify'
 import { useNotifyStore } from '@/stores/notify'
 import { useAuthStore } from '@/stores/auth'
@@ -108,19 +106,49 @@ function onFileChange(uploadFile: { raw?: UploadRawFile }) {
 
 async function onFile(file: UploadRawFile) {
   contractType.value = ''
-  pendingFilename.value = file.name // 立即显示文件名，不等后端返回
   try {
     await session.uploadAndParse(file)
-    pendingFilename.value = '' // 后端已返回 session.filename，清除 pending 态
     ElMessage.success('上传并解析完成')
-  } catch {
-    pendingFilename.value = '' // 失败时清除，避免残留
-    ElMessage.error('上传或解析失败')
+  } catch (error: unknown) {
+    ElMessage.error(error instanceof Error ? error.message : '上传或解析失败，请稍后重试')
   }
 }
 
 const auditState = ref<AuditUiState>('idle')
 const auditDisplay = computed(() => auditProgressDisplay(auditState.value))
+
+const uploadStatusMeta: Record<UploadStatus, {
+  label: string
+  type: 'success' | 'warning' | 'danger' | 'info'
+}> = {
+  uploading: { label: '上传中', type: 'info' },
+  upload_failed: { label: '上传失败', type: 'danger' },
+  parsing: { label: '解析中', type: 'warning' },
+  parse_failed: { label: '上传成功，解析失败', type: 'danger' },
+  parsed: { label: '解析完成', type: 'success' },
+}
+
+async function retryUploadRecord(record: UploadRecord) {
+  try {
+    await session.retryParse(record)
+    contractType.value = ''
+    auditState.value = 'idle'
+    ElMessage.success('解析完成')
+  } catch (error: unknown) {
+    ElMessage.error(error instanceof Error ? error.message : '解析失败，请稍后重试')
+  }
+}
+
+async function selectUploadRecord(record: UploadRecord) {
+  try {
+    await session.selectParsedContract(record)
+    contractType.value = ''
+    auditState.value = 'idle'
+    ElMessage.success(`已切换到 ${record.filename}`)
+  } catch (error: unknown) {
+    ElMessage.error(error instanceof Error ? error.message : '合同切换失败，请稍后重试')
+  }
+}
 
 // —— 触发审查（真接口）——
 async function onAudit() {
@@ -386,6 +414,7 @@ function closeBatch() {
         <template #header><span class="panel-title">合同上传</span></template>
         <el-upload
           drag
+          :disabled="session.busy"
           :auto-upload="false"
           :show-file-list="false"
           :on-change="onFileChange"
@@ -397,7 +426,7 @@ function closeBatch() {
             <p class="upload-hint">PDF / Word / TXT · 拖拽或点击均可</p>
           </div>
         </el-upload>
-        <!-- 上传中：立即显示文件名 + loading；上传完成：切换为 session.filename -->
+        <!-- 当前审查合同与本次会话上传记录分开显示，解析失败不会覆盖当前合同。 -->
         <div v-if="session.filename" class="filename mono">
           <el-icon class="icon-ok"><CircleCheck /></el-icon>
           <span class="filename-text">{{ session.filename }}（合同 #{{ session.contractId }}）</span>
@@ -412,9 +441,49 @@ function closeBatch() {
             @click="cancelUpload"
           />
         </div>
-        <div v-else-if="pendingFilename" class="filename mono pending">
-          <el-icon class="is-loading"><Loading /></el-icon>
-          正在上传 {{ pendingFilename }}…
+        <div class="upload-records" aria-label="本次上传记录">
+          <div class="upload-records-title">本次上传记录</div>
+          <div v-if="session.uploadRecords.length === 0" class="upload-record-empty">
+            尚无上传记录
+          </div>
+          <div
+            v-for="record in session.uploadRecords"
+            v-else
+            :key="record.localId"
+            class="upload-record-row"
+          >
+            <div class="upload-record-main">
+              <span class="upload-record-name mono" :title="record.filename">{{ record.filename }}</span>
+              <el-tag size="small" :type="uploadStatusMeta[record.status].type">
+                {{ uploadStatusMeta[record.status].label }}
+              </el-tag>
+            </div>
+            <p v-if="record.errorMessage" class="upload-record-error" role="alert">
+              {{ record.errorMessage }}
+            </p>
+            <div v-if="record.status === 'parse_failed' || (record.status === 'parsed' && record.contractId !== session.contractId)" class="upload-record-actions">
+              <el-tooltip v-if="record.status === 'parse_failed'" content="使用已上传的合同重新解析" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="RefreshRight"
+                  :disabled="session.busy"
+                  :aria-label="`重新解析 ${record.filename}`"
+                  @click="retryUploadRecord(record)"
+                />
+              </el-tooltip>
+              <el-tooltip v-else content="切换当前审查合同" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="Switch"
+                  :disabled="session.busy"
+                  :aria-label="`切换到 ${record.filename}`"
+                  @click="selectUploadRecord(record)"
+                />
+              </el-tooltip>
+            </div>
+          </div>
         </div>
         <!-- 批量上传入口 -->
         <el-button class="batch-btn" size="small" :icon="'Files'" @click="batchOpen = true">
@@ -757,6 +826,57 @@ function closeBatch() {
 }
 .filename.pending {
   color: var(--muted);
+}
+.upload-records {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.upload-records-title {
+  margin-bottom: 8px;
+  color: var(--ivory-dim);
+  font-size: 12px;
+  font-weight: 600;
+}
+.upload-record-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+.upload-record-row {
+  position: relative;
+  min-width: 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.upload-record-row:first-of-type {
+  border-top: 0;
+}
+.upload-record-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+.upload-record-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ivory-dim);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-record-error {
+  margin: 6px 34px 0 0;
+  color: var(--seal);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.upload-record-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
 }
 .form-grid {
   display: grid;

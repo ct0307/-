@@ -27,7 +27,8 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.llm.base import LLMError
 from app.llm.factory import get_embedding_adapter
-from app.models.models import KnowledgeChunk
+from app.models.models import KnowledgeChunk, LegalArticle
+from app.services.rag.legal_sources import chinese_number_to_int, int_to_chinese_number
 
 log = get_logger("rag")
 
@@ -37,6 +38,11 @@ _RRF_K = 60
 _PER_ROUTE_N = 10
 # 向量候选最低余弦相似度。低于阈值的“最近邻”不构成可靠依据。
 _MIN_VECTOR_SIMILARITY = 0.35
+_CONTRACT_QUERY_TERMS = (
+    "合同", "违约", "债权", "债务", "担保", "保证", "抵押", "质押",
+    "价款", "租赁", "买卖", "承揽", "委托", "定金",
+)
+_CONTRACT_DOMAIN_SORT_BOOST = 0.002
 
 # 内置最小规则库（降级兜底）：知识库无数据时用关键词命中。
 # 每条 = {content: 依据内容, source: 来源, keywords: 命中关键词}
@@ -91,6 +97,10 @@ def retrieve(
             KnowledgeChunk.expiry_date, KnowledgeChunk.applicable_contract_types,
             KnowledgeChunk.applicable_dimensions, KnowledgeChunk.embedding_model,
             KnowledgeChunk.embedding_dimension, KnowledgeChunk.scope_mode,
+            KnowledgeChunk.legal_article_id, KnowledgeChunk.chunk_index,
+            KnowledgeChunk.chunk_count, LegalArticle.content,
+        ).outerjoin(
+            LegalArticle, KnowledgeChunk.legal_article_id == LegalArticle.id
         ).all()
     finally:
         db.close()
@@ -113,6 +123,23 @@ def retrieve(
     if not docs:
         log.info("rag.retrieve", mode="filtered_empty", matched=0)
         return []
+
+    article_number = parse_article_reference(query)
+    if article_number:
+        exact_docs = [
+            doc for doc in docs
+            if (_doc_value(doc, 5) or _extract_article_number(doc[1])) == article_number
+        ]
+        if not exact_docs:
+            return []
+        exact_docs.sort(key=lambda doc: (
+            _doc_value(doc, 14) is None,
+            _doc_value(doc, 15, 0) or 0,
+            doc[0],
+        ))
+        result = _result_from_doc(exact_docs[0], score=1.0, retrieval_mode="exact")
+        log.info("rag.retrieve", mode="exact", matched=1)
+        return [result]
 
     # —— BM25 路（全部切片参与）——
     bm25_rank = _bm25_search(query, docs)
@@ -137,23 +164,77 @@ def retrieve(
         log.info("rag.retrieve", mode="keyword", matched=len(results))
         return results
 
-    results = []
-    for doc_id, score in fused[:top_k]:
-        doc = id_to_doc[doc_id]
-        results.append({
-            "chunk_id": doc_id,
-            "content": doc[1],
-            "source": doc[2],
-            "score": round(score, 4),
-            "article_number": _doc_value(doc, 5) or _extract_article_number(doc[1]),
-            "version": _doc_value(doc, 6),
-            "retrieval_mode": "hybrid" if vec_ok else "bm25",
-            "reliable": _doc_value(doc, 13) in {"global", "scoped"},
-        })
-
     mode = "hybrid" if vec_ok else "bm25"
+    ranked_results = [
+        _result_from_doc(id_to_doc[doc_id], score=score, retrieval_mode=mode)
+        for doc_id, score in fused
+    ]
+    results = collapse_by_article(
+        apply_contract_domain_boost(ranked_results, query)
+    )[:top_k]
     log.info("rag.retrieve", mode=mode, matched=len(results))
     return results
+
+
+def _result_from_doc(doc: tuple, *, score: float, retrieval_mode: str) -> dict:
+    matched_content = doc[1]
+    return {
+        "chunk_id": doc[0],
+        "matched_content": matched_content,
+        "content": _doc_value(doc, 17) or matched_content,
+        "source": doc[2],
+        "score": round(score, 4),
+        "article_number": _doc_value(doc, 5) or _extract_article_number(matched_content),
+        "version": _doc_value(doc, 6),
+        "retrieval_mode": retrieval_mode,
+        "reliable": _doc_value(doc, 13) in {"global", "scoped"},
+        "legal_article_id": _doc_value(doc, 14),
+        "chunk_index": _doc_value(doc, 15),
+        "chunk_count": _doc_value(doc, 16),
+    }
+
+
+def collapse_by_article(results: list[dict]) -> list[dict]:
+    """同一父法条只保留排名最靠前的命中，旧知识记录互不合并。"""
+    seen_article_ids: set[int] = set()
+    collapsed: list[dict] = []
+    for result in results:
+        article_id = result.get("legal_article_id")
+        if article_id is not None:
+            if article_id in seen_article_ids:
+                continue
+            seen_article_ids.add(article_id)
+        collapsed.append(result)
+    return collapsed
+
+
+def apply_contract_domain_boost(results: list[dict], query: str) -> list[dict]:
+    """合同查询中小幅优先合同相关法域，不改变原始分数或过滤候选。"""
+    if not any(term in query for term in _CONTRACT_QUERY_TERMS):
+        return results
+
+    def is_contract_domain(result: dict) -> bool:
+        source = str(result.get("source") or "")
+        if "合同编通则" in source:
+            return True
+        article_number = str(result.get("article_number") or "")
+        match = _ARTICLE_REFERENCE_RE.search(article_number)
+        if not match:
+            return False
+        raw = match.group("number")
+        try:
+            number = int(raw) if raw.isdigit() else chinese_number_to_int(raw)
+        except ValueError:
+            return False
+        return 1 <= number <= 204 or 386 <= number <= 457 or 463 <= number <= 988
+
+    def boosted_score(result: dict) -> float:
+        score = float(result.get("score") or 0.0)
+        if is_contract_domain(result):
+            score += _CONTRACT_DOMAIN_SORT_BOOST
+        return score
+
+    return sorted(results, key=boosted_score, reverse=True)
 
 
 def _doc_value(doc: tuple, index: int, default=None):
@@ -281,7 +362,12 @@ def _parse_stored_vector(raw: str) -> np.ndarray | None:
     return _coerce_vector(value)
 
 
-def _validate_vectors(vectors: list[list[float]], expected_count: int) -> int:
+def _validate_vectors(
+    vectors: list[list[float]],
+    expected_count: int,
+    *,
+    expected_dimension: int | None = None,
+) -> int:
     """校验整批 embedding 数量、数值和维度，返回统一维度。"""
     if len(vectors) != expected_count:
         raise LLMError(
@@ -293,13 +379,41 @@ def _validate_vectors(vectors: list[list[float]], expected_count: int) -> int:
     dimensions = {vector.size for vector in parsed if vector is not None}
     if len(dimensions) != 1:
         raise LLMError("embedding 返回向量维度不一致")
-    return dimensions.pop()
+    dimension = dimensions.pop()
+    if expected_dimension is not None and dimension != expected_dimension:
+        raise LLMError(
+            f"embedding 返回维度与配置不一致：expected={expected_dimension}, actual={dimension}"
+        )
+    return dimension
 
 
 def _configured_embedding_model() -> str:
     if settings.EMBED_BACKEND.lower() == "local":
         return settings.LOCAL_EMBED_MODEL
     return settings.EMBED_MODEL
+
+
+def _configured_normalization() -> str:
+    return "l2" if settings.EMBED_BACKEND.lower() == "local" else "provider-default"
+
+
+def embedding_signature(
+    *,
+    backend: str,
+    model: str,
+    dimension: int,
+    normalization: str,
+    chunk_schema_version: str,
+) -> str:
+    payload = {
+        "backend": backend,
+        "model": model,
+        "dimension": dimension,
+        "normalization": normalization,
+        "chunk_schema_version": chunk_schema_version,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _bm25_search(query: str, docs: list[tuple]) -> dict[int, int]:
@@ -355,6 +469,39 @@ def _docs_fingerprint(docs: list[tuple]) -> str:
 _ARTICLE_NUMBER_RE = re.compile(
     r"第[一二三四五六七八九十百千零两\d]{1,7}条(?:之[一二三四五六七八九十\d]+)?"
 )
+_ARTICLE_NUMERAL_CHARS = "零〇一二两三四五六七八九十百千万"
+_ARTICLE_REFERENCE_RE = re.compile(
+    rf"(?<![\d{_ARTICLE_NUMERAL_CHARS}])(?:第)?"
+    rf"(?P<number>\d{{1,4}}|[{_ARTICLE_NUMERAL_CHARS}]{{1,7}})条"
+    rf"(?:之(?P<suffix>\d{{1,4}}|[{_ARTICLE_NUMERAL_CHARS}]{{1,7}}))?"
+    rf"(?![之\d{_ARTICLE_NUMERAL_CHARS}])"
+)
+
+
+def parse_article_reference(query: str) -> str | None:
+    """从查询中提取条号并统一为中文规范形式。"""
+    match = _ARTICLE_REFERENCE_RE.search(query or "")
+    if not match:
+        return None
+    raw_number = match.group("number")
+    try:
+        number = int(raw_number) if raw_number.isdigit() else chinese_number_to_int(raw_number)
+        raw_suffix = match.group("suffix")
+        suffix = (
+            int(raw_suffix) if raw_suffix and raw_suffix.isdigit()
+            else chinese_number_to_int(raw_suffix) if raw_suffix
+            else None
+        )
+    except ValueError:
+        return None
+    if not 1 <= number < 10000:
+        return None
+    normalized = f"第{int_to_chinese_number(number)}条"
+    if suffix is not None:
+        if not 1 <= suffix < 10000:
+            return None
+        normalized += f"之{int_to_chinese_number(suffix)}"
+    return normalized
 
 
 def _extract_article_number(content: str) -> str | None:
@@ -378,12 +525,16 @@ def _keyword_search(query: str, top_k: int) -> list[dict]:
             scored.append({
                 "chunk_id": None,
                 "content": rule["content"],
+                "matched_content": rule["content"],
                 "source": rule["source"],
                 "source_type": "fallback_rule",
                 "article_number": None,
                 "score": hits,
                 "retrieval_mode": "fallback",
                 "reliable": False,
+                "legal_article_id": None,
+                "chunk_index": None,
+                "chunk_count": None,
             })
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:top_k]
@@ -411,23 +562,70 @@ def index_documents(chunks: list[dict], db: Session | None = None) -> int:
             db.close()
 
 
-def prepare_documents(chunks: list[dict]) -> list[KnowledgeChunk]:
+def prepare_documents(
+    chunks: list[dict],
+    *,
+    embedding_cache: dict[tuple[str, str], list[float]] | None = None,
+) -> list[KnowledgeChunk]:
     """在数据库事务外生成并校验全部向量，返回尚未持久化的 ORM 行。"""
     if not chunks:
         return []
     chunks = [_normalize_chunk_scope(chunk) for chunk in chunks]
-    adapter = get_embedding_adapter()
-    vectors = adapter.embed([chunk["content"] for chunk in chunks])
-    dimension = _validate_vectors(vectors, len(chunks))
+    embedding_cache = embedding_cache or {}
     embedding_model = _configured_embedding_model()
+    embedding_inputs = [chunk.get("retrieval_text") or chunk["content"] for chunk in chunks]
+    content_hashes = [
+        hashlib.sha256(text.encode("utf-8")).hexdigest() for text in embedding_inputs
+    ]
+    signatures: list[str | None] = []
+    vectors: list[list[float] | None] = [None] * len(chunks)
+    missing_indexes: list[int] = []
+
+    for index, (chunk, content_hash) in enumerate(zip(chunks, content_hashes)):
+        schema_version = chunk.get("chunk_schema_version")
+        signature = None
+        if schema_version:
+            signature = embedding_signature(
+                backend=settings.EMBED_BACKEND.lower(),
+                model=embedding_model,
+                dimension=settings.EMBED_DIM,
+                normalization=_configured_normalization(),
+                chunk_schema_version=schema_version,
+            )
+            cached = embedding_cache.get((content_hash, signature))
+            parsed = _coerce_vector(cached) if cached is not None else None
+            if parsed is not None and parsed.size == settings.EMBED_DIM:
+                vectors[index] = cached
+        signatures.append(signature)
+        if vectors[index] is None:
+            missing_indexes.append(index)
+
+    if missing_indexes:
+        adapter = get_embedding_adapter()
+        generated = adapter.embed([embedding_inputs[index] for index in missing_indexes])
+        _validate_vectors(generated, len(missing_indexes))
+        for index, vector in zip(missing_indexes, generated):
+            if signatures[index] and len(vector) != settings.EMBED_DIM:
+                raise LLMError(
+                    "embedding 返回维度与配置不一致："
+                    f"expected={settings.EMBED_DIM}, actual={len(vector)}"
+                )
+            vectors[index] = vector
+
+    complete_vectors = [vector for vector in vectors if vector is not None]
+    dimension = _validate_vectors(complete_vectors, len(chunks))
     return [
         _knowledge_row(
             chunk,
             embedding=json.dumps(vector),
             embedding_model=embedding_model,
             embedding_dimension=dimension,
+            embedding_signature_value=signature,
+            content_hash_value=content_hash,
         )
-        for chunk, vector in zip(chunks, vectors)
+        for chunk, vector, signature, content_hash in zip(
+            chunks, complete_vectors, signatures, content_hashes
+        )
     ]
 
 
@@ -493,6 +691,8 @@ def _knowledge_row(
     embedding: str,
     embedding_model: str | None,
     embedding_dimension: int | None,
+    embedding_signature_value: str | None = None,
+    content_hash_value: str | None = None,
 ) -> KnowledgeChunk:
     return KnowledgeChunk(
         category=chunk.get("category", "rule"),
@@ -512,5 +712,13 @@ def _knowledge_row(
         scope_mode=chunk.get("scope_mode", "unclassified"),
         embedding_model=embedding_model,
         embedding_dimension=embedding_dimension,
-        content_hash=hashlib.sha256(chunk["content"].encode("utf-8")).hexdigest(),
+        content_hash=content_hash_value or hashlib.sha256(
+            (chunk.get("retrieval_text") or chunk["content"]).encode("utf-8")
+        ).hexdigest(),
+        legal_article_id=chunk.get("legal_article_id"),
+        chunk_index=chunk.get("chunk_index"),
+        chunk_count=chunk.get("chunk_count"),
+        chunk_schema_version=chunk.get("chunk_schema_version"),
+        retrieval_text=chunk.get("retrieval_text"),
+        embedding_signature=embedding_signature_value,
     )

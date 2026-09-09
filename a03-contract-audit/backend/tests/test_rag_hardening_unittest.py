@@ -20,6 +20,7 @@ from app.api.v1.endpoints.knowledge import _MAX_CHUNK_CHARS, _smart_split
 from app.db import init_db
 from app.llm.base import LLMError
 from app.llm.adapters.local_embedding import LocalEmbeddingAdapter
+from app.models import models as app_models
 from app.models.models import KnowledgeChunk
 from app.schemas.contract import KnowledgeImport
 from app.services.rag import retriever
@@ -79,6 +80,23 @@ class RagHardeningTests(unittest.TestCase):
 
         self.assertIn("scope_mode", columns)
         self.assertIn("unclassified", columns["scope_mode"])
+
+    def test_legal_source_models_and_dev_columns_are_declared(self):
+        self.assertTrue(hasattr(app_models, "LegalSource"))
+        self.assertTrue(hasattr(app_models, "LegalArticle"))
+        columns = dict(init_db._DEV_COLUMNS["knowledge_chunks"])
+        self.assertEqual(
+            {
+                "legal_article_id",
+                "chunk_index",
+                "chunk_count",
+                "chunk_schema_version",
+                "retrieval_text",
+                "embedding_signature",
+            }
+            - columns.keys(),
+            set(),
+        )
 
     def test_vector_search_rejects_below_similarity_threshold(self):
         docs = [(

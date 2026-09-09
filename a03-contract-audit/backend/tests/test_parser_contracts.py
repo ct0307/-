@@ -19,6 +19,256 @@ class _EmptyPdf:
     pages = [_EmptyPage()]
 
 
+class _TextPage:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def extract_text(self) -> str:
+        return self.text
+
+
+def _pdf_with_pages(*texts: str):
+    return nullcontext(type("Pdf", (), {"pages": [_TextPage(text) for text in texts]})())
+
+
+def _pymupdf_candidate(*texts: str):
+    return extractor._PDFTextCandidate("\n".join(texts).strip(), texts)
+
+
+def test_compatibility_radical_detection_uses_count_and_ratio_thresholds():
+    assert extractor._compatibility_radical_count("合同⾃⼰⼈") == 3
+    assert extractor._has_suspicious_radicals("合同正文⾃⼰⼈") is True
+    assert extractor._has_suspicious_radicals("正常合同中的单个字符" * 20 + "⾃") is False
+    assert extractor._has_suspicious_radicals("甲⾃") is True
+    assert extractor._compatibility_radical_count("甲方⿰乙方") == 0
+
+
+def test_prefer_pymupdf_text_requires_a_clean_complete_quality_improvement():
+    primary = "甲方⾃⼰⼈签订合同" * 10
+    clean = "甲方自己人签订合同" * 10
+
+    assert extractor._prefer_pymupdf_text(primary, clean) is True
+    assert extractor._prefer_pymupdf_text(primary, "正常中文") is False
+    assert extractor._prefer_pymupdf_text(primary, "甲方⾃⼰签订合同" * 10) is False
+    assert extractor._prefer_pymupdf_text(primary, "plain contract text" * 10) is False
+
+
+def test_normalize_compatibility_radicals_only_normalizes_target_range():
+    assert extractor._normalize_compatibility_radicals("合同⾃⼰⼈⿰") == "合同自己人⿰"
+
+
+def test_pdf_prefers_clean_pymupdf_candidate_for_compatibility_radicals(monkeypatch):
+    primary = "甲方⾃⼰⼈签订合同" * 10
+    alternate = "甲方自己人签订合同" * 10
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(primary))
+    monkeypatch.setattr(
+        extractor,
+        "_extract_pdf_pymupdf_candidate",
+        lambda _data, expected_pages=None: _pymupdf_candidate(alternate),
+    )
+
+    result = extractor._extract_pdf_result(b"pdf")
+
+    assert result.text == alternate
+    assert "⾃" not in result.text
+
+
+@pytest.mark.parametrize(
+    "alternate",
+    [
+        "正常中文",
+        "甲方⾃⼰签订合同" * 10,
+    ],
+)
+def test_pdf_keeps_primary_and_normalizes_radicals_for_low_quality_candidate(
+    monkeypatch,
+    alternate,
+):
+    primary = "甲方⾃⼰⼈签订合同" * 10
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(primary))
+    monkeypatch.setattr(
+        extractor,
+        "_extract_pdf_pymupdf_candidate",
+        lambda _data, expected_pages=None: _pymupdf_candidate(alternate),
+    )
+
+    result = extractor._extract_pdf_result(b"pdf")
+
+    assert result.text == "甲方自己人签订合同" * 10
+
+
+def test_pdf_does_not_bypass_quality_gate_after_radical_normalization(monkeypatch):
+    primary = "contract text " * 100 + "⾃⼰⼈"
+    calls = 0
+
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(primary))
+
+    def short_candidate(_data, expected_pages=None):
+        nonlocal calls
+        calls += 1
+        return "正常中文"
+
+    monkeypatch.setattr(
+        extractor,
+        "_extract_pdf_pymupdf_candidate",
+        lambda data, expected_pages=None: _pymupdf_candidate(
+            short_candidate(data, expected_pages)
+        ),
+    )
+
+    result = extractor._extract_pdf_result(b"pdf")
+
+    assert result.text == "contract text " * 100 + "自己人"
+    assert calls == 1
+
+
+def test_pdf_with_radicals_and_empty_page_still_uses_ocr(monkeypatch):
+    primary = "第一页⾃⼰⼈合同" * 10
+    alternate = "第一页自己人合同" * 10 + "第二页正常文字"
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(primary, ""))
+    monkeypatch.setattr(
+        extractor,
+        "_extract_pdf_pymupdf_candidate",
+        lambda _data, expected_pages=None: _pymupdf_candidate(alternate, ""),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "ocr_pdf_bytes",
+        lambda *_args, **_kwargs: OCRResult(
+            text="第二页扫描文字",
+            page_count=1,
+            mean_confidence=0.93,
+            page_texts=("第二页扫描文字",),
+        ),
+    )
+
+    result = extractor._extract_pdf_result(b"pdf")
+
+    assert result.source == "mixed"
+    assert "第一页自己人合同" in result.text
+    assert "第二页扫描文字" in result.text
+
+
+def test_pdf_rejects_candidate_when_corresponding_nonempty_page_is_empty(monkeypatch):
+    primary_pages = ("第一页⾃⼰⼈合同" * 20, "第二页合同正文")
+    alternate_first_page = "第一页自己人合同" * 20
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(*primary_pages))
+    monkeypatch.setattr(
+        extractor,
+        "_extract_pdf_pymupdf_candidate",
+        lambda _data, expected_pages=None: _pymupdf_candidate(alternate_first_page, ""),
+    )
+
+    result = extractor._extract_pdf_result(b"pdf")
+
+    assert "第一页自己人合同" in result.text
+    assert "第二页合同正文" in result.text
+
+
+def test_pdf_rejects_candidate_when_one_page_is_below_length_threshold(monkeypatch):
+    primary_pages = ("第一页⾃⼰⼈合同" * 100, "第二页合同正文" * 10)
+    alternate_pages = ("第一页自己人合同" * 100, "字")
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(*primary_pages))
+    monkeypatch.setattr(
+        extractor,
+        "_extract_pdf_pymupdf_candidate",
+        lambda _data, expected_pages=None: _pymupdf_candidate(*alternate_pages),
+    )
+
+    result = extractor._extract_pdf_result(b"pdf")
+
+    assert "第一页自己人合同" in result.text
+    assert "第二页合同正文" * 10 in result.text
+
+
+def test_pdf_does_not_try_fallback_for_one_compatibility_radical(monkeypatch):
+    primary = "这是完整合同正文" * 30 + "⾃"
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(primary))
+    monkeypatch.setattr(
+        extractor,
+        "_extract_pdf_pymupdf_candidate",
+        lambda *_args, **_kwargs: pytest.fail("单个兼容部首不应触发 PyMuPDF 回退"),
+    )
+
+    result = extractor._extract_pdf_result(b"pdf")
+
+    assert result.text == primary
+
+
+def test_pdf_rejects_pymupdf_candidate_with_incomplete_page_count(monkeypatch):
+    primary_pages = ("第一页⾃⼰⼈合同" * 10, "第二页合同正文" * 10)
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(*primary_pages))
+
+    def incomplete_candidate(_data, expected_pages=None):
+        assert expected_pages == 2
+        return ""
+
+    monkeypatch.setattr(
+        extractor,
+        "_extract_pdf_pymupdf_candidate",
+        lambda data, expected_pages=None: _pymupdf_candidate(
+            incomplete_candidate(data, expected_pages)
+        ),
+    )
+
+    result = extractor._extract_pdf_result(b"pdf")
+
+    assert "第一页自己人合同" in result.text
+    assert "第二页合同正文" in result.text
+
+
+def test_pymupdf_candidate_closes_document_when_page_extraction_fails(monkeypatch):
+    import fitz
+
+    class BrokenPage:
+        def get_text(self, _mode):
+            raise RuntimeError("extract failed")
+
+    class FakeDocument:
+        closed = False
+
+        def __iter__(self):
+            return iter((BrokenPage(),))
+
+        def __len__(self):
+            return 1
+
+        def close(self):
+            self.closed = True
+
+    document = FakeDocument()
+    monkeypatch.setattr(fitz, "open", lambda **_kwargs: document)
+
+    result = extractor._extract_pdf_pymupdf_candidate(b"pdf", expected_pages=1)
+
+    assert result.text == ""
+    assert document.closed is True
+
+
+def test_elements_log_contains_keys_not_contract_values(monkeypatch):
+    captured: dict = {}
+    sensitive_value = "敏感公司"
+    monkeypatch.setattr(
+        extractor.log,
+        "info",
+        lambda event, **kwargs: captured.update(event=event, **kwargs),
+    )
+
+    extractor.extract_elements(f"甲方：{sensitive_value}\n合同正文")
+
+    assert captured["event"] == "parser.elements"
+    assert sensitive_value not in repr(captured)
+    assert "extracted" not in captured
+    assert set(captured) == {
+        "event",
+        "fields",
+        "field_count",
+        "text_length",
+        "has_breach_clause",
+        "has_dispute_clause",
+    }
+
+
 def test_text_pdf_returns_native_parse_result(monkeypatch):
     class TextPage:
         def extract_text(self) -> str:

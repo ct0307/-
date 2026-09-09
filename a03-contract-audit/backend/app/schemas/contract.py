@@ -74,6 +74,15 @@ class ParseResponse(BaseModel):
     review_reason: str | None = None
 
 
+class ParseErrorDetail(BaseModel):
+    code: str
+    detail: str
+
+
+class ParseErrorResponse(BaseModel):
+    detail: ParseErrorDetail
+
+
 class ContractOut(BaseModel):
     id: int
     filename: str

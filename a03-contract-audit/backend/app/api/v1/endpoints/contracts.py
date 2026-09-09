@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.db.session import get_db
 from app.models.models import Contract, Risk, User
 from app.schemas.contract import (
@@ -17,6 +18,7 @@ from app.schemas.contract import (
     ContractOut,
     CrossCheckOut,
     HistoryRow,
+    ParseErrorResponse,
     ParseResponse,
     RiskOut,
 )
@@ -28,14 +30,64 @@ from app.services.parser.extractor import (
     extract_elements,
     extract_elements_with_llm,
 )
+from app.services.parser.ocr import OCRError, OCRUnavailable
 
 router = APIRouter()
+log = get_logger("contracts")
 
 _ALLOWED_EXT = {".pdf", ".docx", ".txt"}
 
 # 风险等级聚合：取最高等级
 _LEVEL_RANK = {"high": 2, "medium": 1, "low": 0}
 _LEVEL_ZH = {2: "高风险", 1: "中风险", 0: "低风险"}
+
+_PARSE_ERROR_DETAILS = {
+    "PDF_TEXT_ENCODING_ERROR": (
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        "PDF 文本编码异常，请重新导出 PDF 后重试",
+    ),
+    "PDF_TEXT_EMPTY": (
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        "未能从文件中提取有效文本，请上传含文本层的文件",
+    ),
+    "OCR_UNAVAILABLE": (
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "OCR 服务暂不可用，请稍后重试或上传含文本层的文件",
+    ),
+    "OCR_PROCESSING_ERROR": (
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        "OCR 未能识别文件内容，请检查文件清晰度后重试",
+    ),
+    "PARSE_INTERNAL_ERROR": (
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
+        "合同解析失败，请稍后重试",
+    ),
+}
+
+
+def _parse_error_code(exc: Exception) -> str:
+    if isinstance(exc, UnicodeError):
+        return "PDF_TEXT_ENCODING_ERROR"
+    if isinstance(exc, OCRUnavailable):
+        return "OCR_UNAVAILABLE"
+    if isinstance(exc, OCRError):
+        return "OCR_PROCESSING_ERROR"
+    return "PARSE_INTERNAL_ERROR"
+
+
+def _raise_parse_error(contract_id: int, exc: Exception, *, code: str | None = None) -> None:
+    error_code = code or _parse_error_code(exc)
+    status_code, detail = _PARSE_ERROR_DETAILS[error_code]
+    log.error(
+        "contract.parse_failed",
+        contract_id=contract_id,
+        code=error_code,
+        exception_type=type(exc).__name__,
+    )
+    raise HTTPException(
+        status_code=status_code,
+        detail={"code": error_code, "detail": detail},
+    ) from exc
 
 
 def _dept_accessible(contract, user) -> bool:
@@ -224,23 +276,41 @@ def upload_contract(
     return contract
 
 
-@router.post("/{contract_id}/parse", response_model=ParseResponse)
+@router.post(
+    "/{contract_id}/parse",
+    response_model=ParseResponse,
+    responses={
+        422: {"model": ParseErrorResponse},
+        503: {"model": ParseErrorResponse},
+        500: {"model": ParseErrorResponse},
+    },
+)
 def parse_contract(
     contract_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> ParseResponse:
     contract = _get_contract(db, contract_id, user)
-    parsed = extract_document(contract.storage_path)
-    apply_parse_quality(contract, parsed)
-    # 精解析：正则 + LLM 语义抽取六要素（供报表/Excel 展示），LLM 失败自动降级正则
-    elements = extract_elements_with_llm(parsed.text)
-    contract.status = "parsed"
-    contract.elements_json = json.dumps(
-        {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
-        ensure_ascii=False,
-    )
-    db.commit()
+    try:
+        parsed = extract_document(contract.storage_path)
+        if not parsed.text.strip():
+            empty_error = ValueError("empty document text")
+            db.rollback()
+            _raise_parse_error(contract_id, empty_error, code="PDF_TEXT_EMPTY")
+        apply_parse_quality(contract, parsed)
+        # 精解析：正则 + LLM 语义抽取六要素（供报表/Excel 展示），LLM 失败自动降级正则
+        elements = extract_elements_with_llm(parsed.text)
+        contract.status = "parsed"
+        contract.elements_json = json.dumps(
+            {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
+            ensure_ascii=False,
+        )
+        db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        _raise_parse_error(contract_id, exc)
     audit_log.record(db, user_id=user.id, action="parse", target=f"contract:{contract_id}")
     return ParseResponse(
         contract_id=contract_id,

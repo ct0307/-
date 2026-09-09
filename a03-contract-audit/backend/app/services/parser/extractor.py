@@ -10,6 +10,7 @@
 """
 import io
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
@@ -27,6 +28,12 @@ class DocumentParseResult:
     ocr_confidence: float | None = None
     requires_review: bool = False
     review_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class _PDFTextCandidate:
+    text: str
+    page_texts: tuple[str, ...]
 
 
 def _read_decrypted(file_path: str) -> bytes:
@@ -63,6 +70,75 @@ def _is_garbled(text: str) -> bool:
     return cjk / len(text) < 0.10
 
 
+def _compatibility_radical_count(text: str) -> int:
+    """统计 CJK 部首与康熙部首，不包含表意文字描述符。"""
+    return sum(1 for char in text if "\u2e80" <= char <= "\u2fdf")
+
+
+def _non_whitespace_length(text: str) -> int:
+    return sum(1 for char in text if not char.isspace())
+
+
+def _has_suspicious_radicals(text: str) -> bool:
+    """仅在兼容部首数量或占比达到阈值时触发候选回退。"""
+    count = _compatibility_radical_count(text)
+    non_whitespace = _non_whitespace_length(text)
+    return count >= 3 or bool(non_whitespace and count / non_whitespace >= 0.01)
+
+
+def _readable_cjk_ratio(text: str) -> float:
+    non_whitespace = _non_whitespace_length(text)
+    if not non_whitespace:
+        return 0.0
+    cjk_count = sum(
+        1
+        for char in text
+        if "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+    )
+    return cjk_count / non_whitespace
+
+
+def _prefer_pymupdf_text(primary: str, alternate: str) -> bool:
+    """判断 PyMuPDF 候选是否在不丢失内容的前提下改善文本质量。"""
+    primary_length = _non_whitespace_length(primary)
+    alternate_length = _non_whitespace_length(alternate)
+    if (
+        not alternate_length
+        or alternate_length < primary_length * 0.70
+        or _has_suspicious_radicals(alternate)
+    ):
+        return False
+    return (
+        _compatibility_radical_count(alternate) < _compatibility_radical_count(primary)
+        and _readable_cjk_ratio(alternate) >= _readable_cjk_ratio(primary)
+    )
+
+
+def _normalize_compatibility_radicals(text: str) -> str:
+    """仅规范化异常兼容部首，保留其他字符和版面标记。"""
+    return "".join(
+        unicodedata.normalize("NFKC", char)
+        if "\u2e80" <= char <= "\u2fdf"
+        else char
+        for char in text
+    )
+
+
+def _candidate_preserves_nonempty_pages(
+    primary_pages: list[str],
+    alternate: _PDFTextCandidate,
+) -> bool:
+    if len(alternate.page_texts) != len(primary_pages):
+        return False
+    return all(
+        not primary.strip()
+        or _non_whitespace_length(candidate) >= _non_whitespace_length(primary) * 0.70
+        for primary, candidate in zip(primary_pages, alternate.page_texts)
+    )
+
+
 def _extract_pdf_result(data: bytes) -> DocumentParseResult:
     """PDF 文本提取：pdfplumber 优先，乱码时降级到 PyMuPDF。"""
     import pdfplumber
@@ -76,16 +152,32 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
     except Exception as e:
         log.warning("parser.pdfplumber_error", error=str(e))
     text = "\n".join(parts).strip()
+    empty_pages = tuple(index for index, part in enumerate(parts) if not part.strip())
+    radical_path_handled = False
+
+    # pdfplumber 可能把中文映射为 CJK/Kangxi 部首。此时仅在 PyMuPDF
+    # 给出完整且质量更高的候选时替换，否则保留原文并局部规范化。
+    if text and _has_suspicious_radicals(text):
+        radical_path_handled = True
+        if not empty_pages:
+            expected_pages = len(parts) or None
+            alternate = _extract_pdf_pymupdf_candidate(data, expected_pages=expected_pages)
+            if (
+                _candidate_preserves_nonempty_pages(parts, alternate)
+                and _prefer_pymupdf_text(text, alternate.text)
+            ):
+                return DocumentParseResult(alternate.text, "native")
+        parts = [_normalize_compatibility_radicals(part) for part in parts]
+        text = "\n".join(parts).strip()
 
     # 第二步：乱码检测 → PyMuPDF 降级
-    if _is_garbled(text):
+    if _is_garbled(text) and not radical_path_handled:
         log.info("parser.pdf_garbled", hint="检测到字体编码异常，切换 PyMuPDF 重新提取")
         text = _extract_pdf_pymupdf(data)
         if text and not _is_garbled(text):
             return DocumentParseResult(text, "native")
         parts = []
 
-    empty_pages = tuple(index for index, part in enumerate(parts) if not part.strip())
     if text and not empty_pages:
         return DocumentParseResult(text, "native")
 
@@ -147,23 +239,43 @@ def _extract_pdf_bytes(data: bytes) -> str:
     return _extract_pdf_result(data).text
 
 
-def _extract_pdf_pymupdf(data: bytes) -> str:
-    """使用 PyMuPDF(fitz) 提取文本，对自定义字体无 ToUnicode 映射的 PDF 兜底更好。"""
+def _extract_pdf_pymupdf_candidate(
+    data: bytes,
+    expected_pages: int | None = None,
+) -> _PDFTextCandidate:
+    """提取 PyMuPDF 文本，并保留页级结果供完整性校验。"""
+    doc = None
     try:
         import fitz  # pymupdf
 
         doc = fitz.open(stream=data, filetype="pdf")
+        if expected_pages is not None and len(doc) != expected_pages:
+            log.warning(
+                "parser.pymupdf_page_count_mismatch",
+                expected_pages=expected_pages,
+            )
+            return _PDFTextCandidate("", ())
         parts: list[str] = []
         for page in doc:
             parts.append(page.get_text("text") or "")
-        doc.close()
         text = "\n".join(parts).strip()
         if text:
             log.info("parser.pymupdf_ok", chars=len(text))
-        return text
+        return _PDFTextCandidate(text, tuple(parts))
     except Exception as e:
         log.warning("parser.pymupdf_error", error=str(e))
-        return ""
+        return _PDFTextCandidate("", ())
+    finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                log.warning("parser.pymupdf_close_error")
+
+
+def _extract_pdf_pymupdf(data: bytes, expected_pages: int | None = None) -> str:
+    """兼容旧调用方，仅返回 PyMuPDF 提取的整体文本。"""
+    return _extract_pdf_pymupdf_candidate(data, expected_pages=expected_pages).text
 
 
 def _extract_docx_bytes(data: bytes) -> str:
@@ -221,7 +333,15 @@ def extract_elements(text: str) -> dict:
     elements["text_length"] = len(text)  # type: ignore[assignment]
     elements["has_breach_clause"] = bool(re.search(r"违约(?:责任|金|条款)", text))  # type: ignore[assignment]
     elements["has_dispute_clause"] = bool(re.search(r"争议(?:解决|处理)|仲裁|诉讼", text))  # type: ignore[assignment]
-    log.info("parser.elements", extracted={k: v for k, v in elements.items() if v})
+    fields = [field for field in _ELEMENT_PATTERNS if elements[field] is not None]
+    log.info(
+        "parser.elements",
+        fields=fields,
+        field_count=len(fields),
+        text_length=len(text),
+        has_breach_clause=elements["has_breach_clause"],
+        has_dispute_clause=elements["has_dispute_clause"],
+    )
     return elements
 
 

@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import re
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import func
@@ -20,6 +21,13 @@ from app.services.rag.retriever import (
     normalize_scope_metadata,
     prepare_documents,
 )
+from app.services.rag.legal_sources import split_structured_text
+from app.services.rag.legal_import import (
+    LegalImportError,
+    apply_legal_import,
+    preview_legal_import,
+)
+from app.services.rag.legal_sources import LegalSourceError
 
 router = APIRouter()
 
@@ -250,7 +258,7 @@ def _smart_split(text: str) -> SplitResult:
             if len(art) <= _MAX_CHUNK_CHARS:
                 final.append(art)
             else:
-                final.extend(_split_paragraph(art))
+                final.extend(split_structured_text(art, _MAX_CHUNK_CHARS))
         final, ph = _filter(final)
         return SplitResult(final, "article", len(articles), 0, ph)
 
@@ -272,6 +280,11 @@ def _smart_split(text: str) -> SplitResult:
     return SplitResult(chunks, "paragraph", 0, len(chunks), ph)
 
 
+async def _read_file_payload(file: UploadFile) -> tuple[bytes, str]:
+    raw = await file.read()
+    return raw, _extract_file_bytes(file.filename or "", raw)
+
+
 async def _extract_file_text(file: UploadFile) -> str:
     """从上传文件提取纯文本。支持 txt / docx / pdf。
 
@@ -279,13 +292,18 @@ async def _extract_file_text(file: UploadFile) -> str:
     pdf ：pdfplumber 文字提取；扫描件（extract_text 返回空）抛 400 明确提示。
     txt ：utf-8 / gbk / utf-8-sig 三编码兜底。
     """
-    raw = await file.read()
+    _, text = await _read_file_payload(file)
+    return text
+
+
+def _extract_file_bytes(filename: str, raw: bytes) -> str:
+    """解析已读取的上传字节，供通用导入和权威预检复用。"""
     if len(raw) > settings.MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             f"文件超过 {settings.MAX_UPLOAD_MB}MB 上限",
         )
-    fname = (file.filename or "").lower()
+    fname = filename.lower()
 
     if fname.endswith(".txt"):
         for enc in ("utf-8", "gbk", "utf-8-sig"):
@@ -576,6 +594,64 @@ async def import_knowledge_file(
         "article_count": split.article_count,
         "overlap_warning": overlap_warning,
     }
+
+
+@router.post("/legal-import/preview")
+async def preview_legal_source(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("admin")),
+) -> dict:
+    raw, text_content = await _read_file_payload(file)
+    try:
+        preview = preview_legal_import(
+            db,
+            filename=file.filename or "未命名文件",
+            raw_content=raw,
+            extracted_text=text_content,
+            user_id=user.id,
+        )
+    except LegalSourceError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return asdict(preview)
+
+
+@router.post("/legal-import/apply")
+async def apply_legal_source(
+    file: UploadFile = File(...),
+    token: str = Form(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("admin")),
+) -> dict:
+    raw, text_content = await _read_file_payload(file)
+    try:
+        result = apply_legal_import(
+            db,
+            filename=file.filename or "未命名文件",
+            raw_content=raw,
+            extracted_text=text_content,
+            token=token,
+            user_id=user.id,
+        )
+    except LegalImportError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except LegalSourceError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    except LLMError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+    audit_log.record(
+        db,
+        user_id=user.id,
+        action="import_authoritative_legal_source",
+        target=result.source_id,
+        detail=(
+            f"sha256={hashlib.sha256(raw).hexdigest()} "
+            f"articles={result.article_count} chunks={result.chunk_count} "
+            f"embedding_signature={result.embedding_signature}"
+        ),
+    )
+    return asdict(result)
 
 
 def _check_article_overlap(chunks: list[str], category: str, source: str, db: Session) -> str | None:

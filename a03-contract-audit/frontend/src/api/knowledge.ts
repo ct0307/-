@@ -69,6 +69,35 @@ export interface ImportFileResult {
   overlap_warning: string | null  // 同分类已有大量其他来源时的预警
 }
 
+export interface LegalImportPreview {
+  candidate: boolean
+  allowed: boolean
+  source_id: string | null
+  title: string | null
+  file_sha256: string
+  hash_matches: boolean
+  article_count: number
+  chunk_count: number
+  replace_article_count: number
+  replace_chunk_count: number
+  errors: string[]
+  token: string | null
+}
+
+export interface LegalImportResult {
+  source_id: string
+  article_count: number
+  chunk_count: number
+  reused_embeddings: number
+  rebuilt_embeddings: number
+  embedding_model: string
+  embedding_dimension: number
+  embedding_signature: string
+  first_article_ok: boolean
+  article_585_ok: boolean
+  last_article_ok: boolean
+}
+
 /** 单条知识库详情，返回完整 content（不截断）。 */
 export interface KnowledgeDetail {
   id: number
@@ -98,4 +127,20 @@ export async function importKnowledgeFile(
   form.append('overwrite', String(overwrite))
   // 知识库文件可能含大量条文，embedding 耗时长，单独设 180s 超时
   return client.post('/knowledge/import-file', form, { timeout: 180_000 })
+}
+
+export async function previewLegalImport(file: File): Promise<LegalImportPreview> {
+  const form = new FormData()
+  form.append('file', file)
+  return client.post('/knowledge/legal-import/preview', form)
+}
+
+export async function applyLegalImport(
+  file: File,
+  token: string,
+): Promise<LegalImportResult> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('token', token)
+  return client.post('/knowledge/legal-import/apply', form, { timeout: 600_000 })
 }
