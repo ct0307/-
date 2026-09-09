@@ -16,6 +16,7 @@ AI 输出定位为合同审查辅助意见，不构成自动法律裁决，也�
 | `research/scoring-matrix.md` | 将 A 类赛题四项评分映射到章节、图表和可验证证据 |
 | `content/` | 保存 17 个一级章节的 Markdown 源稿 |
 | `content-redesign/` | 保存 7 个一级章节的参赛重构版 Markdown 源稿 |
+| `content-professional/` | 保存 8 个一级章节和附录的专业重制版 Markdown 源稿 |
 | `assets/diagrams/` | 保存统一样式的业务、技术、数据与实施图表 |
 | `assets/screenshots/` | 保存经裁切和脱敏的“界面设计示意” |
 | `scripts/` | 保存图表生成、DOCX 构建、字段刷新与自动验证脚本 |
@@ -48,9 +49,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs/contract-solution/scrip
 
 ```powershell
 npm --prefix docs/contract-solution run build:docx:redesign
+npm --prefix docs/contract-solution run build:docx:professional
 ```
 
 重构版输出为项目根目录的 `契鉴_项目详细方案_重构版.docx`，不会覆盖原稿。也可以直接调用构建脚本，并用 `--output` 指定相对本目录的输出路径。
+
+专业重制版输出到 `outputs/professional-redesign/契鉴_项目详细方案_专业重制版.docx`。该版本采用八章工程结构，不记录实时测试结果或竞赛化表述。
 
 ## 验证流程
 
@@ -58,6 +62,7 @@ npm --prefix docs/contract-solution run build:docx:redesign
 npm --prefix docs/contract-solution run validate:screenshots
 python docs/contract-solution/scripts/validate_document.py docs/contract-solution/契鉴_项目详细方案.docx docs/contract-solution/契鉴_项目详细方案.pdf
 python docs/contract-solution/scripts/validate_document.py --profile redesign 契鉴_项目详细方案_重构版.docx outputs/materials-redesign/契鉴_项目详细方案_重构版.pdf
+python docs/contract-solution/scripts/validate_document.py --profile professional outputs/professional-redesign/契鉴_项目详细方案_专业重制版.docx
 ```
 
 验收门槛为：17 个一级章节、正文 2.5 万至 3.5 万中文字符、40 至 50 页、20 至 30 张有效图片、10 至 15 张表；禁用进度表述、空标题、缺图、断链和无来源关键结论均为 0。
