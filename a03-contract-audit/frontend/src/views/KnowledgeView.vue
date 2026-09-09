@@ -9,8 +9,11 @@ import {
   getKnowledgeDetail,
   importKnowledge,
   importKnowledgeFile,
+  previewLegalImport,
+  applyLegalImport,
   deleteKnowledge,
 } from '@/api/knowledge'
+import type { LegalImportPreview, LegalImportResult } from '@/api/knowledge'
 import type { KnowledgeCard, KnowledgeCat } from '@/mock/knowledge'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -169,6 +172,19 @@ async function submitAdd() {
 const batchOpen = ref(false)
 const batchImporting = ref(false)
 const overwriteMode = ref(false)   // true = 先删同名旧切片再入库
+type ImportState = 'idle' | 'previewing' | 'generic-ready' | 'legal-ready' | 'applying' | 'success' | 'error'
+const importState = ref<ImportState>('idle')
+const legalFile = ref<File | null>(null)
+const legalPreview = ref<LegalImportPreview | null>(null)
+const legalResult = ref<LegalImportResult | null>(null)
+const legalError = ref('')
+const importBusy = computed(() => batchImporting.value || ['previewing', 'applying'].includes(importState.value))
+const isLegalFlow = computed(() => legalPreview.value?.candidate === true)
+const legalAcceptancePassed = computed(() => Boolean(
+  legalResult.value?.first_article_ok
+  && legalResult.value?.article_585_ok
+  && legalResult.value?.last_article_ok,
+))
 
 // 英文分类 key → 中文标签（用于展示识别结果）
 const catLabelMap: Record<string, KnowledgeCat> = {
@@ -193,18 +209,24 @@ const fileItems = ref<FileItem[]>([])
 const totalImported = computed(() => fileItems.value.reduce((s, f) => s + f.chunks, 0))
 const doneCount = computed(() => fileItems.value.filter((f) => f.status === 'done').length)
 
-function onBatchFileChange(file: { raw: File }) {
-  addFileToQueue(file.raw)
+async function onBatchFileChange(file: { raw: File }) {
+  await addFileToQueue(file.raw)
 }
 
 function removeFile(idx: number) {
   fileItems.value.splice(idx, 1)
+  if (!fileItems.value.length) importState.value = 'idle'
 }
 
 async function startBatchImport() {
+  if (isLegalFlow.value) {
+    await startLegalImport()
+    return
+  }
   const pending = fileItems.value.filter((f) => f.status === 'pending')
   if (!pending.length) return
   batchImporting.value = true
+  importState.value = 'applying'
   for (const item of pending) {
     item.status = 'importing'
     try {
@@ -225,6 +247,7 @@ async function startBatchImport() {
     }
   }
   batchImporting.value = false
+  importState.value = fileItems.value.some((f) => f.status === 'error') ? 'error' : 'success'
   if (fileItems.value.every((f) => f.status !== 'pending')) {
     await load()
     ElMessage.success(`批量导入完成，共入库 ${totalImported.value} 个切片`)
@@ -232,24 +255,102 @@ async function startBatchImport() {
 }
 
 function closeBatch() {
-  if (batchImporting.value) return
+  if (importBusy.value) return
   batchOpen.value = false
   fileItems.value = []
   overwriteMode.value = false
+  importState.value = 'idle'
+  legalFile.value = null
+  legalPreview.value = null
+  legalResult.value = null
+  legalError.value = ''
 }
 
 // —— 拖拽区（支持文件 + 文件夹）——
 const isDragging = ref(false)
 const ACCEPTED_EXTS = new Set(['.txt', '.docx', '.pdf'])
 
-function addFileToQueue(file: File) {
-  const ext = '.' + (file.name.split('.').pop() ?? '').toLowerCase()
-  if (!ACCEPTED_EXTS.has(ext)) return
-  if (fileItems.value.some((f) => f.file.name === file.name)) return
+function enqueueGenericFile(file: File) {
   fileItems.value.push({
     file, status: 'pending', chunks: 0, skipped: 0,
     mode: '', detectedCat: '', filteredPH: 0, error: '',
   })
+  importState.value = 'generic-ready'
+}
+
+async function addFileToQueue(file: File) {
+  const ext = '.' + (file.name.split('.').pop() ?? '').toLowerCase()
+  if (!ACCEPTED_EXTS.has(ext)) return
+  if (fileItems.value.some((f) => f.file.name === file.name) || legalFile.value?.name === file.name) return
+
+  if (!isAdmin.value) {
+    enqueueGenericFile(file)
+    return
+  }
+
+  importState.value = 'previewing'
+  legalError.value = ''
+  legalResult.value = null
+  try {
+    const preview = await previewLegalImport(file)
+    if (!preview.candidate) {
+      enqueueGenericFile(file)
+      return
+    }
+    if (fileItems.value.length) {
+      fileItems.value = []
+      ElMessage.warning('权威法源需单独导入，已清空普通文件队列')
+    }
+    legalFile.value = file
+    legalPreview.value = preview
+    if (preview.allowed && preview.token) {
+      importState.value = 'legal-ready'
+    } else {
+      legalError.value = preview.errors.join('；') || '文件未通过权威法源校验'
+      importState.value = 'error'
+    }
+  } catch (e: unknown) {
+    legalFile.value = file
+    legalPreview.value = null
+    legalError.value = e instanceof Error ? e.message : String(e)
+    importState.value = 'error'
+  }
+}
+
+function clearLegalFile() {
+  if (importBusy.value) return
+  legalFile.value = null
+  legalPreview.value = null
+  legalResult.value = null
+  legalError.value = ''
+  importState.value = fileItems.value.length ? 'generic-ready' : 'idle'
+}
+
+async function startLegalImport() {
+  const file = legalFile.value
+  const preview = legalPreview.value
+  if (!file || !preview?.allowed || !preview.token) return
+  try {
+    await ElMessageBox.confirm(
+      `将原子替换现有 ${preview.replace_article_count} 条父法条和 ${preview.replace_chunk_count} 个子切片，其他知识不受影响。是否继续？`,
+      '确认替换权威法源',
+      { type: 'warning', confirmButtonText: '确认替换', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  importState.value = 'applying'
+  legalError.value = ''
+  try {
+    legalResult.value = await applyLegalImport(file, preview.token)
+    importState.value = 'success'
+    await load()
+    ElMessage.success('权威法源已完成原子替换')
+  } catch (e: unknown) {
+    legalError.value = e instanceof Error ? e.message : String(e)
+    importState.value = 'error'
+  }
 }
 
 /** 递归读取 FileSystemEntry，一级文件夹展开，不再深入子目录。 */
@@ -304,7 +405,7 @@ async function onDrop(e: DragEvent) {
     if (entry) entries.push(entry)
   }
   const files = await readEntries(entries)
-  files.forEach(addFileToQueue)
+  for (const file of files) await addFileToQueue(file)
 }
 
 /** 单文件重试：重置状态后重新调接口。 */
@@ -450,16 +551,16 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
       v-model="batchOpen"
       title="批量导入文件"
       width="600px"
-      :close-on-click-modal="!batchImporting"
+      :close-on-click-modal="!importBusy"
       :before-close="closeBatch"
     >
       <!-- 自动识别提示 + 覆盖开关 -->
       <div class="batch-config">
         <el-icon style="color: var(--sage)"><CircleCheck /></el-icon>
-        <span class="batch-label">自动识别分类</span>
-        <span class="batch-hint">系统根据文件内容（法条结构/合同双方/案例特征）自动判断分类</span>
-        <div class="batch-overwrite">
-          <el-switch v-model="overwriteMode" size="small" :disabled="batchImporting" />
+        <span class="batch-label">{{ isAdmin ? '自动预检并识别分类' : '自动识别分类' }}</span>
+        <span class="batch-hint">权威法源将校验条文结构和文件哈希，普通文件沿用原导入流程</span>
+        <div v-if="!isLegalFlow" class="batch-overwrite">
+          <el-switch v-model="overwriteMode" size="small" :disabled="importBusy" />
           <span class="batch-hint" style="margin-left:6px">覆盖同名旧数据</span>
         </div>
       </div>
@@ -477,7 +578,7 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
           :auto-upload="false"
           :show-file-list="false"
           accept=".txt,.docx,.pdf"
-          :disabled="batchImporting"
+          :disabled="importBusy || isLegalFlow"
           :on-change="onBatchFileChange"
           class="batch-upload-inner"
         >
@@ -489,8 +590,72 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
         </el-upload>
       </div>
 
+      <div v-if="importState === 'previewing'" class="legal-state" aria-live="polite">
+        <el-icon class="is-loading"><Loading /></el-icon>
+        <span>正在校验文件结构与权威哈希…</span>
+      </div>
+
+      <section v-if="isLegalFlow && legalPreview" class="legal-preview" aria-label="权威法源预检结果">
+        <div class="legal-preview-head">
+          <div>
+            <span class="legal-eyebrow">权威法源</span>
+            <h3>{{ legalPreview.title }}</h3>
+            <p>{{ legalFile?.name }}</p>
+          </div>
+          <el-tag :type="legalPreview.allowed ? 'success' : 'danger'">
+            {{ legalPreview.allowed ? '校验通过' : '禁止导入' }}
+          </el-tag>
+        </div>
+
+        <dl class="legal-metrics">
+          <div><dt>1260 条父法条</dt><dd>{{ legalPreview.article_count }}</dd></div>
+          <div><dt>父子切片</dt><dd>{{ legalPreview.chunk_count }}</dd></div>
+          <div><dt>替换现有父法条</dt><dd>{{ legalPreview.replace_article_count }}</dd></div>
+          <div><dt>替换现有子切片</dt><dd>{{ legalPreview.replace_chunk_count }}</dd></div>
+        </dl>
+
+        <div class="legal-hash">
+          <span>文件 SHA-256</span>
+          <code>{{ legalPreview.file_sha256 }}</code>
+          <el-tag size="small" :type="legalPreview.hash_matches ? 'success' : 'danger'">
+            {{ legalPreview.hash_matches ? '与官方基准一致' : '与官方基准不一致' }}
+          </el-tag>
+        </div>
+        <el-alert
+          v-if="legalError"
+          :title="legalError"
+          type="error"
+          :closable="false"
+          show-icon
+        />
+        <el-button v-if="importState !== 'applying'" link type="danger" @click="clearLegalFile">
+          移除文件
+        </el-button>
+      </section>
+
+      <el-alert
+        v-else-if="importState === 'error' && legalError"
+        :title="legalError"
+        type="error"
+        :closable="false"
+        show-icon
+      />
+
+      <section v-if="legalResult" class="legal-result" aria-label="权威法源导入结果">
+        <el-icon><CircleCheck /></el-icon>
+        <div>
+          <strong>权威法源导入完成</strong>
+          <p v-if="legalAcceptancePassed">第 1、585、1260 条均已核验</p>
+          <p v-else class="legal-result-warning">第 1、585、1260 条验收未完全通过</p>
+          <p>
+            {{ legalResult.article_count }} 条父法条 · {{ legalResult.chunk_count }} 个子切片 ·
+            复用 {{ legalResult.reused_embeddings }} 个向量 · 重建 {{ legalResult.rebuilt_embeddings }} 个向量
+          </p>
+        </div>
+      </section>
+
       <!-- 文件列表 -->
-      <div v-if="fileItems.length" class="file-list">
+      <div v-if="fileItems.length && !isLegalFlow" class="file-list">
         <div v-for="(f, i) in fileItems" :key="f.file.name" class="file-row">
           <el-icon class="file-icon">
             <CircleCheck v-if="f.status === 'done'" class="is-done" />
@@ -531,14 +696,16 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
       </div>
 
       <template #footer>
-        <el-button :disabled="batchImporting" @click="closeBatch">关闭</el-button>
+        <el-button :disabled="importBusy" @click="closeBatch">关闭</el-button>
         <el-button
           type="primary"
-          :loading="batchImporting"
-          :disabled="!fileItems.some((f) => f.status === 'pending')"
+          :loading="importState === 'applying'"
+          :disabled="isLegalFlow
+            ? importState !== 'legal-ready'
+            : !fileItems.some((f) => f.status === 'pending')"
           @click="startBatchImport"
         >
-          开始导入
+          {{ isLegalFlow ? '应用权威法源' : '开始导入' }}
         </el-button>
       </template>
     </el-dialog>
@@ -786,6 +953,90 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
   text-align: right;
   padding: 4px 0;
 }
+.legal-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 52px;
+  color: var(--ivory-dim);
+  font-size: 13px;
+}
+.legal-preview,
+.legal-result {
+  border-top: 1px solid var(--line);
+  padding: 16px 0 0;
+  margin-top: 4px;
+}
+.legal-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.legal-preview-head h3 {
+  margin: 3px 0;
+  font-size: 16px;
+}
+.legal-preview-head p,
+.legal-result p {
+  margin: 2px 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.legal-eyebrow {
+  color: var(--brass);
+  font-size: 11px;
+}
+.legal-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  margin: 0 0 14px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+.legal-metrics div {
+  background: var(--ink-2);
+  padding: 10px 12px;
+}
+.legal-metrics dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+.legal-metrics dd {
+  margin: 3px 0 0;
+  color: var(--ivory);
+  font-family: var(--mono);
+  font-size: 16px;
+}
+.legal-hash {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.legal-hash code {
+  overflow-wrap: anywhere;
+  color: var(--ivory-dim);
+}
+.legal-result {
+  display: flex;
+  gap: 10px;
+  color: var(--sage);
+}
+.legal-result strong {
+  color: var(--ivory);
+  font-size: 14px;
+}
+.legal-result .legal-result-warning {
+  color: var(--seal);
+}
 .pagination-row {
   display: flex;
   justify-content: center;
@@ -813,6 +1064,12 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
   .chips {
     max-width: 100%;
     overflow-x: auto;
+  }
+  .legal-metrics {
+    grid-template-columns: 1fr;
+  }
+  .legal-hash {
+    grid-template-columns: 1fr;
   }
 }
 </style>
