@@ -40,7 +40,7 @@ def test_preview_accepts_complete_official_civil_code_without_writing(db):
 
     preview = preview_legal_import(
         db,
-        filename="中华人民共和国民法典.txt",
+        filename=OFFICIAL_FILE.name,
         raw_content=raw,
         extracted_text=raw.decode("utf-8"),
         user_id=7,

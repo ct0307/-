@@ -143,7 +143,12 @@ def preview_legal_import(
 ) -> LegalImportPreview:
     spec = _civil_code_spec()
     file_sha256 = hashlib.sha256(raw_content).hexdigest()
-    candidate = "民法典" in filename or "中华人民共和国民法典" in extracted_text[:500]
+    candidate = (
+        file_sha256 == spec.file_sha256
+        or Path(filename).name.casefold() == spec.file.casefold()
+        or "民法典" in filename
+        or "中华人民共和国民法典" in extracted_text[:500]
+    )
     if not candidate:
         return LegalImportPreview(
             candidate=False,

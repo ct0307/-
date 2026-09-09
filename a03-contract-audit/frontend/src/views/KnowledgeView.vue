@@ -550,7 +550,7 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
     <el-dialog
       v-model="batchOpen"
       title="批量导入文件"
-      width="600px"
+      width="min(600px, calc(100vw - 24px))"
       :close-on-click-modal="!importBusy"
       :before-close="closeBatch"
     >
@@ -1022,6 +1022,7 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
   color: var(--muted);
 }
 .legal-hash code {
+  grid-column: 1 / -1;
   overflow-wrap: anywhere;
   color: var(--ivory-dim);
 }

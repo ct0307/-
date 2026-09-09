@@ -35,3 +35,9 @@ test('shows controlled legal replacement evidence without fake progress', () => 
   expect(viewSource).toContain('第 1、585、1260 条均已核验')
   expect(viewSource).not.toContain('legalImportProgress')
 })
+
+
+test('keeps the import dialog and authority hash readable on mobile', () => {
+  expect(viewSource).toContain('width="min(600px, calc(100vw - 24px))"')
+  expect(viewSource).toContain('grid-column: 1 / -1')
+})
