@@ -9,7 +9,11 @@ from app.db.session import Base
 from app.llm.base import LLMError
 from app.models.models import KnowledgeChunk, LegalArticle, LegalSource
 from app.services.rag import retriever
-from app.services.rag.retriever import collapse_by_article, parse_article_reference
+from app.services.rag.retriever import (
+    apply_contract_domain_boost,
+    collapse_by_article,
+    parse_article_reference,
+)
 
 
 @pytest.fixture
@@ -117,6 +121,55 @@ def test_collapse_by_article_keeps_best_chunk_and_all_legacy_rows():
     ]
 
     assert collapse_by_article(results) == [results[0], results[2], results[3]]
+
+
+def test_contract_domain_boost_prioritizes_relevant_civil_code_ranges():
+    non_contract = {
+        "source": "中华人民共和国民法典",
+        "article_number": "第一千零一条",
+        "score": 0.03,
+    }
+    contract = {
+        "source": "中华人民共和国民法典",
+        "article_number": "第五百七十七条",
+        "score": 0.03,
+    }
+
+    boosted = apply_contract_domain_boost(
+        [non_contract, contract], "合同违约责任如何承担"
+    )
+
+    assert boosted == [contract, non_contract]
+    assert contract["score"] == 0.03
+
+
+def test_contract_domain_boost_does_not_override_clear_relevance_gap():
+    highly_relevant_non_contract = {
+        "source": "中华人民共和国民法典",
+        "article_number": "第一千零一条",
+        "score": 0.03,
+    }
+    weak_contract_match = {
+        "source": "中华人民共和国民法典",
+        "article_number": "第五百七十七条",
+        "score": 0.02,
+    }
+
+    boosted = apply_contract_domain_boost(
+        [highly_relevant_non_contract, weak_contract_match], "合同违约责任如何承担"
+    )
+
+    assert boosted == [highly_relevant_non_contract, weak_contract_match]
+    assert weak_contract_match["score"] == 0.02
+
+
+def test_contract_domain_boost_does_not_reorder_unrelated_query():
+    original = [
+        {"source": "中华人民共和国民法典", "article_number": "第一千零一条", "score": 0.03},
+        {"source": "中华人民共和国民法典", "article_number": "第五百七十七条", "score": 0.03},
+    ]
+
+    assert apply_contract_domain_boost(original, "人格权受到侵害怎么办") == original
 
 
 def test_explicit_article_reference_returns_exact_parent_article(retrieval_db):

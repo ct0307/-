@@ -38,6 +38,11 @@ _RRF_K = 60
 _PER_ROUTE_N = 10
 # 向量候选最低余弦相似度。低于阈值的“最近邻”不构成可靠依据。
 _MIN_VECTOR_SIMILARITY = 0.35
+_CONTRACT_QUERY_TERMS = (
+    "合同", "违约", "债权", "债务", "担保", "保证", "抵押", "质押",
+    "价款", "租赁", "买卖", "承揽", "委托", "定金",
+)
+_CONTRACT_DOMAIN_SORT_BOOST = 0.002
 
 # 内置最小规则库（降级兜底）：知识库无数据时用关键词命中。
 # 每条 = {content: 依据内容, source: 来源, keywords: 命中关键词}
@@ -160,10 +165,13 @@ def retrieve(
         return results
 
     mode = "hybrid" if vec_ok else "bm25"
-    results = collapse_by_article([
+    ranked_results = [
         _result_from_doc(id_to_doc[doc_id], score=score, retrieval_mode=mode)
         for doc_id, score in fused
-    ])[:top_k]
+    ]
+    results = collapse_by_article(
+        apply_contract_domain_boost(ranked_results, query)
+    )[:top_k]
     log.info("rag.retrieve", mode=mode, matched=len(results))
     return results
 
@@ -198,6 +206,35 @@ def collapse_by_article(results: list[dict]) -> list[dict]:
             seen_article_ids.add(article_id)
         collapsed.append(result)
     return collapsed
+
+
+def apply_contract_domain_boost(results: list[dict], query: str) -> list[dict]:
+    """合同查询中小幅优先合同相关法域，不改变原始分数或过滤候选。"""
+    if not any(term in query for term in _CONTRACT_QUERY_TERMS):
+        return results
+
+    def is_contract_domain(result: dict) -> bool:
+        source = str(result.get("source") or "")
+        if "合同编通则" in source:
+            return True
+        article_number = str(result.get("article_number") or "")
+        match = _ARTICLE_REFERENCE_RE.search(article_number)
+        if not match:
+            return False
+        raw = match.group("number")
+        try:
+            number = int(raw) if raw.isdigit() else chinese_number_to_int(raw)
+        except ValueError:
+            return False
+        return 1 <= number <= 204 or 386 <= number <= 457 or 463 <= number <= 988
+
+    def boosted_score(result: dict) -> float:
+        score = float(result.get("score") or 0.0)
+        if is_contract_domain(result):
+            score += _CONTRACT_DOMAIN_SORT_BOOST
+        return score
+
+    return sorted(results, key=boosted_score, reverse=True)
 
 
 def _doc_value(doc: tuple, index: int, default=None):
