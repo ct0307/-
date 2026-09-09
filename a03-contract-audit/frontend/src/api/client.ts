@@ -43,10 +43,17 @@ client.interceptors.response.use(
     if (err.response?.status) {
       const status = err.response.status
       const detail = err.response.data?.detail
+      const structuredDetail = detail && typeof detail === 'object'
+        ? detail as { code?: unknown; detail?: unknown }
+        : null
+      const safeDetail = structuredDetail?.detail ?? detail
+      if (structuredDetail && typeof structuredDetail.code === 'string') {
+        err.code = structuredDetail.code
+      }
       // 只使用含中文字符的 detail，避免 FastAPI 自动生成的英文错误（如 "Internal Server Error"）直接展示
-      const hasChinese = typeof detail === 'string' && /[一-鿿]/.test(detail)
+      const hasChinese = typeof safeDetail === 'string' && /[一-鿿]/.test(safeDetail)
       err.message = hasChinese
-        ? detail
+        ? safeDetail
         : (HTTP_ERROR_MSGS[status] ?? `请求失败（${status}）`)
     } else if (err.code === 'ECONNABORTED') {
       err.message = '请求超时，请检查网络后重试'
