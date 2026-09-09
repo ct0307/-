@@ -101,6 +101,22 @@ const REDESIGN_TABLES = new Set([
   "07-verification-conclusion.md|赛题指标|当前状态|本轮证据摘要|仍需条件",
 ]);
 
+const PROFESSIONAL_TABLES = new Set([
+  "02-requirements-analysis.md|角色|主要任务|关注信息|系统支持|责任边界",
+  "02-requirements-analysis.md|优先级|需求范围|验收重点",
+  "03-overall-design.md|层级|核心职责|主要输入|主要输出|失败处理",
+  "04-functional-design.md|处理阶段|用户动作|系统处理|可见结果|异常出口",
+  "04-functional-design.md|异常场景|系统反应|用户可采取的动作|保留记录",
+  "05-technical-implementation.md|技术环节|选择依据|处理方式|输出|限制",
+  "05-technical-implementation.md|参数域|当前基线值|设计作用|调整要求",
+  "05-technical-implementation.md|证据状态|触发条件|系统处置|人工动作",
+  "06-data-security.md|数据对象|关键内容|主要关系|保护要求|保留策略",
+  "07-deployment-operations.md|环境或组件|主要用途|配置要求|验收条件",
+  "08-testing-acceptance.md|测试类别|测试对象|判定依据|证据形式",
+  "08-testing-acceptance.md|接口域|主要接口|输入|输出与状态",
+  "08-testing-acceptance.md|术语|含义",
+]);
+
 const PROFILES = {
   legacy: {
     contentDir: path.join(ROOT, "content"),
@@ -136,6 +152,32 @@ const PROFILES = {
       page: { marginTop: 1134, marginBottom: 1134, marginLeft: 1134, marginRight: 1134, header: 851, footer: 992 },
       color: { primary: "000000", secondary: "000000", accent: "000000", text: "000000", muted: "555555", border: "000000", tableHeader: "FFFFFF", panel: "FFFFFF" },
       style: { bodySize: 24, bodyAfter: 120, bodyLine: 360, h1Size: 30, h2Size: 28, h3Size: 24, tableSize: 21, captionSize: 21, headerSize: 18, codeSize: 21, firstLine: 480, winningStyle: true },
+    },
+  },
+  professional: {
+    contentDir: path.join(ROOT, "content-professional"),
+    outputPath: path.resolve(ROOT, "../..", "outputs", "professional-redesign", "契鉴_项目详细方案_专业重制版.docx"),
+    expectedFiles: 8,
+    expectedChapters: 8,
+    expectedFigures: 23,
+    keepAsTable: PROFESSIONAL_TABLES,
+    version: "V3.1",
+    date: "2026 年 9 月",
+    bodyLine: 280,
+    eventTitle: "企业级合同合规审查系统建设项目",
+    eventTitleSize: 20,
+    subject: "契鉴企业级合同合规审查与多维报表生成智能体系统项目详细方案",
+    coverMeta: [
+      "项目编号  A03",
+      "项目单位  海康-南湖研究院",
+      "项目团队  豪到你了团队",
+    ],
+    chapterPageBreaks: true,
+    sectionPageBreaks: new Set(["附录D 参考文献"]),
+    layout: {
+      page: { marginTop: 1134, marginBottom: 1134, marginLeft: 1134, marginRight: 1134, header: 851, footer: 992 },
+      color: { primary: "000000", secondary: "000000", accent: "000000", text: "000000", muted: "555555", border: "000000", tableHeader: "FFFFFF", panel: "FFFFFF" },
+      style: { bodySize: 24, bodyAfter: 120, bodyLine: 360, h1Size: 30, h2Size: 28, h3Size: 24, tableSize: 21, captionSize: 21, headerSize: 18, codeSize: 21, firstLine: 480, tocLine: 260, winningStyle: true },
     },
   },
 };
@@ -415,17 +457,18 @@ function tableAsGroupedItems(block) {
 function coverChildren(config) {
   const centered = AlignmentType.CENTER;
   if (STYLE.winningStyle) {
+    const coverMeta = config.coverMeta || [
+      "赛题编号  A03",
+      "命题单位  海康-南湖研究院",
+      "参赛团队  豪到你了团队",
+    ];
     return [
       new Paragraph({ spacing: { before: 900, after: 300 }, alignment: centered, children: [new TextRun({ text: config.eventTitle, color: COLOR.text, font: headingFont(2), size: 24 })] }),
       new Paragraph({ spacing: { before: 0, after: 140 }, alignment: centered, children: [new TextRun({ text: "契鉴", bold: true, color: COLOR.text, font: headingFont(1), size: 44 })] }),
       new Paragraph({ spacing: { before: 0, after: 140 }, alignment: centered, children: [new TextRun({ text: "企业级合同合规审查与多维报表生成智能体系统", bold: true, color: COLOR.text, font: headingFont(2), size: 30 })] }),
       new Paragraph({ spacing: { before: 0, after: 480 }, alignment: centered, children: [new TextRun({ text: "项目详细方案", color: COLOR.text, font: headingFont(2), size: 30 })] }),
-      ...[
-        "赛题编号  A03",
-        "命题单位  海康-南湖研究院",
-        "参赛团队  豪到你了团队",
-        `文档版本  ${config.version}`,
-      ].map((text) => new Paragraph({ spacing: { before: 0, after: 100 }, alignment: centered, children: [new TextRun({ text, color: COLOR.text, font: headingFont(2), size: 24 })] })),
+      ...[...coverMeta, `文档版本  ${config.version}`]
+        .map((text) => new Paragraph({ spacing: { before: 0, after: 100 }, alignment: centered, children: [new TextRun({ text, color: COLOR.text, font: headingFont(2), size: 24 })] })),
       new Paragraph({ spacing: { before: 180, after: 0 }, alignment: centered, children: [new TextRun({ text: config.date, color: COLOR.text, font: headingFont(2), size: 24 })] }),
       new Paragraph({ children: [new PageBreak()] }),
       new Paragraph({ alignment: centered, spacing: { before: 80, after: 260 }, children: [new TextRun({ text: "目录", bold: true, color: COLOR.text, font: headingFont(1), size: 32 })] }),
@@ -644,7 +687,7 @@ function documentStyles() {
         basedOn: "Normal",
         next: "Normal",
         run: { font: eastAsiaFont(), size: STYLE.winningStyle ? 21 : 17, color: COLOR.text },
-        paragraph: { spacing: { before: 0, after: 0, line: STYLE.winningStyle ? 300 : 200, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined }, keepLines: true },
+        paragraph: { spacing: { before: 0, after: 0, line: STYLE.tocLine || (STYLE.winningStyle ? 300 : 200), lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined }, keepLines: true },
       },
       {
         id: "TOC2",
@@ -652,7 +695,7 @@ function documentStyles() {
         basedOn: "Normal",
         next: "Normal",
         run: { font: eastAsiaFont(), size: STYLE.winningStyle ? 21 : 16, color: COLOR.muted },
-        paragraph: { indent: { left: 260 }, spacing: { before: 0, after: 0, line: STYLE.winningStyle ? 300 : 190, lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined }, keepLines: true },
+        paragraph: { indent: { left: 260 }, spacing: { before: 0, after: 0, line: STYLE.tocLine || (STYLE.winningStyle ? 300 : 190), lineRule: STYLE.winningStyle ? LineRuleType.EXACT : undefined }, keepLines: true },
       },
     ],
   };

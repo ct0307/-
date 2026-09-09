@@ -13,6 +13,10 @@ from docx import Document
 
 
 BANNED = re.compile(r"当前已|已经完成|截至目前|后续完善|完成度|现有项目|本项目目前")
+PROFESSIONAL_BANNED = re.compile(
+    r"赛题|评委|参赛材料|本轮|当前状态|尚待完成|完成情况|截至\s*20\d{2}|"
+    r"\d+\s*项通过|\d+\s*passed|测试结果"
+)
 CURRENT_EVENT = "2026“数字马力杯”第十三届浙江省大学生服务外包创新应用大赛"
 OUTDATED_EVENT = "浙江省职业技能大赛 · 外包赛道"
 CHAPTER = re.compile(r"^第[一二三四五六七八九十]+章\s")
@@ -51,6 +55,23 @@ PROFILES = {
         "include_table_text": True,
         "required_facts": (CURRENT_EVENT,),
         "forbidden_facts": (OUTDATED_EVENT,),
+    },
+    "professional": {
+        "chapters": 8,
+        "chars": (24000, 33000),
+        "tables": (10, 13),
+        "images": (23, 23),
+        "pages": (42, 56),
+        "margins": {"top": "1134", "bottom": "1134", "left": "1134", "right": "1134"},
+        "header": "851",
+        "footer": "992",
+        "sources": tuple(range(1, 7)),
+        "banned": PROFESSIONAL_BANNED,
+        "min_alt": 22,
+        "min_bookmarks": 42,
+        "include_table_text": True,
+        "required_facts": ("附录A 主要接口清单", "附录B 核心数据字典", "附录C 术语与缩略语", "附录D 参考文献"),
+        "forbidden_facts": (CURRENT_EVENT, OUTDATED_EVENT),
     },
 }
 EXPECTED_IMAGES = {
@@ -190,8 +211,9 @@ def validate_docx(path: Path, profile: str) -> dict[str, int]:
     if not char_min <= chinese_chars <= char_max:
         fail(f"正文中文字符应为 {char_min}～{char_max}，实际 {chinese_chars}")
     banned = config["banned"]
-    if banned is not None and banned.search(paragraph_text):
-        fail(f"发现禁用表述：{banned.search(paragraph_text).group(0)}")
+    banned_match = banned.search(counted_text) if banned is not None else None
+    if banned_match is not None:
+        fail(f"发现禁用表述：{banned_match.group(0)}")
     missing_sources = [
         f"[S{index:02d}]" for index in config["sources"]
         if f"[S{index:02d}]" not in paragraph_text
@@ -234,7 +256,7 @@ def validate_docx(path: Path, profile: str) -> dict[str, int]:
             fail("页边距与 profile 不一致")
         if page_margin.get(W + "header") != config["header"] or page_margin.get(W + "footer") != config["footer"]:
             fail("页眉页脚距离与 profile 不一致")
-        if profile == "redesign":
+        if profile in ("redesign", "professional"):
             validate_redesign_layout(archive, root)
 
         xml_tables = root.findall(".//w:tbl", NS)
@@ -285,7 +307,7 @@ def validate_pdf(path: Path, profile: str) -> int:
     page_min, page_max = PROFILES[profile]["pages"]
     if not page_min <= pages <= page_max:
         fail(f"PDF 页数应为 {page_min}～{page_max}，实际 {pages}")
-    if profile == "redesign":
+    if profile in ("redesign", "professional"):
         chapter_pages: list[int] = []
         for page_number, page in enumerate(reader.pages[2:], start=3):
             lines = [line.strip() for line in (page.extract_text() or "").splitlines()]
