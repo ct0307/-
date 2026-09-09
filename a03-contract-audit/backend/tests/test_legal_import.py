@@ -7,11 +7,15 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.session import Base
 from app.models.models import KnowledgeChunk, LegalArticle
+from app.llm.base import LLMError
+from app.services.rag import retriever
 from app.services.rag.legal_import import (
+    apply_legal_import,
     LegalImportError,
     preview_legal_import,
     verify_preview_token,
 )
+from app.api.v1.endpoints import knowledge
 
 
 RESOURCES = Path(__file__).parents[1] / "resources" / "legal_sources"
@@ -116,3 +120,112 @@ def test_preview_token_binds_file_user_and_expiry(db):
             user_id=7,
             now=datetime.now(timezone.utc) + timedelta(minutes=11),
         )
+
+
+class RecordingEmbeddingAdapter:
+    def __init__(self, *, fail: bool = False):
+        self.fail = fail
+        self.inputs: list[list[str]] = []
+
+    def embed(self, texts):
+        self.inputs.append(list(texts))
+        if self.fail:
+            raise LLMError("测试向量服务不可用")
+        return [[1.0, 0.0] for _ in texts]
+
+
+def _official_preview(db, user_id=7):
+    raw = OFFICIAL_FILE.read_bytes()
+    return raw, preview_legal_import(
+        db,
+        filename="中华人民共和国民法典.txt",
+        raw_content=raw,
+        extracted_text=raw.decode("utf-8"),
+        user_id=user_id,
+    )
+
+
+def test_apply_imports_complete_parent_child_knowledge_atomically(db, monkeypatch):
+    raw, preview = _official_preview(db)
+    adapter = RecordingEmbeddingAdapter()
+    monkeypatch.setattr(retriever, "get_embedding_adapter", lambda: adapter)
+    monkeypatch.setattr(retriever.settings, "EMBED_DIM", 2)
+
+    result = apply_legal_import(
+        db,
+        filename="中华人民共和国民法典.txt",
+        raw_content=raw,
+        extracted_text=raw.decode("utf-8"),
+        token=preview.token,
+        user_id=7,
+    )
+
+    assert result.article_count == 1260
+    assert result.chunk_count >= 1260
+    assert result.first_article_ok is True
+    assert result.article_585_ok is True
+    assert result.last_article_ok is True
+    assert db.query(LegalArticle).filter_by(source_id="civil-code-2020").count() == 1260
+    assert db.query(KnowledgeChunk).filter(
+        KnowledgeChunk.legal_article_id.isnot(None)
+    ).count() == result.chunk_count
+
+
+def test_repeated_apply_reuses_embeddings_without_growing_rows(db, monkeypatch):
+    raw, preview = _official_preview(db)
+    adapter = RecordingEmbeddingAdapter()
+    monkeypatch.setattr(retriever, "get_embedding_adapter", lambda: adapter)
+    monkeypatch.setattr(retriever.settings, "EMBED_DIM", 2)
+    first = apply_legal_import(
+        db, filename="民法典.txt", raw_content=raw, extracted_text=raw.decode(),
+        token=preview.token, user_id=7,
+    )
+    _, second_preview = _official_preview(db)
+    adapter.inputs.clear()
+
+    second = apply_legal_import(
+        db, filename="民法典.txt", raw_content=raw, extracted_text=raw.decode(),
+        token=second_preview.token, user_id=7,
+    )
+
+    assert second.reused_embeddings == first.chunk_count
+    assert second.rebuilt_embeddings == 0
+    assert adapter.inputs == []
+    assert db.query(LegalArticle).filter_by(source_id="civil-code-2020").count() == 1260
+
+
+def test_embedding_failure_preserves_existing_civil_code(db, monkeypatch):
+    raw, preview = _official_preview(db)
+    monkeypatch.setattr(
+        retriever, "get_embedding_adapter", lambda: RecordingEmbeddingAdapter()
+    )
+    monkeypatch.setattr(retriever.settings, "EMBED_DIM", 2)
+    apply_legal_import(
+        db, filename="民法典.txt", raw_content=raw, extracted_text=raw.decode(),
+        token=preview.token, user_id=7,
+    )
+    before = db.query(LegalArticle.content_hash).filter_by(
+        source_id="civil-code-2020"
+    ).order_by(LegalArticle.id).all()
+    _, retry_preview = _official_preview(db)
+    monkeypatch.setattr(
+        retriever, "get_embedding_adapter", lambda: RecordingEmbeddingAdapter(fail=True)
+    )
+    monkeypatch.setattr(retriever.settings, "EMBED_DIM", 3)
+
+    with pytest.raises(LLMError, match="测试向量服务不可用"):
+        apply_legal_import(
+            db, filename="民法典.txt", raw_content=raw, extracted_text=raw.decode(),
+            token=retry_preview.token, user_id=7,
+        )
+
+    assert db.query(LegalArticle.content_hash).filter_by(
+        source_id="civil-code-2020"
+    ).order_by(LegalArticle.id).all() == before
+
+
+def test_router_exposes_authoritative_preview_and_apply_endpoints():
+    routes = {(route.path, tuple(route.methods or ())) for route in knowledge.router.routes}
+
+    assert ("/legal-import/preview", ("POST",)) in routes
+    assert ("/legal-import/apply", ("POST",)) in routes

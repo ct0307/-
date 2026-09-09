@@ -12,7 +12,9 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.core.config import BASE_DIR, settings
-from app.models.models import KnowledgeChunk, LegalArticle
+from app.models.models import KnowledgeChunk, LegalArticle, LegalSource
+from app.services.rag import retriever
+from app.services.rag.legal_sync import _chunk_cache_key, _embedding_cache
 from app.services.rag.legal_sources import (
     LegalSourceError,
     SourceSpec,
@@ -46,6 +48,21 @@ class LegalImportPreview:
     replace_chunk_count: int
     errors: tuple[str, ...]
     token: str | None
+
+
+@dataclass(frozen=True)
+class LegalImportResult:
+    source_id: str
+    article_count: int
+    chunk_count: int
+    reused_embeddings: int
+    rebuilt_embeddings: int
+    embedding_model: str
+    embedding_dimension: int
+    embedding_signature: str
+    first_article_ok: bool
+    article_585_ok: bool
+    last_article_ok: bool
 
 
 def _civil_code_spec() -> SourceSpec:
@@ -188,4 +205,106 @@ def preview_legal_import(
         replace_chunk_count=replace_chunk_count,
         errors=tuple(errors),
         token=token,
+    )
+
+
+def apply_legal_import(
+    db: Session,
+    *,
+    filename: str,
+    raw_content: bytes,
+    extracted_text: str,
+    token: str,
+    user_id: int,
+) -> LegalImportResult:
+    del filename  # 文件名不参与信任判断，内容和令牌才是安全边界。
+    payload = verify_preview_token(token, raw_content=raw_content, user_id=user_id)
+    spec = _civil_code_spec()
+    if payload.get("source_id") != spec.source_id:
+        raise LegalImportError("预检令牌法源不匹配")
+    if not hmac.compare_digest(hashlib.sha256(raw_content).hexdigest(), spec.file_sha256):
+        raise LegalImportError("上传文件不再匹配官方基准")
+
+    articles = parse_articles(spec, extracted_text)
+    validate_article_set(spec, articles)
+    chunks = [
+        {
+            "category": "law",
+            "source": spec.title,
+            "content": chunk.display_content,
+            "retrieval_text": chunk.retrieval_text,
+            "article_number": chunk.article_number,
+            "article_key": chunk.article_key,
+            "chunk_index": chunk.chunk_index,
+            "chunk_count": chunk.chunk_count,
+            "chunk_schema_version": chunk.chunk_schema_version,
+            "version": f"{spec.publication_date.isoformat()} {spec.version_status}",
+            "effective_date": spec.effective_date,
+            "scope_mode": "global",
+        }
+        for article in articles
+        for chunk in split_legal_article(article, source_title=spec.title)
+    ]
+    cache = _embedding_cache(db)
+    reused = sum(1 for chunk in chunks if _chunk_cache_key(chunk) in cache)
+
+    # 向量必须在替换事务之前全部生成并通过维度校验。
+    rows = retriever.prepare_documents(chunks, embedding_cache=cache)
+    db.rollback()
+    with db.begin():
+        old_article_ids = db.query(LegalArticle.id).filter(
+            LegalArticle.source_id == spec.source_id
+        )
+        db.query(KnowledgeChunk).filter(
+            KnowledgeChunk.legal_article_id.in_(old_article_ids)
+        ).delete(synchronize_session=False)
+        db.query(LegalArticle).filter(
+            LegalArticle.source_id == spec.source_id
+        ).delete(synchronize_session=False)
+        db.query(LegalSource).filter(
+            LegalSource.source_id == spec.source_id
+        ).delete(synchronize_session=False)
+        db.add(LegalSource(
+            source_id=spec.source_id,
+            title=spec.title,
+            issuing_authority=spec.issuing_authority,
+            official_url=spec.official_url,
+            publication_date=spec.publication_date,
+            effective_date=spec.effective_date,
+            version_status=spec.version_status,
+            retrieved_at=spec.retrieved_at,
+            file_sha256=spec.file_sha256,
+        ))
+        db.flush()
+        article_rows: dict[tuple[str, str], LegalArticle] = {}
+        for article in articles:
+            row = LegalArticle(
+                source_id=article.source_id,
+                article_number=article.article_number,
+                article_sort=article.article_sort,
+                chapter_title=article.chapter_title,
+                content=article.content,
+                content_hash=article.content_hash,
+            )
+            db.add(row)
+            article_rows[(article.source_id, article.article_number)] = row
+        db.flush()
+        for chunk, row in zip(chunks, rows):
+            row.legal_article_id = article_rows[chunk["article_key"]].id
+            db.add(row)
+
+    article_numbers = {article.article_number for article in articles}
+    first_row = rows[0]
+    return LegalImportResult(
+        source_id=spec.source_id,
+        article_count=len(articles),
+        chunk_count=len(rows),
+        reused_embeddings=reused,
+        rebuilt_embeddings=len(rows) - reused,
+        embedding_model=first_row.embedding_model or "",
+        embedding_dimension=first_row.embedding_dimension or 0,
+        embedding_signature=first_row.embedding_signature or "",
+        first_article_ok="第一条" in article_numbers,
+        article_585_ok="第五百八十五条" in article_numbers,
+        last_article_ok="第一千二百六十条" in article_numbers,
     )
