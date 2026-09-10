@@ -118,8 +118,9 @@ def render_docx(document: ContractDocument, output_path: Path, *, case: Contract
         for paragraph in item.paragraphs:
             _word_paragraph(word, paragraph)
         _word_table(word, item.rows)
-    for item in document.annexes:
-        word.add_page_break()
+    for index, item in enumerate(document.annexes):
+        if index == 0:
+            word.add_page_break()
         heading = _word_paragraph(word, item.heading, 14, True)
         heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
         for paragraph in item.paragraphs:
@@ -178,13 +179,37 @@ class _PdfFlow:
             self.y += step
         self.y += 4 if bold else 2
 
+    def table(self, rows: tuple[tuple[str, ...], ...]) -> None:
+        if not rows:
+            return
+        columns = max(len(row) for row in rows)
+        table_width = A4.width - 2 * MARGIN_X
+        column_width = table_width / columns
+        for row_index, row in enumerate(rows):
+            wrapped = [
+                _wrap(self.font, row[column] if column < len(row) else "", column_width - 8, 7.5)
+                for column in range(columns)
+            ]
+            row_height = max(22.0, max(len(lines) for lines in wrapped) * 10.2 + 8)
+            self.ensure(row_height)
+            assert self.page is not None
+            for column, lines in enumerate(wrapped):
+                x0 = MARGIN_X + column * column_width
+                rect = fitz.Rect(x0, self.y, x0 + column_width, self.y + row_height)
+                fill = (0.91, 0.92, 0.93) if row_index == 0 else None
+                self.page.draw_rect(rect, color=(0.65, 0.65, 0.65), fill=fill, width=0.55)
+                text_y = self.y + 11
+                for line in lines:
+                    self.page.insert_text((x0 + 4, text_y), line, fontname="CJK", fontsize=7.5)
+                    text_y += 10.2
+            self.y += row_height
+        self.y += 8
+
     def section(self, item: ContractSection) -> None:
         self.lines(item.heading, 11.5, bold=True)
         for paragraph in item.paragraphs:
             self.lines(paragraph, 9.2, indent=14)
-        for row_index, row in enumerate(item.rows):
-            prefix = "表头：" if row_index == 0 else f"第{row_index}行："
-            self.lines(prefix + " ｜ ".join(row), 8.0, indent=8)
+        self.table(item.rows)
 
 
 def _text_pdf_bytes(document: ContractDocument) -> bytes:
@@ -199,8 +224,9 @@ def _text_pdf_bytes(document: ContractDocument) -> bytes:
     flow.new_page()
     for item in document.sections:
         flow.section(item)
-    for item in document.annexes:
-        flow.new_page()
+    for index, item in enumerate(document.annexes):
+        if index == 0:
+            flow.new_page()
         flow.section(item)
     for number, page in enumerate(flow.pdf, start=1):
         footer = f"{document.case_id}  第 {number} 页 / 共 {flow.pdf.page_count} 页"

@@ -162,7 +162,14 @@ def build_contract(case: ContractCase) -> ContractDocument:
         "合同主体和通知信息",
         tuple(f"{party.role}：{party.name}；地址：{party.address}；{party.contact}。该等信息仅为合成测试数据。" for party in case.parties),
     ))
-    sections.append(ContractSection("签署约定", (profile.signature_pattern,)))
+    sections.append(ContractSection(
+        "签署页",
+        (profile.signature_pattern, "以下签署栏为合同签署组成部分，正文至此结束。"),
+        (
+            ("签约方", "授权代表", "签署日期", "盖章位置"),
+            *((party.name, "________________", "____年__月__日", "（盖章）") for party in case.parties),
+        ),
+    ))
     annexes = tuple(_annex_section(index, annex) for index, annex in enumerate(build_annexes(case), start=1))
     return ContractDocument(
         case_id=case.case_id,

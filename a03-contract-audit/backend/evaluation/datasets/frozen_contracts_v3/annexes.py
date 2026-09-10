@@ -92,11 +92,38 @@ SCENARIO_ALLOWED_ANNEXES = {
 }
 
 
-ANNEX_NAMES = {key: " ".join(part.capitalize() for part in key.split("_")) for key in ANNEX_SCHEMAS}
+ANNEX_NAMES = {
+    "equipment_list": "设备供货清单", "technical_spec": "技术规格书", "acceptance_plan": "验收方案",
+    "delivery_schedule": "交付进度表", "material_price_list": "物料价格表", "quality_standard": "质量检验标准",
+    "order_template": "采购订单模板", "import_documents": "进口单证清单", "goods_list": "货物明细表",
+    "sealed_sample_standard": "封样确认表", "pricing_formula": "调价公式表", "food_price_list": "食品价格表",
+    "cold_chain_standard": "冷链温控标准", "store_schedule": "门店配送计划", "catalog_rules": "电子目录管理规则",
+    "delivery_service_level": "配送服务等级", "account_matrix": "账号权限矩阵", "mould_spec": "模具技术规格",
+    "milestone_plan": "项目里程碑计划", "deliverable_list": "项目交付物清单", "acceptance_cases": "验收测试用例",
+    "interface_list": "系统接口清单", "cloud_resource_list": "云资源配置清单", "sla": "服务等级协议",
+    "security_schedule": "信息安全要求", "data_catalog": "数据目录", "requirements_baseline": "需求基线清单",
+    "data_processing_schedule": "数据处理活动表", "model_metrics": "模型评测指标", "disaster_recovery_test": "容灾演练方案",
+    "service_catalog": "服务目录", "staffing_plan": "人员投入计划", "monthly_report": "月度服务报告模板",
+    "consultant_roster": "顾问团队名单", "training_plan": "培训实施计划", "trainer_roster": "讲师名单",
+    "evaluation_form": "培训评价表", "content_calendar": "内容发布排期", "media_budget": "媒介投放预算",
+    "asset_register": "资产清单", "maintenance_plan": "维护保养计划", "authorization_matrix": "授权审批矩阵",
+    "warehouse_kpi": "仓储绩效指标", "transport_price_list": "运输线路价格表", "rent_schedule": "租金支付计划",
+    "delivery_certificate": "交付接收证明", "premises_plan": "租赁场地平面及面积表", "handover_list": "交接清单",
+    "supplement_change_list": "补充协议变更对照表", "vehicle_register": "租赁车辆清单", "safety_schedule": "安全管理要求",
+    "bill_of_quantities": "工程量清单", "construction_schedule": "施工进度计划", "variation_order": "工程变更单",
+    "inspection_plan": "工程检验计划", "price_schedule": "维修工程计价表", "work_order": "维修工单模板",
+    "supervision_scope": "监理工作范围", "report_schedule": "监理报告计划", "role_matrix": "服务岗位矩阵",
+    "replacement_rules": "人员替换规则", "compliance_schedule": "用工合规清单", "candidate_process": "候选人推荐流程",
+    "insured_roster_schema": "参保人员字段清单", "benefit_schedule": "保险保障方案", "claims_sla": "理赔服务时限",
+    "processing_instruction": "数据处理指令", "deletion_certificate": "数据删除证明模板", "research_plan": "联合研发计划",
+    "ip_schedule": "知识产权归属表", "license_scope": "软件许可范围", "product_price_list": "经销产品价格表",
+}
 
 
 def _cell_value(case: ContractCase, column: str, row_index: int) -> str:
     number = row_index + 1
+    if case.length_class == "short" and any(word in column for word in ("名称", "项目", "标的", "工作范围", "处理活动", "研究任务", "服务项", "范围", "用途", "内容", "要求", "描述", "场景")):
+        return f"本订单第{number}项"
     if any(word in column for word in ("名称", "项目", "标的", "工作范围", "处理活动", "研究任务", "服务项")):
         return f"{case.truth.subject}（第{number}项）"
     if any(word in column for word in ("数量", "人数", "工程量", "许可数量")):
@@ -118,9 +145,10 @@ def _cell_value(case: ContractCase, column: str, row_index: int) -> str:
 
 def build_annexes(case: ContractCase) -> tuple[AnnexSpec, ...]:
     annexes = []
+    row_count = {"short": 3, "standard": 4, "long": 6}[case.length_class]
     for index, annex_type in enumerate(case.annex_types, start=1):
         columns = ANNEX_SCHEMAS[annex_type]
-        rows = tuple(tuple(_cell_value(case, column, row_index) for column in columns) for row_index in range(2))
+        rows = tuple(tuple(_cell_value(case, column, row_index) for column in columns) for row_index in range(row_count))
         annexes.append(AnnexSpec(
             annex_type=annex_type,
             name=ANNEX_NAMES[annex_type],

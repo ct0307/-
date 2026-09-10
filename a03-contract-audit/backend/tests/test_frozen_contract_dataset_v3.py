@@ -236,7 +236,7 @@ def test_v3_contract_lengths_stay_within_realistic_ranges():
         if case.length_class == "standard":
             assert 2_500 <= count <= 5_500, (case.case_id, count)
         elif case.length_class == "long":
-            assert 6_000 <= count <= 9_000, (case.case_id, count)
+            assert 6_000 <= count <= 10_000, (case.case_id, count)
 
 
 def test_v3_risk_layers_and_conflicts_have_contract_evidence():
@@ -254,3 +254,17 @@ def test_v3_risk_layers_and_conflicts_have_contract_evidence():
             assert conflict.text_b in document.plain_text
             assert conflict.precedence_rule in document.plain_text
             assert conflict.effective_value in (conflict.text_a + conflict.text_b)
+
+
+def test_v3_annexes_and_signature_blocks_look_like_business_documents():
+    from evaluation.datasets.frozen_contracts_v3.annexes import ANNEX_NAMES, build_annexes
+    from evaluation.datasets.frozen_contracts_v3.content import build_contract
+
+    assert all(any("\u4e00" <= char <= "\u9fff" for char in name) for name in ANNEX_NAMES.values())
+    for case in load_cases():
+        expected_rows = {"short": 3, "standard": 4, "long": 6}[case.length_class]
+        assert all(len(annex.rows) == expected_rows for annex in build_annexes(case))
+        document = build_contract(case)
+        signature = next(section for section in document.sections if section.heading == "签署页")
+        assert signature.rows[0] == ("签约方", "授权代表", "签署日期", "盖章位置")
+        assert len(signature.rows) == len(case.parties) + 1
