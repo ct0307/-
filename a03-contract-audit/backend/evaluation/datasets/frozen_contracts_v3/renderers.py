@@ -24,6 +24,7 @@ A4 = fitz.paper_rect("a4")
 MARGIN_X = 50.0
 TOP = 52.0
 BOTTOM = 48.0
+MIN_ANNEX_START_SPACE = 290.0
 
 
 def resolve_cjk_font() -> Path:
@@ -225,7 +226,8 @@ def _text_pdf_bytes(document: ContractDocument) -> bytes:
     for item in document.sections:
         flow.section(item)
     for index, item in enumerate(document.annexes):
-        if index == 0:
+        remaining_height = A4.height - BOTTOM - flow.y
+        if index == 0 or remaining_height < MIN_ANNEX_START_SPACE:
             flow.new_page()
         flow.section(item)
     for number, page in enumerate(flow.pdf, start=1):

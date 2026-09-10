@@ -12,7 +12,7 @@ from zipfile import ZipFile
 import fitz
 from docx import Document
 
-from .annexes import SCENARIO_ALLOWED_ANNEXES
+from .annexes import ANNEX_NAMES, SCENARIO_ALLOWED_ANNEXES
 from .cases import load_cases
 from .content import ContractDocument, build_contract
 from .generate import sha256_file
@@ -59,7 +59,7 @@ def validate_contract_documents(cases: Sequence, documents: Sequence[ContractDoc
             reasons.append(f"{case.case_id} 附件与场景不匹配：{sorted(invalid_annexes)}")
         rendered_types = tuple(
             annex_type for annex_type in case.annex_types
-            if any(annex_type.replace("_", " ").title() in item.heading for item in document.annexes)
+            if any(ANNEX_NAMES[annex_type] in item.heading for item in document.annexes)
         )
         if rendered_types != case.annex_types:
             reasons.append(f"{case.case_id} 正文附件引用不完整")

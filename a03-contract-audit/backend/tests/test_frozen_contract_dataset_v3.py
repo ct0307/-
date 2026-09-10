@@ -183,6 +183,20 @@ def test_v3_render_modes_and_revision_xml(tmp_path):
         assert any(length == 0 for length in text_lengths)
 
 
+def test_v3_pdf_annex_pagination_avoids_sparse_continuation_pages():
+    import fitz
+
+    from evaluation.datasets.frozen_contracts_v3.content import build_contract
+    from evaluation.datasets.frozen_contracts_v3.renderers import _text_pdf_bytes
+
+    cases = {case.case_id: case for case in load_cases()}
+    for case_id in ("F3-014", "F3-037"):
+        data = _text_pdf_bytes(build_contract(cases[case_id]))
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            content_blocks = [block for block in pdf[-1].get_text("blocks") if block[1] < 780]
+            assert max(block[3] for block in content_blocks) >= 400, case_id
+
+
 def test_v3_generation_freezes_50_plus_2_without_overwrite(tmp_path):
     from evaluation.datasets.frozen_contracts_v3.generate import generate_dataset
 
@@ -268,3 +282,12 @@ def test_v3_annexes_and_signature_blocks_look_like_business_documents():
         signature = next(section for section in document.sections if section.heading == "签署页")
         assert signature.rows[0] == ("签约方", "授权代表", "签署日期", "盖章位置")
         assert len(signature.rows) == len(case.parties) + 1
+
+
+def test_v3_validator_accepts_chinese_annex_titles():
+    from evaluation.datasets.frozen_contracts_v3.content import build_contract
+    from evaluation.datasets.frozen_contracts_v3.validate import validate_contract_documents
+
+    cases = load_cases()
+    reasons = validate_contract_documents(cases, [build_contract(case) for case in cases])
+    assert not [reason for reason in reasons if "正文附件引用不完整" in reason]
