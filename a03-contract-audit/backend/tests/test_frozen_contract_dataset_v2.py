@@ -5,11 +5,13 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import fitz
+import pytest
 
 from collections import Counter
 
 from evaluation.datasets.frozen_contracts_v2.cases import load_cases
 from evaluation.datasets.frozen_contracts_v2.content import build_contract
+from evaluation.datasets.frozen_contracts_v2.generate import generate_dataset
 from evaluation.datasets.frozen_contracts_v2.models import load_profile
 from evaluation.datasets.frozen_contracts_v2.ooxml import extract_revision_text
 from evaluation.datasets.frozen_contracts_v2.renderers import (
@@ -18,6 +20,7 @@ from evaluation.datasets.frozen_contracts_v2.renderers import (
     render_scanned_pdf,
     render_text_pdf,
 )
+from evaluation.datasets.frozen_contracts_v2.validate import validate_dataset
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -149,3 +152,22 @@ def test_v2_pdf_render_modes_have_expected_text_layers(tmp_path):
         text_lengths = [len(page.get_text()) for page in pdf]
         assert any(length > 0 for length in text_lengths)
         assert any(length == 0 for length in text_lengths)
+
+
+def test_v2_generation_freezes_50_plus_2_and_rejects_tampering(tmp_path):
+    root = tmp_path / "frozen-v2"
+    result = generate_dataset(root)
+    assert result.valid_count == 50
+    assert result.invalid_count == 2
+    assert result.supplemental_count == 1
+    assert len(result.manifest["files"]) == 53
+    hashes = [row["sha256"] for row in result.manifest["files"]]
+    assert len(hashes) == len(set(hashes))
+    assert validate_dataset(root)["status"] == "passed"
+    with pytest.raises(FileExistsError, match="冻结目录已存在"):
+        generate_dataset(root)
+
+    first = next((root / "contracts" / "valid").iterdir())
+    first.write_bytes(first.read_bytes() + b"tampered")
+    with pytest.raises(ValueError, match="SHA-256"):
+        validate_dataset(root)
