@@ -169,11 +169,16 @@ class _PdfFlow:
         if self.page is None or self.y + height > A4.height - BOTTOM:
             self.new_page()
 
+    def lines_height(self, text: str, size: float, indent: float = 0, bold: bool = False) -> float:
+        width = A4.width - 2 * MARGIN_X - indent
+        line_count = len(_wrap(self.font, text, width, size))
+        return line_count * size * 1.55 + (4 if bold else 2)
+
     def lines(self, text: str, size: float, indent: float = 0, bold: bool = False) -> None:
         width = A4.width - 2 * MARGIN_X - indent
         lines = _wrap(self.font, text, width, size)
         step = size * 1.55
-        self.ensure(len(lines) * step + 4)
+        self.ensure(self.lines_height(text, size, indent, bold))
         assert self.page is not None
         for line in lines:
             self.page.insert_text((MARGIN_X + indent, self.y), line, fontname="CJK", fontsize=size, color=(0, 0, 0))
@@ -207,6 +212,10 @@ class _PdfFlow:
         self.y += 8
 
     def section(self, item: ContractSection) -> None:
+        start_height = self.lines_height(item.heading, 11.5, bold=True)
+        if item.paragraphs:
+            start_height += self.lines_height(item.paragraphs[0], 9.2, indent=14)
+        self.ensure(start_height)
         self.lines(item.heading, 11.5, bold=True)
         for paragraph in item.paragraphs:
             self.lines(paragraph, 9.2, indent=14)
