@@ -203,15 +203,28 @@ def test_v3_pdf_sections_do_not_leave_headings_at_page_bottom():
     from evaluation.datasets.frozen_contracts_v3.content import build_contract
     from evaluation.datasets.frozen_contracts_v3.renderers import _text_pdf_bytes
 
-    cases = {case.case_id: case for case in load_cases()}
-    for case_id in ("F3-014", "F3-036"):
-        document = build_contract(cases[case_id])
+    cases = [case for case in load_cases() if case.format != "docx"]
+    for case in cases:
+        document = build_contract(case)
         headings = {section.heading for section in (*document.sections, *document.annexes)}
         with fitz.open(stream=_text_pdf_bytes(document), filetype="pdf") as pdf:
             for page in pdf:
                 content = [block[4].strip() for block in page.get_text("blocks") if block[1] < 780]
                 orphan = next((heading for heading in headings if content and content[-1].endswith(heading)), None)
-                assert orphan is None, (case_id, orphan)
+                assert orphan is None, (case.case_id, orphan)
+
+
+def test_v3_pdf_signature_tables_keep_all_parties_on_one_page():
+    import fitz
+
+    from evaluation.datasets.frozen_contracts_v3.content import build_contract
+    from evaluation.datasets.frozen_contracts_v3.renderers import _text_pdf_bytes
+
+    for case in (case for case in load_cases() if case.format != "docx"):
+        with fitz.open(stream=_text_pdf_bytes(build_contract(case)), filetype="pdf") as pdf:
+            signature_page = next(page.get_text() for page in pdf if "签约方" in page.get_text())
+            signature_table = signature_page[signature_page.rfind("签约方"):]
+            assert all(party.name in signature_table for party in case.parties), case.case_id
 
 
 def test_v3_generation_freezes_50_plus_2_without_overwrite(tmp_path):

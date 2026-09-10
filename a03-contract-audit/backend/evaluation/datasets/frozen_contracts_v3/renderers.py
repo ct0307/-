@@ -185,19 +185,34 @@ class _PdfFlow:
             self.y += step
         self.y += 4 if bold else 2
 
-    def table(self, rows: tuple[tuple[str, ...], ...]) -> None:
-        if not rows:
-            return
+    def table_layout(self, rows: tuple[tuple[str, ...], ...]):
         columns = max(len(row) for row in rows)
         table_width = A4.width - 2 * MARGIN_X
         column_width = table_width / columns
-        for row_index, row in enumerate(rows):
+        layout = []
+        for row in rows:
             wrapped = [
                 _wrap(self.font, row[column] if column < len(row) else "", column_width - 8, 7.5)
                 for column in range(columns)
             ]
             row_height = max(22.0, max(len(lines) for lines in wrapped) * 10.2 + 8)
-            self.ensure(row_height)
+            layout.append((wrapped, row_height))
+        return columns, column_width, layout
+
+    def table_height(self, rows: tuple[tuple[str, ...], ...]) -> float:
+        if not rows:
+            return 0.0
+        _, _, layout = self.table_layout(rows)
+        return sum(row_height for _, row_height in layout) + 8
+
+    def table(self, rows: tuple[tuple[str, ...], ...]) -> None:
+        if not rows:
+            return
+        columns, column_width, layout = self.table_layout(rows)
+        total_height = sum(row_height for _, row_height in layout) + 8
+        if total_height <= A4.height - TOP - BOTTOM:
+            self.ensure(total_height)
+        for row_index, (wrapped, row_height) in enumerate(layout):
             assert self.page is not None
             for column, lines in enumerate(wrapped):
                 x0 = MARGIN_X + column * column_width
@@ -215,6 +230,12 @@ class _PdfFlow:
         start_height = self.lines_height(item.heading, 11.5, bold=True)
         if item.paragraphs:
             start_height += self.lines_height(item.paragraphs[0], 9.2, indent=14)
+        if item.rows:
+            full_height = self.lines_height(item.heading, 11.5, bold=True)
+            full_height += sum(self.lines_height(paragraph, 9.2, indent=14) for paragraph in item.paragraphs)
+            full_height += self.table_height(item.rows)
+            if full_height <= A4.height - TOP - BOTTOM:
+                start_height = full_height
         self.ensure(start_height)
         self.lines(item.heading, 11.5, bold=True)
         for paragraph in item.paragraphs:
