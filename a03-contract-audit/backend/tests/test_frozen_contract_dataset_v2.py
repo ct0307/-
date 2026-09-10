@@ -3,6 +3,9 @@ from __future__ import annotations
 from hashlib import sha256
 from pathlib import Path
 
+from collections import Counter
+
+from evaluation.datasets.frozen_contracts_v2.cases import load_cases
 from evaluation.datasets.frozen_contracts_v2.models import load_profile
 
 
@@ -35,3 +38,40 @@ def test_v2_profile_is_fixed_and_v1_facts_are_unchanged():
     assert sha256((V1_ROOT / "corpus-profile.json").read_bytes()).hexdigest() == (
         "782ecb750e4aa0f057d495d25ff16a418b339fb4072438da6d8ec93c9ba612c4"
     )
+
+
+def test_v2_cases_contain_real_risks_conflicts_annexes_and_revisions():
+    cases = load_cases()
+
+    assert [case.case_id for case in cases] == [f"F2-{index:03d}" for index in range(1, 51)]
+    assert Counter(case.drafting_style for case in cases) == {
+        "buyer_standard": 6,
+        "supplier_standard": 5,
+        "business_draft": 5,
+        "legal_redline": 4,
+        "model_contract": 5,
+        "online_terms": 3,
+        "framework_order": 4,
+        "master_supplement": 4,
+        "project_conditions": 4,
+        "industry_template": 3,
+        "customer_template": 4,
+        "short_order": 3,
+    }
+    assert Counter(case.risk_level for case in cases) == {
+        "actionable": 28,
+        "negotiated": 14,
+        "baseline": 8,
+    }
+    assert sum(bool(case.annexes) for case in cases) >= 30
+    assert sum(len(case.parties) >= 3 for case in cases) >= 5
+    assert sum(bool(case.conflicts) for case in cases) == 6
+    assert sum(case.revision_set is not None for case in cases) == 4
+    for case in cases:
+        if case.risk_level == "actionable":
+            assert case.risk_clauses
+            assert all(len(clause.text) >= 24 for clause in case.risk_clauses)
+            assert all("建议" not in clause.text and "应当关注" not in clause.text for clause in case.risk_clauses)
+        for conflict in case.conflicts:
+            assert conflict.text_a != conflict.text_b
+            assert conflict.effective_value in (conflict.text_a + conflict.text_b)

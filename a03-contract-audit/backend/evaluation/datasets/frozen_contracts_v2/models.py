@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping
 
 
 EXPECTED_FORMATS = {
@@ -42,6 +42,64 @@ class CorpusProfile:
     formats: Mapping[str, int]
     drafting_styles: Mapping[str, int]
     risk_levels: Mapping[str, int]
+
+
+@dataclass(frozen=True)
+class RiskClause:
+    clause_id: str
+    text: str
+    risk_type: str
+    favored_party: str | None
+    severity: str
+    review_reason: str
+    evidence_location: str
+
+
+@dataclass(frozen=True)
+class ConflictPair:
+    source_a: str
+    text_a: str
+    source_b: str
+    text_b: str
+    precedence_rule: str
+    effective_value: str
+
+
+@dataclass(frozen=True)
+class AnnexSpec:
+    name: str
+    version: str
+    rows: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True)
+class RevisionSet:
+    deleted_text: str
+    inserted_text: str
+    comment: str
+    author: str
+    date: str
+
+
+@dataclass(frozen=True)
+class ContractCase:
+    case_id: str
+    title: str
+    scenario: str
+    contract_type: str
+    format: str
+    render_mode: str
+    document_state: str
+    drafting_style: str
+    risk_level: str
+    primary_roles: tuple[str, ...]
+    parties: tuple[str, ...]
+    truth: Mapping[str, Any]
+    target_pages: int
+    risk_clauses: tuple[RiskClause, ...]
+    conflicts: tuple[ConflictPair, ...]
+    annexes: tuple[AnnexSpec, ...]
+    revision_set: RevisionSet | None
 
 
 def _mapping(payload: object, field: str) -> dict[str, int]:
