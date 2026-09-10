@@ -1,9 +1,19 @@
 """高拟真合成冻结合同集的画像与生成契约。"""
+from collections import Counter
 import json
+from pathlib import Path
 
 import pytest
 
-from evaluation.datasets.frozen_contracts_v1.models import load_profile
+from evaluation.datasets.frozen_contracts_v1.models import load_cases, load_profile
+
+
+DATASET_ROOT = (
+    Path(__file__).parents[1]
+    / "evaluation"
+    / "datasets"
+    / "frozen_contracts_v1"
+)
 
 
 def _write_json(path, payload):
@@ -52,3 +62,36 @@ def test_profile_requires_exact_realistic_distribution(tmp_path):
 
     with pytest.raises(ValueError, match="格式分布"):
         load_profile(path)
+
+
+def test_cases_match_frozen_real_world_profile():
+    profile = load_profile(DATASET_ROOT / "corpus-profile.json")
+    cases = load_cases(DATASET_ROOT / "cases.json")
+
+    assert [case.case_id for case in cases] == [f"FC-{index:03d}" for index in range(1, 51)]
+    assert dict(Counter(case.format for case in cases)) == dict(profile.formats)
+    assert dict(Counter(case.scenario for case in cases)) == dict(profile.scenarios)
+    assert sum(case.primary_roles != ("甲方", "乙方") for case in cases) >= 20
+    assert sum(case.amount_heading != "合同金额" for case in cases) >= 15
+    assert sum(case.truth["amount"] is None for case in cases) >= 10
+    assert sum(case.distributed_fields for case in cases) >= 10
+    assert sum(case.clause_conflict for case in cases) >= 5
+    assert sum(len(case.parties) >= 3 for case in cases) >= 5
+    assert sum(bool(case.related_documents) for case in cases) >= 12
+    assert sum(case.target_pages > 12 for case in cases) >= 10
+    assert all(4 <= case.target_pages <= 30 for case in cases)
+
+
+def test_cases_retain_common_enterprise_drafting_conventions():
+    cases = load_cases(DATASET_ROOT / "cases.json")
+
+    standard_party_labels = sum(
+        case.primary_roles == ("甲方", "乙方") for case in cases
+    )
+    standard_amount_headings = sum(
+        case.amount_heading == "合同金额" for case in cases
+    )
+
+    # 真实企业合同既包含角色化称谓，也大量保留通用的甲乙方和合同金额写法。
+    assert 15 <= standard_party_labels <= 25
+    assert 8 <= standard_amount_headings <= 20
