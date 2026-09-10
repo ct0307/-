@@ -145,6 +145,8 @@ def build_contract(case: ContractCase) -> ContractDocument:
     repeats = 1 if case.length_class == "short" else 3 if case.length_class == "long" else 2
     sections = [ContractSection("订约说明", (profile.opening_pattern,))]
     sections.extend(_section(case, key, ordinal, repeats) for ordinal, key in enumerate(profile.section_order))
+    if case.revision_set is not None:
+        sections.append(ContractSection("法务修订事项", (case.revision_set.deleted_text,)))
     sections.append(ContractSection(
         "合同主体和通知信息",
         tuple(f"{party.role}：{party.name}；地址：{party.address}；{party.contact}。该等信息仅为合成测试数据。" for party in case.parties),

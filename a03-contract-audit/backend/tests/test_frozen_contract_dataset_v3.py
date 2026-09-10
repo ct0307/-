@@ -63,6 +63,20 @@ def test_v3_cases_are_explicit_and_business_complete():
         assert case.title and case.contract_type and case.drafting_style
         assert len(case.parties) >= 2
         assert len({party.role for party in case.parties}) == len(case.parties)
+        assert all(party.name and party.address for party in case.parties)
+        assert case.truth.subject
+        assert case.truth.pricing
+        assert case.truth.duration
+        assert case.truth.payment_terms
+        assert case.truth.delivery
+        assert case.truth.acceptance
+        assert case.truth.termination
+        assert case.annex_types
+
+    source = (DATASET_ROOT / "cases.py").read_text(encoding="utf-8")
+    assert "for index in range" not in source
+    assert "enumerate(" not in source
+    assert source.count("ContractCase(") == 50
 
 
 def test_v3_styles_have_substantive_differences_and_annexes_match_scenarios():
@@ -115,17 +129,51 @@ def test_v3_documents_meet_realistic_length_and_obligation_thresholds():
         paragraphs = [paragraph for section in document.sections for paragraph in section.paragraphs]
         assert len(paragraphs) == len(set(paragraphs)), case.case_id
         assert not hasattr(document, "target_pages")
-        assert all(party.name and party.address for party in case.parties)
-        assert case.truth.subject
-        assert case.truth.pricing
-        assert case.truth.duration
-        assert case.truth.payment_terms
-        assert case.truth.delivery
-        assert case.truth.acceptance
-        assert case.truth.termination
-        assert case.annex_types
 
-    source = (DATASET_ROOT / "cases.py").read_text(encoding="utf-8")
-    assert "for index in range" not in source
-    assert "enumerate(" not in source
-    assert source.count("ContractCase(") == 50
+
+def test_v3_render_modes_and_revision_xml(tmp_path):
+    from zipfile import ZipFile
+
+    import fitz
+
+    from evaluation.datasets.frozen_contracts_v3.content import build_contract
+    from evaluation.datasets.frozen_contracts_v3.ooxml import extract_revision_text
+    from evaluation.datasets.frozen_contracts_v3.renderers import (
+        render_docx,
+        render_mixed_pdf,
+        render_scanned_pdf,
+        render_text_pdf,
+    )
+
+    cases = load_cases()
+    revision_cases = [case for case in cases if case.revision_set]
+    assert len(revision_cases) == 4
+    assert all(case.format == "docx" for case in revision_cases)
+
+    revision_case = revision_cases[0]
+    docx_path = render_docx(build_contract(revision_case), tmp_path / "redline.docx", case=revision_case)
+    with ZipFile(docx_path) as archive:
+        document_xml = archive.read("word/document.xml")
+        settings_xml = archive.read("word/settings.xml")
+        assert b"w:trackRevisions" in settings_xml
+        assert b"w:ins" in document_xml and b"w:del" in document_xml
+        assert b"w:commentRangeStart" in document_xml
+        assert "word/comments.xml" in archive.namelist()
+    assert revision_case.revision_set.inserted_text in extract_revision_text(docx_path, accept_changes=True)
+
+    native = next(case for case in cases if case.format == "text_pdf")
+    scanned = next(case for case in cases if case.render_mode == "scanned")
+    mixed = next(case for case in cases if case.render_mode == "mixed")
+    native_path = render_text_pdf(build_contract(native), tmp_path / "native.pdf")
+    scanned_path = render_scanned_pdf(build_contract(scanned), tmp_path / "scanned.pdf")
+    mixed_path = render_mixed_pdf(build_contract(mixed), tmp_path / "mixed.pdf")
+    with fitz.open(native_path) as pdf:
+        assert pdf.page_count >= 2
+        assert sum(len(page.get_text()) for page in pdf) > 1_000
+    with fitz.open(scanned_path) as pdf:
+        assert sum(len(page.get_text()) for page in pdf) == 0
+        assert all(page.get_images() for page in pdf)
+    with fitz.open(mixed_path) as pdf:
+        text_lengths = [len(page.get_text()) for page in pdf]
+        assert any(length > 0 for length in text_lengths)
+        assert any(length == 0 for length in text_lengths)
