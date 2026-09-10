@@ -2,12 +2,22 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import Path
+from zipfile import ZipFile
+
+import fitz
 
 from collections import Counter
 
 from evaluation.datasets.frozen_contracts_v2.cases import load_cases
 from evaluation.datasets.frozen_contracts_v2.content import build_contract
 from evaluation.datasets.frozen_contracts_v2.models import load_profile
+from evaluation.datasets.frozen_contracts_v2.ooxml import extract_revision_text
+from evaluation.datasets.frozen_contracts_v2.renderers import (
+    render_docx,
+    render_mixed_pdf,
+    render_scanned_pdf,
+    render_text_pdf,
+)
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -97,3 +107,45 @@ def test_v2_rendered_content_contains_declared_evidence_and_distinct_styles():
 
     assert len(style_signatures) == 12
     assert len(set(style_signatures.values())) == 12
+
+
+def test_v2_docx_contains_real_revisions_and_comments(tmp_path):
+    cases = [case for case in load_cases() if case.revision_set]
+    assert len(cases) == 4
+    for case in cases:
+        path = render_docx(build_contract(case), tmp_path / f"{case.case_id}.docx", case=case)
+        with ZipFile(path) as archive:
+            names = set(archive.namelist())
+            document_xml = archive.read("word/document.xml")
+            settings_xml = archive.read("word/settings.xml")
+            rels_xml = archive.read("word/_rels/document.xml.rels")
+            assert b"w:trackRevisions" in settings_xml
+            assert b"w:ins" in document_xml and b"w:del" in document_xml
+            assert b"w:commentRangeStart" in document_xml
+            assert "word/comments.xml" in names
+            assert b"/comments" in rels_xml
+        all_changes = extract_revision_text(path, accept_changes=False)
+        accepted = extract_revision_text(path, accept_changes=True)
+        assert case.revision_set.deleted_text in all_changes
+        assert case.revision_set.deleted_text not in accepted
+        assert case.revision_set.inserted_text in accepted
+
+
+def test_v2_pdf_render_modes_have_expected_text_layers(tmp_path):
+    cases = load_cases()
+    native = next(case for case in cases if case.format == "text_pdf")
+    scanned = next(case for case in cases if case.render_mode == "scanned")
+    mixed = next(case for case in cases if case.render_mode == "mixed")
+
+    native_path = render_text_pdf(build_contract(native), tmp_path / "native.pdf")
+    scan_path = render_scanned_pdf(build_contract(scanned), tmp_path / "scan.pdf")
+    mixed_path = render_mixed_pdf(build_contract(mixed), tmp_path / "mixed.pdf")
+    with fitz.open(native_path) as pdf:
+        assert sum(len(page.get_text()) for page in pdf) > 500
+    with fitz.open(scan_path) as pdf:
+        assert sum(len(page.get_text()) for page in pdf) == 0
+        assert all(page.get_images() for page in pdf)
+    with fitz.open(mixed_path) as pdf:
+        text_lengths = [len(page.get_text()) for page in pdf]
+        assert any(length > 0 for length in text_lengths)
+        assert any(length == 0 for length in text_lengths)
