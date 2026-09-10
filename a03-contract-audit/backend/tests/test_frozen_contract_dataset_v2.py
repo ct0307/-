@@ -6,6 +6,7 @@ from pathlib import Path
 from collections import Counter
 
 from evaluation.datasets.frozen_contracts_v2.cases import load_cases
+from evaluation.datasets.frozen_contracts_v2.content import build_contract
 from evaluation.datasets.frozen_contracts_v2.models import load_profile
 
 
@@ -75,3 +76,24 @@ def test_v2_cases_contain_real_risks_conflicts_annexes_and_revisions():
         for conflict in case.conflicts:
             assert conflict.text_a != conflict.text_b
             assert conflict.effective_value in (conflict.text_a + conflict.text_b)
+
+
+def test_v2_rendered_content_contains_declared_evidence_and_distinct_styles():
+    cases = load_cases()
+    documents = [build_contract(case) for case in cases]
+    style_signatures: dict[str, tuple[str, ...]] = {}
+
+    for case, document in zip(cases, documents, strict=True):
+        assert "履约控制与证据清单" not in document.plain_text
+        for risk in case.risk_clauses:
+            assert risk.text in document.plain_text
+        for conflict in case.conflicts:
+            assert conflict.text_a in document.plain_text
+            assert conflict.text_b in document.plain_text
+        style_signatures.setdefault(
+            case.drafting_style,
+            tuple(section.heading for section in document.sections[:5]),
+        )
+
+    assert len(style_signatures) == 12
+    assert len(set(style_signatures.values())) == 12
