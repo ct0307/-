@@ -23,6 +23,7 @@ class ContractSection:
 class ContractDocument:
     case_id: str
     title: str
+    target_pages: int
     header_lines: tuple[str, ...]
     sections: tuple[ContractSection, ...]
     annexes: tuple[ContractSection, ...]
@@ -327,7 +328,19 @@ BUILDERS: dict[str, ScenarioBuilder] = {
 }
 
 
-def _annexes(case: ContractCase) -> tuple[ContractSection, ...]:
+DETAIL_TOPICS = {
+    "采购、供货与销售": ("规格确认", "需求预测", "生产排期", "出厂检验", "包装标识", "运输交接", "到货清点", "性能验收", "缺陷处置", "备件供应"),
+    "技术、软件与数据服务": ("需求基线", "原型评审", "架构审查", "接口联调", "数据迁移", "安全测试", "性能压测", "上线审批", "缺陷闭环", "运维交接"),
+    "运维、咨询、培训与业务外包": ("任务下达", "人员到岗", "服务排期", "现场管理", "过程记录", "成果提交", "质量抽查", "费用确认", "投诉处理", "退出交接"),
+    "房屋、设备与场地租赁": ("权属核验", "现状查验", "交付清点", "用途管理", "费用抄表", "维修通知", "装修审批", "安全巡查", "保险理赔", "期满返还"),
+    "建设、装修、监理与承揽": ("图纸会审", "材料报验", "样板确认", "施工组织", "隐蔽验收", "进度计量", "设计变更", "安全检查", "竣工资料", "缺陷保修"),
+    "人力资源、保险与员工服务": ("名单确认", "资格核验", "服务预约", "现场实施", "隐私授权", "异常通知", "投诉受理", "费用对账", "资料归档", "终止交接"),
+    "保密、数据处理与知识产权": ("信息分级", "授权审批", "访问控制", "对外披露", "分包管理", "安全事件", "成果登记", "许可记录", "返还删除", "法定留存"),
+    "框架订单、补充协议与多方合作": ("原约定核对", "订单下达", "变更审批", "三方协调", "成果交接", "价款调整", "发票路径", "责任确认", "争议升级", "存续事项"),
+}
+
+
+def _declared_annexes(case: ContractCase) -> tuple[ContractSection, ...]:
     return tuple(
         ContractSection(
             heading=f"附件{index}：{name}",
@@ -338,6 +351,50 @@ def _annexes(case: ContractCase) -> tuple[ContractSection, ...]:
             rows=(("项目", "约定内容", "确认记录"), (name, "按业务事实和验收记录执行", "________")),
         )
         for index, name in enumerate(case.related_documents, start=1)
+    )
+
+
+def _density_annex(
+    case: ContractCase,
+    *,
+    annex_number: int,
+    existing_chars: int,
+) -> ContractSection | None:
+    target_chars = case.target_pages * 300
+    if existing_chars >= target_chars:
+        return None
+
+    role_a = _role(case, 0)
+    role_b = _role(case, 1)
+    topics = DETAIL_TOPICS[case.scenario]
+    evidence_sources = case.related_documents or ("工作联系单", "交付记录", "双方确认单")
+    risks = case.risk_tags or ("履约边界",)
+    rows: list[tuple[str, ...]] = [("序号及控制点", "执行要求", "证据与例外处理")]
+    generated_chars = 0
+    index = 0
+    while existing_chars + generated_chars < target_chars:
+        topic = topics[index % len(topics)]
+        round_number = index // len(topics) + 1
+        evidence = evidence_sources[index % len(evidence_sources)]
+        risk = risks[index % len(risks)]
+        row = (
+            f"{index + 1}. {topic}（第{round_number}阶段）",
+            f"围绕{case.truth['subject']}，{role_a}应及时提供本控制点所需输入和确认，"
+            f"{role_b}应按已确认范围执行、复核并反馈偏差；任何范围或期限变化须保留书面依据。",
+            f"主要凭证为{evidence}及对应往来记录。涉及{risk}时，应记录发生时间、责任意见、"
+            "临时措施和最终处理结果；未完成确认的事项不得直接视为验收合格。",
+        )
+        rows.append(row)
+        generated_chars += sum(len(cell) for cell in row)
+        index += 1
+
+    return ContractSection(
+        heading=f"附件{annex_number}：履约控制与证据清单",
+        paragraphs=(
+            "本清单用于把正文义务落实到可核验的业务动作，不改变正文约定的责任边界。",
+            "表内确认记录可以采用经授权的电子流程；未填写的测试栏位不代表现实项目已经履行。",
+        ),
+        rows=tuple(rows),
     )
 
 
@@ -369,10 +426,26 @@ def build_contract(case: ContractCase) -> ContractDocument:
         *scenario_sections,
         *_legal_sections(case),
     )
+    declared_annexes = _declared_annexes(case)
+    provisional = ContractDocument(
+        case_id=case.case_id,
+        title=case.title,
+        target_pages=case.target_pages,
+        header_lines=header_lines,
+        sections=sections,
+        annexes=declared_annexes,
+    )
+    density_annex = _density_annex(
+        case,
+        annex_number=len(declared_annexes) + 1,
+        existing_chars=len(provisional.plain_text),
+    )
+    annexes = declared_annexes + ((density_annex,) if density_annex else ())
     return ContractDocument(
         case_id=case.case_id,
         title=case.title,
+        target_pages=case.target_pages,
         header_lines=header_lines,
         sections=sections,
-        annexes=_annexes(case),
+        annexes=annexes,
     )

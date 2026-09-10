@@ -5,10 +5,19 @@ import json
 from itertools import combinations
 from pathlib import Path
 
+import fitz
 import pytest
+from docx import Document
 
-from evaluation.datasets.frozen_contracts_v1.models import load_cases, load_profile
 from evaluation.datasets.frozen_contracts_v1.content import build_contract
+from evaluation.datasets.frozen_contracts_v1.models import load_cases, load_profile
+from evaluation.datasets.frozen_contracts_v1.renderers import (
+    ScanProfile,
+    render_docx,
+    render_mixed_pdf,
+    render_scanned_pdf,
+    render_text_pdf,
+)
 
 
 DATASET_ROOT = (
@@ -105,6 +114,10 @@ def test_contract_content_is_realistic_and_driven_by_case_facts():
     documents = [build_contract(case) for case in cases]
 
     assert all(len(document.sections) >= 10 for document in documents)
+    assert all(
+        len(document.plain_text) >= case.target_pages * 300
+        for case, document in zip(cases, documents, strict=True)
+    )
     assert all("合成测试样本，仅用于系统验收" in document.plain_text for document in documents)
     assert sum("甲方：" not in document.plain_text for document in documents) >= 20
     assert sum("合同金额：" not in document.plain_text for document in documents) >= 15
@@ -134,3 +147,51 @@ def test_contract_content_does_not_repeat_one_uniform_template():
     )
 
     assert maximum_similarity < 0.92
+
+
+def test_renderers_create_real_docx_and_three_pdf_modes(tmp_path):
+    cases = load_cases(DATASET_ROOT / "cases.json")
+    document = build_contract(cases[0])
+
+    docx_path = render_docx(document, tmp_path / "sample.docx")
+    text_pdf_path = render_text_pdf(document, tmp_path / "text.pdf")
+    scan_pdf_path = render_scanned_pdf(
+        document,
+        tmp_path / "scan.pdf",
+        profile=ScanProfile.light(),
+    )
+    mixed_pdf_path = render_mixed_pdf(
+        document,
+        tmp_path / "mixed.pdf",
+        profile=ScanProfile.light(),
+    )
+
+    word = Document(docx_path)
+    assert "合成测试样本" in word.paragraphs[0].text
+    assert round(word.sections[0].page_width.mm) == 210
+    assert round(word.sections[0].page_height.mm) == 297
+    assert "PAGE" in word.sections[0].footer._element.xml
+    assert word.tables
+    assert word._element.xml.count('w:type="page"') == document.target_pages - 1
+
+    with fitz.open(text_pdf_path) as pdf:
+        assert pdf.page_count == document.target_pages
+        assert all(page.get_text().strip() for page in pdf)
+        assert "合成测试样本" in pdf[0].get_text()
+    assert text_pdf_path.stat().st_size < 2_000_000
+
+    with fitz.open(scan_pdf_path) as pdf:
+        assert pdf.page_count == document.target_pages
+        assert all(not page.get_text().strip() for page in pdf)
+        assert all(page.get_images(full=True) for page in pdf)
+
+    with fitz.open(mixed_pdf_path) as pdf:
+        text_pages = [bool(page.get_text().strip()) for page in pdf]
+        assert pdf.page_count == document.target_pages
+        assert any(text_pages)
+        assert not all(text_pages)
+        assert all(
+            page.get_images(full=True)
+            for page in pdf
+            if not page.get_text().strip()
+        )
