@@ -10,10 +10,12 @@ import pytest
 from collections import Counter
 
 from evaluation.datasets.frozen_contracts_v2.cases import load_cases
+from evaluation.datasets.frozen_contracts_v2.build_predictions import build_predictions
 from evaluation.datasets.frozen_contracts_v2.content import build_contract
 from evaluation.datasets.frozen_contracts_v2.generate import generate_dataset
 from evaluation.datasets.frozen_contracts_v2.models import load_profile
 from evaluation.datasets.frozen_contracts_v2.ooxml import extract_revision_text
+from evaluation.datasets.frozen_contracts_v2.precheck import evaluate_construction_truth
 from evaluation.datasets.frozen_contracts_v2.renderers import (
     render_docx,
     render_mixed_pdf,
@@ -171,3 +173,20 @@ def test_v2_generation_freezes_50_plus_2_and_rejects_tampering(tmp_path):
     first.write_bytes(first.read_bytes() + b"tampered")
     with pytest.raises(ValueError, match="SHA-256"):
         validate_dataset(root)
+
+
+def test_v2_precheck_is_non_formal_and_reports_risk_layers():
+    truth = [
+        {
+            "case_id": f"F2-00{index}",
+            "risk_level": level,
+            "gold": {"party_a": "甲", "party_b": "乙", "subject": "服务", "amount": None, "duration": "一年", "payment_terms": []},
+        }
+        for index, level in enumerate(("actionable", "negotiated", "baseline"), start=1)
+    ]
+    predictions = {row["case_id"]: dict(row["gold"]) for row in truth}
+    report = evaluate_construction_truth(truth, predictions)
+    assert report["evidence_level"] == "construction_truth_only"
+    assert report["formal_gold"] is False
+    assert report["threshold_claim"] is None
+    assert set(report["by_risk_level"]) == {"actionable", "negotiated", "baseline"}
