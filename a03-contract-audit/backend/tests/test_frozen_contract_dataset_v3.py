@@ -95,6 +95,26 @@ def test_v3_styles_have_substantive_differences_and_annexes_match_scenarios():
             assert annex.columns == ANNEX_SCHEMAS[annex.annex_type]
             assert annex.rows and all(len(row) == len(annex.columns) for row in annex.rows)
             assert annex.columns != ("记录项目", "责任方", "业务凭证")
+
+
+def test_v3_documents_meet_realistic_length_and_obligation_thresholds():
+    from evaluation.datasets.frozen_contracts_v3.content import build_contract
+
+    for case in load_cases():
+        document = build_contract(case)
+        chinese_count = sum("\u4e00" <= char <= "\u9fff" for char in document.plain_text)
+        if case.length_class == "short":
+            assert 1_200 <= chinese_count <= 1_800, case.case_id
+        elif case.length_class == "long":
+            assert chinese_count >= 6_000, case.case_id
+        else:
+            assert chinese_count >= 2_500, case.case_id
+
+        substantive_sections = [section for section in document.sections if section.paragraphs]
+        assert len(substantive_sections) >= 10, case.case_id
+        paragraphs = [paragraph for section in document.sections for paragraph in section.paragraphs]
+        assert len(paragraphs) == len(set(paragraphs)), case.case_id
+        assert not hasattr(document, "target_pages")
         assert all(party.name and party.address for party in case.parties)
         assert case.truth.subject
         assert case.truth.pricing
