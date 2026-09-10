@@ -1,11 +1,14 @@
 """高拟真合成冻结合同集的画像与生成契约。"""
 from collections import Counter
+from difflib import SequenceMatcher
 import json
+from itertools import combinations
 from pathlib import Path
 
 import pytest
 
 from evaluation.datasets.frozen_contracts_v1.models import load_cases, load_profile
+from evaluation.datasets.frozen_contracts_v1.content import build_contract
 
 
 DATASET_ROOT = (
@@ -95,3 +98,39 @@ def test_cases_retain_common_enterprise_drafting_conventions():
     # 真实企业合同既包含角色化称谓，也大量保留通用的甲乙方和合同金额写法。
     assert 15 <= standard_party_labels <= 25
     assert 8 <= standard_amount_headings <= 20
+
+
+def test_contract_content_is_realistic_and_driven_by_case_facts():
+    cases = load_cases(DATASET_ROOT / "cases.json")
+    documents = [build_contract(case) for case in cases]
+
+    assert all(len(document.sections) >= 10 for document in documents)
+    assert all("合成测试样本，仅用于系统验收" in document.plain_text for document in documents)
+    assert sum("甲方：" not in document.plain_text for document in documents) >= 20
+    assert sum("合同金额：" not in document.plain_text for document in documents) >= 15
+
+    for case, document in zip(cases, documents, strict=True):
+        assert tuple(case.parties[:2]) == (
+            case.truth["party_a"],
+            case.truth["party_b"],
+        )
+        assert case.case_id in document.plain_text
+        assert case.price_model not in document.plain_text
+        assert all(party in document.plain_text for party in case.parties)
+        assert case.truth["subject"] in document.plain_text
+        assert all(tag in document.plain_text for tag in case.risk_tags)
+        assert all(name in document.plain_text for name in case.related_documents)
+        if case.clause_conflict:
+            assert "不一致" in document.plain_text
+            assert "优先" in document.plain_text
+
+
+def test_contract_content_does_not_repeat_one_uniform_template():
+    cases = load_cases(DATASET_ROOT / "cases.json")
+    texts = [build_contract(case).plain_text for case in cases]
+    maximum_similarity = max(
+        SequenceMatcher(None, left, right, autojunk=False).ratio()
+        for left, right in combinations(texts, 2)
+    )
+
+    assert maximum_similarity < 0.92
