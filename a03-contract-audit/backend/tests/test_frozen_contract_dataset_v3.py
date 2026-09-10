@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from collections import Counter
+from dataclasses import replace
 from hashlib import sha256
 
 import pytest
@@ -204,3 +205,24 @@ def test_v3_generation_freezes_50_plus_2_without_overwrite(tmp_path):
         generate_dataset(root)
     after = {path: sha256(path.read_bytes()).hexdigest() for path in (v1_cases, v2_cases)}
     assert after == before
+
+
+def test_v3_validator_rejects_sparse_duplicate_or_mismatched_documents():
+    from evaluation.datasets.frozen_contracts_v3.content import ContractDocument, build_contract
+    from evaluation.datasets.frozen_contracts_v3.validate import validate_contract_documents
+
+    cases = load_cases()
+    documents = [build_contract(case) for case in cases]
+
+    sparse = replace(documents[0], sections=documents[0].sections[:1], annexes=())
+    reasons = validate_contract_documents(cases, [sparse, *documents[1:]])
+    assert any("F3-001" in reason and "正文长度" in reason for reason in reasons)
+
+    duplicate = replace(documents[1], sections=documents[0].sections, annexes=documents[0].annexes)
+    reasons = validate_contract_documents(cases, [documents[0], duplicate, *documents[2:]])
+    assert any("正文相似度过高" in reason for reason in reasons)
+
+    mismatched_case = replace(cases[0], annex_types=("data_catalog",))
+    mismatched_document = build_contract(mismatched_case)
+    reasons = validate_contract_documents([mismatched_case], [mismatched_document])
+    assert any("F3-001" in reason and "附件与场景不匹配" in reason for reason in reasons)
