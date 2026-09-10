@@ -4,6 +4,7 @@ from difflib import SequenceMatcher
 import json
 from itertools import combinations
 from pathlib import Path
+import shutil
 
 import fitz
 import pytest
@@ -11,6 +12,8 @@ from docx import Document
 
 from evaluation.datasets.frozen_contracts_v1.content import build_contract
 from evaluation.datasets.frozen_contracts_v1.models import load_cases, load_profile
+from evaluation.datasets.frozen_contracts_v1.generate import generate_dataset
+from evaluation.datasets.frozen_contracts_v1.precheck import evaluate_construction_truth
 from evaluation.datasets.frozen_contracts_v1.renderers import (
     ScanProfile,
     render_docx,
@@ -18,6 +21,7 @@ from evaluation.datasets.frozen_contracts_v1.renderers import (
     render_scanned_pdf,
     render_text_pdf,
 )
+from evaluation.datasets.frozen_contracts_v1.validate import validate_dataset
 
 
 DATASET_ROOT = (
@@ -26,6 +30,12 @@ DATASET_ROOT = (
     / "datasets"
     / "frozen_contracts_v1"
 )
+
+
+@pytest.fixture(scope="module")
+def frozen_dataset(tmp_path_factory):
+    root = tmp_path_factory.mktemp("frozen-contracts") / "v1"
+    return generate_dataset(root)
 
 
 def _write_json(path, payload):
@@ -195,3 +205,70 @@ def test_renderers_create_real_docx_and_three_pdf_modes(tmp_path):
             for page in pdf
             if not page.get_text().strip()
         )
+
+
+def test_generate_freezes_exact_50_plus_2_and_refuses_overwrite(frozen_dataset):
+    assert frozen_dataset.valid_count == 50
+    assert frozen_dataset.invalid_count == 2
+    assert len(frozen_dataset.manifest["files"]) == 53
+    assert all(len(row["sha256"]) == 64 for row in frozen_dataset.manifest["files"])
+
+    batch = json.loads(
+        (frozen_dataset.root / "batch-manifest.json").read_text(encoding="utf-8")
+    )
+    assert sum(row["role"] == "valid" for row in batch["samples"]) == 50
+    assert sum(row["role"] == "invalid" for row in batch["samples"]) == 2
+
+    truth_rows = [
+        json.loads(line)
+        for line in (frozen_dataset.root / "construction-truth.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    review_rows = [
+        json.loads(line)
+        for line in (frozen_dataset.root / "gold-review-template.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(truth_rows) == len(review_rows) == 50
+    assert all("reviewers" not in row for row in truth_rows)
+    assert all(row["review_status"] == "pending_human_review" for row in review_rows)
+
+    with pytest.raises(FileExistsError, match="冻结目录已存在"):
+        generate_dataset(frozen_dataset.root)
+
+
+def test_validator_rejects_hash_tampering(tmp_path, frozen_dataset):
+    copied_root = tmp_path / "tampered"
+    shutil.copytree(frozen_dataset.root, copied_root)
+    first = next((copied_root / "contracts" / "valid").iterdir())
+    first.write_bytes(first.read_bytes() + b"tampered")
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        validate_dataset(copied_root)
+
+
+def test_construction_precheck_never_claims_formal_gold():
+    truth = {
+        "case_id": "FC-001",
+        "file": "contracts/valid/FC-001.docx",
+        "contract_type": "采购合同",
+        "document_kind": "docx",
+        "gold": {
+            "party_a": "甲公司",
+            "party_b": "乙公司",
+            "subject": "设备采购",
+            "amount": "100万元",
+            "duration": "12个月",
+            "payment_terms": ["验收后付款"],
+        },
+    }
+    report = evaluate_construction_truth(
+        [truth],
+        {"FC-001": dict(truth["gold"])},
+    )
+
+    assert report["evidence_level"] == "construction_truth_only"
+    assert report["formal_gold"] is False
+    assert report["threshold_claim"] is None
