@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from collections import Counter
+from hashlib import sha256
+
+import pytest
 
 from evaluation.datasets.frozen_contracts_v3.cases import load_cases
 from evaluation.datasets.frozen_contracts_v3.models import load_profile
@@ -177,3 +180,27 @@ def test_v3_render_modes_and_revision_xml(tmp_path):
         text_lengths = [len(page.get_text()) for page in pdf]
         assert any(length > 0 for length in text_lengths)
         assert any(length == 0 for length in text_lengths)
+
+
+def test_v3_generation_freezes_50_plus_2_without_overwrite(tmp_path):
+    from evaluation.datasets.frozen_contracts_v3.generate import generate_dataset
+
+    v1_cases = BACKEND_ROOT / "evaluation" / "datasets" / "frozen_contracts_v1" / "cases.json"
+    v2_cases = BACKEND_ROOT / "evaluation" / "datasets" / "frozen_contracts_v2" / "cases.py"
+    before = {path: sha256(path.read_bytes()).hexdigest() for path in (v1_cases, v2_cases)}
+    root = tmp_path / "frozen-contracts-v3"
+
+    result = generate_dataset(root)
+
+    assert result.valid_count == 50
+    assert result.invalid_count == 2
+    assert result.supplemental_count == 1
+    assert len(result.manifest["files"]) == 53
+    hashes = [row["sha256"] for row in result.manifest["files"]]
+    assert len(hashes) == len(set(hashes))
+    assert result.manifest["evidence_level"] == "construction_truth_only"
+    assert result.manifest["formal_gold"] is False
+    with pytest.raises(FileExistsError, match="冻结目录已存在"):
+        generate_dataset(root)
+    after = {path: sha256(path.read_bytes()).hexdigest() for path in (v1_cases, v2_cases)}
+    assert after == before
