@@ -226,3 +226,31 @@ def test_v3_validator_rejects_sparse_duplicate_or_mismatched_documents():
     mismatched_document = build_contract(mismatched_case)
     reasons = validate_contract_documents([mismatched_case], [mismatched_document])
     assert any("F3-001" in reason and "附件与场景不匹配" in reason for reason in reasons)
+
+
+def test_v3_contract_lengths_stay_within_realistic_ranges():
+    from evaluation.datasets.frozen_contracts_v3.content import build_contract
+
+    for case in load_cases():
+        count = sum("\u4e00" <= char <= "\u9fff" for char in build_contract(case).plain_text)
+        if case.length_class == "standard":
+            assert 2_500 <= count <= 5_500, (case.case_id, count)
+        elif case.length_class == "long":
+            assert 6_000 <= count <= 9_000, (case.case_id, count)
+
+
+def test_v3_risk_layers_and_conflicts_have_contract_evidence():
+    from evaluation.datasets.frozen_contracts_v3.content import build_contract
+
+    cases = load_cases()
+    assert sum(bool(case.conflicts) for case in cases) == 6
+    for case in cases:
+        document = build_contract(case)
+        if case.risk_level in {"actionable", "negotiated"}:
+            assert "特别责任安排" in document.plain_text, case.case_id
+        for conflict in case.conflicts:
+            assert conflict.text_a != conflict.text_b
+            assert conflict.text_a in document.plain_text
+            assert conflict.text_b in document.plain_text
+            assert conflict.precedence_rule in document.plain_text
+            assert conflict.effective_value in (conflict.text_a + conflict.text_b)

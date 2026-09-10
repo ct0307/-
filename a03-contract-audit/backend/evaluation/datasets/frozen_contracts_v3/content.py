@@ -142,11 +142,22 @@ def _annex_section(index: int, annex: AnnexSpec) -> ContractSection:
 
 def build_contract(case: ContractCase) -> ContractDocument:
     profile = STYLE_PROFILES[case.drafting_style]
-    repeats = 1 if case.length_class == "short" else 3 if case.length_class == "long" else 2
+    repeats = 1 if case.length_class in {"short", "standard"} else 2
     sections = [ContractSection("订约说明", (profile.opening_pattern,))]
     sections.extend(_section(case, key, ordinal, repeats) for ordinal, key in enumerate(profile.section_order))
     if case.revision_set is not None:
         sections.append(ContractSection("法务修订事项", (case.revision_set.deleted_text,)))
+    if case.risk_level == "actionable":
+        sections.append(ContractSection("特别责任安排", (
+            f"就{case.truth.subject}，不利后果发生时，处于弱势的一方仍可能承担明显超出其控制范围的损失、扣款或持续履行责任。双方确认该条款属于高风险商业安排，应在签署前结合保险、责任上限、过错程度和可得救济另行审阅；本合成样本保留该不平衡表达用于系统识别。",
+        )))
+    elif case.risk_level == "negotiated":
+        sections.append(ContractSection("特别责任安排", (
+            f"就{case.truth.subject}产生的直接损失，责任方按其过错和合同约定承担责任；故意、重大过失、知识产权侵权、数据泄露和依法不得限制的责任不适用一般责任上限。双方应先采取合理减损措施，并以可核验记录确定责任范围。",
+        )))
+    for conflict in case.conflicts:
+        sections.append(ContractSection(conflict.source_a, (conflict.text_a,)))
+        sections.append(ContractSection(conflict.source_b, (conflict.text_b, conflict.precedence_rule)))
     sections.append(ContractSection(
         "合同主体和通知信息",
         tuple(f"{party.role}：{party.name}；地址：{party.address}；{party.contact}。该等信息仅为合成测试数据。" for party in case.parties),
