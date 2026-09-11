@@ -313,3 +313,15 @@ class LookupItemCreate(BaseModel):
     category: str   # department / contract_type
     value: str
     sort_order: int = 0
+
+
+class DepartmentScopeUserOut(BaseModel):
+    id: int
+    username: str
+    role: str
+    department: str
+    authorized_departments: list[str]
+
+
+class DepartmentScopeUpdate(BaseModel):
+    departments: list[str] = Field(default_factory=list, max_length=100)

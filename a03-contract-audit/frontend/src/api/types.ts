@@ -6,6 +6,7 @@ export interface LoginResult {
   role: string
   username: string
   department: string
+  authorized_departments: string[]
 }
 
 export interface ContractOut {

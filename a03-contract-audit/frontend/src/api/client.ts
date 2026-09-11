@@ -37,6 +37,7 @@ client.interceptors.response.use(
       localStorage.removeItem('role')
       localStorage.removeItem('username')
       localStorage.removeItem('department')
+      localStorage.removeItem('authorized_departments')
       localStorage.removeItem('qijian-active-audit')
       if (location.pathname !== '/login') {
         location.href = '/login'

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, verify_password
 from app.db.session import get_db
+from app.api.deps import allowed_departments
 from app.models.models import User
 from app.services import audit_log
 
@@ -36,4 +37,11 @@ def login(
         target=user.username, ip=_client_ip(request),
     )
     db.commit()
-    return {"access_token": token, "token_type": "bearer", "role": user.role, "username": user.username, "department": user.department or ""}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "role": user.role,
+        "username": user.username,
+        "department": user.department or "",
+        "authorized_departments": sorted(allowed_departments(user)),
+    }

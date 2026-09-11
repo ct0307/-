@@ -20,6 +20,25 @@ export interface LookupItem {
   sort_order: number
 }
 
+export interface DepartmentScopeUser {
+  id: number
+  username: string
+  role: string
+  department: string
+  authorized_departments: string[]
+}
+
+export function getDepartmentScopeUsers(): Promise<DepartmentScopeUser[]> {
+  return client.get('/admin/users/department-scopes')
+}
+
+export function updateUserDepartments(
+  userId: number,
+  departments: string[],
+): Promise<DepartmentScopeUser> {
+  return client.put(`/admin/users/${userId}/departments`, { departments })
+}
+
 export async function getAccessMatrix(): Promise<{ modules: string[]; roles: AccessRole[] }> {
   if (MOCK_ENABLED.admin) return mockRespond({ modules: ACCESS_MODULES, roles: ACCESS_MATRIX })
   return client.get('/admin/access-matrix')

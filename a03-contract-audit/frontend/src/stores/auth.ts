@@ -8,6 +8,7 @@ export const useAuthStore = defineStore('auth', () => {
   const role = ref<string>(localStorage.getItem('role') || '')
   const username = ref<string>(localStorage.getItem('username') || '')
   const department = ref<string>(localStorage.getItem('department') || '')
+  const authorizedDepartments = ref<string[]>(JSON.parse(localStorage.getItem('authorized_departments') || '[]'))
 
   async function login(user: string, password: string) {
     const res = await loginApi(user, password)
@@ -16,10 +17,12 @@ export const useAuthStore = defineStore('auth', () => {
     role.value = res.role
     username.value = res.username
     department.value = res.department || ''
+    authorizedDepartments.value = res.authorized_departments || [res.department].filter(Boolean)
     localStorage.setItem('token', res.access_token)
     localStorage.setItem('role', res.role)
     localStorage.setItem('username', res.username)
     localStorage.setItem('department', res.department || '')
+    localStorage.setItem('authorized_departments', JSON.stringify(authorizedDepartments.value))
   }
 
   function logout() {
@@ -28,10 +31,12 @@ export const useAuthStore = defineStore('auth', () => {
     role.value = ''
     username.value = ''
     department.value = ''
+    authorizedDepartments.value = []
     localStorage.removeItem('token')
     localStorage.removeItem('role')
     localStorage.removeItem('username')
     localStorage.removeItem('department')
+    localStorage.removeItem('authorized_departments')
   }
 
   function isAuthenticated() {
@@ -44,5 +49,15 @@ export const useAuthStore = defineStore('auth', () => {
     return roles.includes(role.value)
   }
 
-  return { token, role, username, department, login, logout, isAuthenticated, hasRole }
+  return {
+    token,
+    role,
+    username,
+    department,
+    authorizedDepartments,
+    login,
+    logout,
+    isAuthenticated,
+    hasRole,
+  }
 })

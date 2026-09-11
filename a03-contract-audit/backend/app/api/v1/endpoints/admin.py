@@ -7,13 +7,20 @@
 """
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_roles
+from app.api.deps import allowed_departments, require_roles
 from app.db.session import get_db
-from app.models.models import AccessRole, AuditLog, LLMCallLog, User
-from app.schemas.contract import AccessMatrixOut, AccessRoleOut, AuditLogRowOut, LLMCallLogOut
+from app.models.models import AccessRole, AuditLog, LLMCallLog, LookupItem, User
+from app.schemas.contract import (
+    AccessMatrixOut,
+    AccessRoleOut,
+    AuditLogRowOut,
+    DepartmentScopeUpdate,
+    DepartmentScopeUserOut,
+    LLMCallLogOut,
+)
 
 router = APIRouter()
 
@@ -22,6 +29,58 @@ _MODULES = [
     '工作台', '合同审查', '整改跟踪', '多维报表',
     '法规知识库', '规则与模板', '权限与审计',
 ]
+
+
+def _scope_user_out(target: User) -> DepartmentScopeUserOut:
+    return DepartmentScopeUserOut(
+        id=target.id,
+        username=target.username,
+        role=target.role,
+        department=target.department,
+        authorized_departments=sorted(allowed_departments(target)),
+    )
+
+
+@router.get("/users/department-scopes", response_model=list[DepartmentScopeUserOut])
+def get_department_scope_users(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("admin")),
+) -> list[DepartmentScopeUserOut]:
+    return [_scope_user_out(target) for target in db.query(User).order_by(User.username).all()]
+
+
+@router.put("/users/{user_id}/departments", response_model=DepartmentScopeUserOut)
+def update_user_departments(
+    user_id: int,
+    body: DepartmentScopeUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("admin")),
+) -> DepartmentScopeUserOut:
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+    available = {
+        row.value
+        for row in db.query(LookupItem).filter(LookupItem.category == "department").all()
+    }
+    requested = {value.strip() for value in body.departments if value.strip()}
+    unknown = requested - available
+    if unknown:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"未知部门: {', '.join(sorted(unknown))}",
+        )
+    before = sorted(allowed_departments(target))
+    target.authorized_departments_json = json.dumps(sorted(requested), ensure_ascii=False)
+    db.add(AuditLog(
+        user_id=user.id,
+        action="department_scope_update",
+        target=f"user:{target.id}",
+        detail=json.dumps({"before": before, "after": sorted(requested)}, ensure_ascii=False),
+    ))
+    db.commit()
+    db.refresh(target)
+    return _scope_user_out(target)
 
 
 @router.get("/llm-calls", response_model=list[LLMCallLogOut])
