@@ -1,0 +1,29 @@
+{
+  "version": "2.0.0",
+  "valid_count": 50,
+  "invalid_count": 2,
+  "formats": {
+    "docx": 14,
+    "text_pdf": 21,
+    "scanned_or_mixed_pdf": 15
+  },
+  "drafting_styles": {
+    "buyer_standard": 6,
+    "supplier_standard": 5,
+    "business_draft": 5,
+    "legal_redline": 4,
+    "model_contract": 5,
+    "online_terms": 3,
+    "framework_order": 4,
+    "master_supplement": 4,
+    "project_conditions": 4,
+    "industry_template": 3,
+    "customer_template": 4,
+    "short_order": 3
+  },
+  "risk_levels": {
+    "actionable": 28,
+    "negotiated": 14,
+    "baseline": 8
+  }
+}
