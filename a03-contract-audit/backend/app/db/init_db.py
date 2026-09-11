@@ -40,6 +40,9 @@ def init_db() -> None:
 # 开发期轻量补列：create_all 只建表不改已有表结构。SQLite 无 alembic 时，
 # 检测到 risks 缺少新增列则 ADD COLUMN，避免删库。生产（PostgreSQL）走 alembic 迁移。
 _DEV_COLUMNS = {
+    "users": [
+        ("authorized_departments_json", "TEXT DEFAULT '[]' NOT NULL"),
+    ],
     "risks": [
         ("tier", "VARCHAR(8) DEFAULT 'yellow'"),
         ("rag_sources", "TEXT DEFAULT '[]'"),   # RAG 检索溯源：结构化来源列表
@@ -62,6 +65,13 @@ _DEV_COLUMNS = {
         ("upload_idempotency_key", "VARCHAR(128)"),
         ("content_sha256", "VARCHAR(64)"),
         ("audit_generation", "INTEGER DEFAULT 0 NOT NULL"),
+        ("suggested_type", "VARCHAR(64) DEFAULT '' NOT NULL"),
+        ("type_confidence", "FLOAT"),
+        ("type_evidence_json", "TEXT DEFAULT '[]' NOT NULL"),
+        ("type_confirmed_by", "INTEGER"),
+        ("type_confirmed_at", "DATETIME"),
+        ("deleted_at", "DATETIME"),
+        ("deleted_by", "INTEGER"),
     ],
     "audit_batches": [
         ("dimensions_json", "TEXT DEFAULT '[]'"),
@@ -72,6 +82,7 @@ _DEV_COLUMNS = {
         ("result_json", "TEXT DEFAULT '{}' NOT NULL"),
         ("audit_generation", "INTEGER DEFAULT 0 NOT NULL"),
         ("execution_token", "VARCHAR(64)"),
+        ("import_item_id", "INTEGER"),
     ],
     "llm_call_logs": [
         ("audit_job_id", "INTEGER"),
@@ -102,6 +113,14 @@ _DEV_INDEXES = {
         "uq_contracts_uploader_upload_idempotency",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_contracts_uploader_upload_idempotency "
         "ON contracts(uploaded_by, upload_idempotency_key)",
+    ), (
+        "ix_contracts_deleted_at",
+        "CREATE INDEX IF NOT EXISTS ix_contracts_deleted_at ON contracts(deleted_at)",
+    )),
+    "audit_batch_items": ((
+        "ix_audit_batch_items_import_item_id",
+        "CREATE INDEX IF NOT EXISTS ix_audit_batch_items_import_item_id "
+        "ON audit_batch_items(import_item_id)",
     ),),
     "risks": ((
         "ix_risks_audit_job_id",
@@ -145,6 +164,8 @@ def _migrate_dev_columns() -> None:
                     "uq_contracts_uploader_upload_idempotency": {
                         "uploaded_by", "upload_idempotency_key"
                     },
+                    "ix_contracts_deleted_at": {"deleted_at"},
+                    "ix_audit_batch_items_import_item_id": {"import_item_id"},
                     "ix_risks_audit_job_id": {"audit_job_id"},
                     "ix_llm_call_logs_audit_job_id": {"audit_job_id"},
                 }[name]

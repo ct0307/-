@@ -156,6 +156,62 @@ class MergeReadinessTests(unittest.TestCase):
         self.assertIn("support_validation_reason", risk_columns)
         self.assertIn("support_validator_version", risk_columns)
 
+    def test_sqlite_hot_migration_adds_smart_inbox_columns_and_indexes(self):
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "CREATE TABLE users (id INTEGER PRIMARY KEY)"
+                )
+                connection.exec_driver_sql(
+                    "CREATE TABLE contracts ("
+                    "id INTEGER PRIMARY KEY, uploaded_by INTEGER, contract_type VARCHAR(64), "
+                    "created_at DATETIME)"
+                )
+                connection.exec_driver_sql(
+                    "CREATE TABLE audit_batch_items (id INTEGER PRIMARY KEY)"
+                )
+
+            with (
+                patch.object(init_db_module, "engine", engine),
+                patch.object(init_db_module.settings, "DB_BACKEND", "sqlite"),
+            ):
+                init_db_module._migrate_dev_columns()
+
+            db_inspector = inspect(engine)
+            user_columns = {column["name"] for column in db_inspector.get_columns("users")}
+            contract_columns = {
+                column["name"] for column in db_inspector.get_columns("contracts")
+            }
+            item_columns = {
+                column["name"] for column in db_inspector.get_columns("audit_batch_items")
+            }
+            contract_indexes = {
+                index["name"] for index in db_inspector.get_indexes("contracts")
+            }
+            item_indexes = {
+                index["name"] for index in db_inspector.get_indexes("audit_batch_items")
+            }
+
+            self.assertIn("authorized_departments_json", user_columns)
+            self.assertTrue(
+                {
+                    "suggested_type",
+                    "type_confidence",
+                    "type_evidence_json",
+                    "type_confirmed_by",
+                    "type_confirmed_at",
+                    "deleted_at",
+                    "deleted_by",
+                }
+                <= contract_columns
+            )
+            self.assertIn("import_item_id", item_columns)
+            self.assertIn("ix_contracts_deleted_at", contract_indexes)
+            self.assertIn("ix_audit_batch_items_import_item_id", item_indexes)
+        finally:
+            engine.dispose()
+
     def test_finishing_last_pending_risk_completes_manual_review(self):
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)
