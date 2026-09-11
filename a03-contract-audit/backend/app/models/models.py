@@ -29,6 +29,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(16), default="business")  # business/legal/finance/admin
     department: Mapped[str] = mapped_column(String(64), default="")
+    authorized_departments_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -45,6 +46,11 @@ class Contract(Base):
     filename: Mapped[str] = mapped_column(String(255))
     storage_path: Mapped[str] = mapped_column(String(512))  # 私有化本地存储路径
     contract_type: Mapped[str] = mapped_column(String(64), default="")
+    suggested_type: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    type_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    type_evidence_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    type_confirmed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    type_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     department: Mapped[str] = mapped_column(String(64), default="")  # 访问隔离维度
     status: Mapped[str] = mapped_column(String(32), default="uploaded")  # uploaded/parsed/auditing/done
     uploaded_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
@@ -60,6 +66,8 @@ class Contract(Base):
         Boolean, default=False, server_default=false()
     )
     review_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    deleted_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     risks: Mapped[list["Risk"]] = relationship(back_populates="contract")
@@ -102,6 +110,7 @@ class AuditBatchItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     batch_id: Mapped[int] = mapped_column(ForeignKey("audit_batches.id", ondelete="CASCADE"), index=True)
     contract_id: Mapped[int] = mapped_column(ForeignKey("contracts.id"), index=True)
+    import_item_id: Mapped[int | None] = mapped_column(ForeignKey("import_batch_items.id"), nullable=True, index=True)
     filename: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -133,6 +142,57 @@ class AuditBatchItem(Base):
     @property
     def review_reason(self) -> str | None:
         return self.contract.review_reason
+
+
+class ImportBatch(Base):
+    """合同导入收件批次；与审查批次解耦。"""
+
+    __tablename__ = "import_batches"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "idempotency_key", name="uq_import_batches_owner_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(24), default="processing", index=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    ready: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    items: Mapped[list["ImportBatchItem"]] = relationship(
+        back_populates="batch", cascade="all, delete-orphan"
+    )
+
+
+class ImportBatchItem(Base):
+    """导入批次内单份文件的持久状态。"""
+
+    __tablename__ = "import_batch_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("import_batches.id", ondelete="CASCADE"), index=True
+    )
+    contract_id: Mapped[int | None] = mapped_column(
+        ForeignKey("contracts.id"), nullable=True, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    batch: Mapped["ImportBatch"] = relationship(back_populates="items")
+    contract: Mapped["Contract | None"] = relationship(lazy="joined")
 
 
 class Risk(Base):
