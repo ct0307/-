@@ -37,6 +37,20 @@ def request_fingerprint(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def import_batch_request_fingerprint(
+    *, import_items: list[tuple[int, str]], dimensions: list[str] | None
+) -> str:
+    payload = {
+        "import_items": [
+            {"id": item_id, "contract_type": contract_type.strip()}
+            for item_id, contract_type in sorted(import_items)
+        ],
+        "dimensions": normalize_dimensions(dimensions),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _existing_job(
     db: Session,
     *,

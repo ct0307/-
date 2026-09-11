@@ -15,11 +15,12 @@ from celery.signals import worker_ready
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
-from app.models.models import AuditBatchItem, Contract
+from app.models.models import AuditBatchItem, Contract, ImportBatchItem
 from app.llm.base import LLMError
 from app.services.audit.runner import StaleAuditRun, run_audit
 from app.services.batch.service import retry_failed_item, transition_item
 from app.tasks.celery_app import celery_app
+from app.tasks.import_tasks import refresh_import_batch
 
 log = get_logger("audit_task")
 
@@ -170,6 +171,7 @@ def run_contract_audit(
                 item.status = "failed"
                 item.error = "合同不存在"
                 item.finished_at = datetime.now(timezone.utc)
+                _return_import_item_to_ready(db, item)
                 db.commit()
             return {"contract_id": contract_id, "error": "not_found"}
         if item:
@@ -183,6 +185,9 @@ def run_contract_audit(
             batch_item_id=item.id if item else None,
             execution_token=execution_token,
         )
+        if item:
+            _complete_import_item(db, item)
+            db.commit()
         return {
             "contract_id": contract_id,
             "risk_count": result["risk_count"],
@@ -222,6 +227,7 @@ def run_contract_audit(
                 item.attempts = decision.attempts
             else:
                 item.finished_at = datetime.now(timezone.utc)
+                _return_import_item_to_ready(db, item)
         if not should_retry and failure.code != "STALE_AUDIT_RUN" and contract:
             contract.status = "audit_failed"
         db.commit()
@@ -230,3 +236,23 @@ def run_contract_audit(
         raise
     finally:
         db.close()
+
+
+def _complete_import_item(db: Session, item: AuditBatchItem) -> None:
+    if item.import_item_id is None:
+        return
+    source_item = db.get(ImportBatchItem, item.import_item_id)
+    if source_item is None:
+        return
+    source_item.status = "done"
+    refresh_import_batch(source_item.batch)
+
+
+def _return_import_item_to_ready(db: Session, item: AuditBatchItem) -> None:
+    if item.import_item_id is None:
+        return
+    source_item = db.get(ImportBatchItem, item.import_item_id)
+    if source_item is None or source_item.status == "deleted":
+        return
+    source_item.status = "ready"
+    refresh_import_batch(source_item.batch)

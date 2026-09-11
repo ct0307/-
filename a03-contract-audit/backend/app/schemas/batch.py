@@ -42,3 +42,8 @@ class BatchRetryOut(BaseModel):
     batch_id: int
     retried: int
     status: BatchStatus
+
+
+class BatchFromImportRequest(BaseModel):
+    import_item_ids: list[int] = Field(min_length=1, max_length=200)
+    dimensions: list[str] = Field(default_factory=list)
