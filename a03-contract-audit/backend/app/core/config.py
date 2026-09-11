@@ -1,12 +1,16 @@
 """应用配置：全部从环境变量/.env 读取，便于私有化部署与多环境切换。"""
 import os
 from functools import lru_cache
+from hashlib import sha256
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
+
+from app.core.url_security import safe_http_authority
 
 # 项目 backend 目录（config.py 位于 backend/app/core/config.py，上溯 3 层）
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -139,3 +143,45 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def validate_llm_configuration(config: Settings) -> None:
+    """校验模型连接的结构配置，不发起网络请求。"""
+    errors: list[str] = []
+    provider = config.LLM_PROVIDER.strip().lower()
+    if provider not in {"qwen", "deepseek", "openclaw"}:
+        errors.append("LLM_PROVIDER 不受支持")
+
+    endpoint = config.LLM_BASE_URL.strip()
+    try:
+        parsed = urlsplit(endpoint)
+        _ = parsed.port
+    except ValueError:
+        parsed = None
+        errors.append("LLM_BASE_URL 端口无效")
+    if parsed is None or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        errors.append("LLM_BASE_URL 必须是有效的 HTTP(S) 地址")
+    if not config.LLM_MODEL.strip():
+        errors.append("LLM_MODEL 不能为空")
+    if provider == "deepseek" and not config.LLM_API_KEY.strip():
+        errors.append("DeepSeek 模式必须配置 LLM_API_KEY")
+
+    if errors:
+        raise ValueError("模型配置无效：" + "; ".join(errors))
+
+
+def llm_configuration_metadata(config: Settings) -> dict[str, str]:
+    """返回可安全记录的模型配置摘要。"""
+    validate_llm_configuration(config)
+    endpoint = safe_http_authority(config.LLM_BASE_URL.strip())
+    if endpoint is None:
+        raise ValueError("模型配置无效：LLM_BASE_URL 必须是有效的 HTTP(S) 地址")
+    provider = config.LLM_PROVIDER.strip().lower()
+    model = config.LLM_MODEL.strip()
+    fingerprint = sha256(f"{provider}|{endpoint}|{model}".encode()).hexdigest()[:12]
+    return {
+        "llm_provider": provider,
+        "llm_model": model,
+        "llm_endpoint": endpoint,
+        "llm_config_fingerprint": fingerprint,
+    }

@@ -93,6 +93,8 @@ docker compose up -d
 
 ### 方式二：本地开发
 
+首次安装依赖并创建配置：
+
 ```bash
 # 后端（backend 目录）
 python -m venv .venv
@@ -103,9 +105,19 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 # 前端（frontend 目录）
 npm install
-npm run dev                        # http://localhost:5173
+```
 
-# 灌演示数据（可选，幂等可重跑）
+以后从项目根目录统一启动，固定后端 `8000`、前端 `5173`，并显式将前端代理指向本次启动的后端：
+
+```powershell
+.\scripts\dev.ps1
+```
+
+启动器不会结束已存在的进程。任一端口已被占用时会直接拒绝启动并显示占用 PID，避免同时运行多套前后端。修改 `backend/.env` 后必须重启后端，运行中的进程不会自动重新读取模型配置。
+
+灌演示数据（可选，幂等可重跑）：
+
+```bash
 cd backend
 python -m scripts.seed_demo
 ```

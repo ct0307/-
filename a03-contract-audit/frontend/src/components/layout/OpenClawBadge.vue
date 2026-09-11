@@ -5,34 +5,29 @@ import {
   runtimeStatusText,
   type RuntimeStatus,
 } from '@/api/runtime'
+import {
+  createRuntimeStatusState,
+  transitionRuntimeStatus,
+} from '@/utils/runtime-status'
 
-const runtime = ref<RuntimeStatus>({
-  status: 'unknown',
-  checked_at: '',
-  provider: null,
-  model: null,
-  endpoint: null,
-  detail: null,
-})
+const runtimeState = ref(createRuntimeStatusState())
+const runtime = computed(() => runtimeState.value.current)
 const label = computed(() => runtimeStatusText(runtime.value))
 const title = computed(() => {
-  const parts = [runtime.value.detail, runtime.value.endpoint]
+  const parts = [label.value, runtime.value.endpoint]
   return parts.filter(Boolean).join(' · ') || label.value
 })
 let timer: ReturnType<typeof setInterval> | undefined
 
 async function refreshRuntime() {
   try {
-    runtime.value = await getRuntimeStatus()
+    runtimeState.value = transitionRuntimeStatus(runtimeState.value, await getRuntimeStatus())
   } catch {
-    runtime.value = {
-      status: 'unknown',
+    runtimeState.value = transitionRuntimeStatus(runtimeState.value, {
+      status: 'offline',
       checked_at: new Date().toISOString(),
-      provider: null,
-      model: null,
-      endpoint: null,
-      detail: '运行状态接口不可用',
-    }
+      error_code: 'status_unavailable',
+    })
   }
 }
 
@@ -94,8 +89,12 @@ onBeforeUnmount(() => {
 }
 .is-offline .pulse i { background: var(--muted); }
 .is-offline .pulse::after { display: none; }
-.is-unknown .pulse i { background: var(--amber); }
-.is-unknown .pulse::after { display: none; }
+.is-unknown .pulse i,
+.is-checking .pulse i,
+.is-degraded .pulse i { background: var(--amber); }
+.is-unknown .pulse::after,
+.is-checking .pulse::after,
+.is-degraded .pulse::after { display: none; }
 .txt {
   display: flex;
   flex-direction: column;

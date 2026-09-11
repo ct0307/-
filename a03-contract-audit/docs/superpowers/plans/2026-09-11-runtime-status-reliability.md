@@ -17,11 +17,11 @@
 - Modify: `backend/evaluation/runtime_client.py`
 - Modify: `backend/app/services/runtime/status.py`
 
-- [ ] **Step 1: Add failing tests** for timeout, HTTP 401, connection failure, missing model, and successful model response. Assert stable `error_code`, `status`, and sanitized endpoint.
-- [ ] **Step 2: Run `backend/.venv/Scripts/python.exe -m pytest backend/tests/test_runtime_status.py -q` and confirm the new assertions fail against the current broad-exception implementation.
-- [ ] **Step 3: Implement a typed probe result and exception mapping. Use one retry only for timeout/connection errors, cap each request at 10 seconds, and never include API keys or response bodies in `detail`.
-- [ ] **Step 4: Run the same test command and confirm all runtime status tests pass.
-- [ ] **Step 5: Commit as `fix: classify model runtime probe failures`.
+- [x] **Step 1: Add failing tests** for timeout, HTTP 401, connection failure, missing model, and successful model response. Assert stable `error_code`, `status`, and sanitized endpoint.
+- [x] **Step 2: Run `backend/.venv/Scripts/python.exe -m pytest backend/tests/test_runtime_status.py -q` and confirm the new assertions fail against the current broad-exception implementation.
+- [x] **Step 3: Implement a typed probe result and exception mapping. Use one retry only for timeout/connection errors, cap each request at 10 seconds, and never include API keys or response bodies in `detail`.
+- [x] **Step 4: Run the same test command and confirm all runtime status tests pass.
+- [x] **Step 5: Commit as `fix: classify model runtime probe failures`.
 
 ### Task 2: Expose complete runtime and readiness contracts
 
@@ -32,12 +32,12 @@
 - Modify: `backend/tests/test_merge_readiness_unittest.py`
 - Create: `backend/tests/test_health_endpoints.py`
 
-- [ ] **Step 1: Add failing tests** for `GET /health/live` returning 200, `GET /health/ready` returning 200/503, public runtime fields including endpoint/latency/error code, and startup validation rejecting missing DeepSeek API key or model.
-- [ ] **Step 2: Run the focused backend tests and confirm failure because the endpoints/fields/validation do not exist.
-- [ ] **Step 3: Implement `/health/live` and `/health/ready`; keep `/health` backward-compatible as liveness. Add optional response fields (`error_code`, `latency_ms`, `last_success_at`, `endpoint`) while retaining runtime route authentication.
-- [ ] **Step 4: Add provider-aware settings validation that runs only for explicit production/readiness checks and does not print secrets. Keep development SQLite behavior unchanged.
-- [ ] **Step 5: Run the focused backend tests and confirm they pass.
-- [ ] **Step 6: Commit as `feat: add model readiness and health contracts`.
+- [x] **Step 1: Add failing tests** for `GET /health/live` returning 200, `GET /health/ready` returning 200/503, public runtime fields including endpoint/latency/error code, and startup validation rejecting missing DeepSeek API key or model.
+- [x] **Step 2: Run the focused backend tests and confirm failure because the endpoints/fields/validation do not exist.
+- [x] **Step 3: Implement `/health/live` and `/health/ready`; keep `/health` backward-compatible as liveness. Add optional response fields (`error_code`, `latency_ms`, `last_success_at`, `endpoint`) while retaining runtime route authentication.
+- [x] **Step 4: Add provider-aware settings validation that runs only for explicit production/readiness checks and does not print secrets. Keep development SQLite behavior unchanged.
+- [x] **Step 5: Run the focused backend tests and confirm they pass.
+- [x] **Step 6: Commit as `feat: add model readiness and health contracts`.
 
 ### Task 3: Make the frontend status state machine tolerant
 
@@ -49,12 +49,12 @@
 - Create: `frontend/src/utils/runtime-status.ts`
 - Create: `frontend/tests/runtime-status-machine.spec.ts`
 
-- [ ] **Step 1: Add failing unit tests** for `checking`, single failure as `degraded`, consecutive failures as `offline`, recovery to `online`, and safe error text mapping.
-- [ ] **Step 2: Run `npm.cmd --prefix frontend exec playwright test frontend/tests/runtime-status-machine.spec.ts frontend/tests/runtime-status.spec.ts` and confirm failure because the state machine helper does not exist.
-- [ ] **Step 3: Implement the small pure state-machine helper and extend `RuntimeStatus` with optional backend metadata.
-- [ ] **Step 4: Update `OpenClawBadge.vue` to preserve the last online model during one failed poll, show retrying/degraded state, and only show offline after two consecutive failures. Keep the 30-second polling interval and avoid sensitive details.
-- [ ] **Step 5: Run focused frontend tests, then type-check with `npm.cmd --prefix frontend run type-check`.
-- [ ] **Step 6: Commit as `fix: prevent transient runtime outage misreports`.
+- [x] **Step 1: Add failing unit tests** for `checking`, single failure as `degraded`, consecutive failures as `offline`, recovery to `online`, and safe error text mapping.
+- [x] **Step 2: Run `npm.cmd --prefix frontend exec playwright test frontend/tests/runtime-status-machine.spec.ts frontend/tests/runtime-status.spec.ts` and confirm failure because the state machine helper does not exist.
+- [x] **Step 3: Implement the small pure state-machine helper and extend `RuntimeStatus` with optional backend metadata.
+- [x] **Step 4: Update `OpenClawBadge.vue` to preserve the last online model during one failed poll, show retrying/degraded state, and only show offline after two consecutive failures. Keep the 30-second polling interval and avoid sensitive details.
+- [x] **Step 5: Run focused frontend tests, then type-check with `npm.cmd --prefix frontend run type-check`.
+- [x] **Step 6: Commit as `fix: prevent transient runtime outage misreports`.
 
 ### Task 4: Standardize local startup and prevent port drift
 
@@ -63,22 +63,22 @@
 - Modify: `README.md`
 - Create: `scripts/tests/test_dev_script.ps1`
 
-- [ ] **Step 1: Add a script contract test** that checks the launcher fixes frontend port 5173, backend port 8000, honors `VITE_API_PROXY_TARGET`, and refuses an occupied port with an actionable message.
-- [ ] **Step 2: Run the script contract test and confirm failure because no launcher exists.
-- [ ] **Step 3: Implement `scripts/dev.ps1` using existing Python/Vite commands only; do not install packages, kill processes, or overwrite `.env`. The script checks ports before starting and prints the selected backend target.
-- [ ] **Step 4: Update README local-start instructions to use the launcher and document that `.env` changes require backend restart.
-- [ ] **Step 5: Run the script contract test and inspect `git diff --check`.
-- [ ] **Step 6: Commit as `chore: standardize local service startup`.
+- [x] **Step 1: Add a script contract test** that checks the launcher fixes frontend port 5173, backend port 8000, honors `VITE_API_PROXY_TARGET`, and refuses an occupied port with an actionable message.
+- [x] **Step 2: Run the script contract test and confirm failure because no launcher exists.
+- [x] **Step 3: Implement `scripts/dev.ps1` using existing Python/Vite commands only; do not install packages, kill processes, or overwrite `.env`. The script checks ports before starting and prints the selected backend target.
+- [x] **Step 4: Update README local-start instructions to use the launcher and document that `.env` changes require backend restart.
+- [x] **Step 5: Run the script contract test and inspect `git diff --check`.
+- [x] **Step 6: Commit as `chore: standardize local service startup`.
 
 ### Task 5: Full regression and acceptance
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-09-11-runtime-status-reliability-design.md` only if acceptance wording needs correction.
 
-- [ ] **Step 1: Run focused backend and frontend tests for all changed seams.
-- [ ] **Step 2: Start one backend on 8000 and one frontend on 5173 with the launcher, log in using the seeded development account, and verify the badge shows the configured provider/model.
-- [ ] **Step 3: Exercise readiness failure with a temporary process-level endpoint override; verify 503 and a classified error without exposing secrets. Restore the original running configuration.
-- [ ] **Step 4: Run `powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\quality_gate.ps1` from `a03-contract-audit` and require exit code 0.
-- [ ] **Step 5: Run the full Playwright suite with the local site and verify desktop, mobile, online, degraded, offline, and recovery states.
-- [ ] **Step 6: Review `git diff`, `git status --short`, and committed file list; confirm no `.env`, keys, databases, logs, or outputs are tracked.
-- [ ] **Step 7: Commit the final verification/documentation adjustment only when required, then report exact test evidence.
+- [x] **Step 1: Run focused backend and frontend tests for all changed seams.
+- [x] **Step 2: Start one backend and one frontend with the launcher, log in using the seeded development account, and verify the badge shows the configured provider/model. Used isolated ports 8010/5180 because the user's 8000/5173 services were already running.
+- [x] **Step 3: Exercise readiness/preflight failure with a process-level configuration override; verify 503 and a classified error without exposing secrets. Restore a working process-level configuration.
+- [x] **Step 4: Run `powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\quality_gate.ps1` from `a03-contract-audit` and require exit code 0.
+- [x] **Step 5: Run the full Playwright suite with the local site and verify desktop, mobile, online, degraded, offline, checking, and recovery states.
+- [x] **Step 6: Review `git diff`, `git status --short`, and committed file list; confirm no `.env`, keys, databases, logs, or outputs are tracked.
+- [x] **Step 7: Commit the final verification/documentation adjustment only when required, then report exact test evidence.
