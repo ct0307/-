@@ -2,9 +2,14 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $devScript = Join-Path $projectRoot 'scripts\dev.ps1'
+$testSource = Get-Content -LiteralPath $PSCommandPath -Raw
 
 if (-not (Test-Path -LiteralPath $devScript -PathType Leaf)) {
     throw 'Missing scripts/dev.ps1'
+}
+if ($testSource -notmatch 'function\s+Test-FixtureProcess' -or
+    $testSource -notmatch 'Test-FixtureProcess\s+-ProcessId\s+\$frontendParentPid') {
+    throw 'Fixture cleanup must revalidate parent process ownership before taskkill'
 }
 
 $source = Get-Content -LiteralPath $devScript -Raw
@@ -30,6 +35,57 @@ function Get-FreeTcpPort {
     finally {
         $temporaryListener.Stop()
     }
+}
+
+function Test-FixtureProcess {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$FixtureRoot,
+        [Parameter(Mandatory = $true)][string]$FixtureStub
+    )
+
+    $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $processInfo -or [string]::IsNullOrWhiteSpace($processInfo.CommandLine)) {
+        return $false
+    }
+
+    return $processInfo.CommandLine.IndexOf(
+        [System.IO.Path]::GetFullPath($FixtureRoot),
+        [System.StringComparison]::OrdinalIgnoreCase
+    ) -ge 0 -or $processInfo.CommandLine.IndexOf(
+        [System.IO.Path]::GetFullPath($FixtureStub),
+        [System.StringComparison]::OrdinalIgnoreCase
+    ) -ge 0
+}
+
+$unrelatedFixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid())
+if (Test-FixtureProcess -ProcessId $PID -FixtureRoot $unrelatedFixtureRoot `
+    -FixtureStub (Join-Path $unrelatedFixtureRoot 'frontend-stub.ps1')) {
+    throw 'Fixture ownership check must reject an unrelated command line'
+}
+if (Test-FixtureProcess -ProcessId ([int]::MaxValue) -FixtureRoot $projectRoot -FixtureStub $devScript) {
+    throw 'Fixture ownership check must reject a nonexistent process'
+}
+$ownershipProbe = Start-Process -FilePath (Get-Command powershell.exe).Source `
+    -ArgumentList @('-NoProfile', '-Command', "Start-Sleep -Seconds 2 # $unrelatedFixtureRoot") `
+    -WindowStyle Hidden -PassThru
+try {
+    $ownershipDeadline = [DateTime]::UtcNow.AddSeconds(1)
+    do {
+        $ownsProbe = Test-FixtureProcess -ProcessId $ownershipProbe.Id `
+            -FixtureRoot $unrelatedFixtureRoot `
+            -FixtureStub (Join-Path $unrelatedFixtureRoot 'frontend-stub.ps1')
+        if (-not $ownsProbe) {
+            Start-Sleep -Milliseconds 20
+        }
+    } while (-not $ownsProbe -and [DateTime]::UtcNow -lt $ownershipDeadline)
+    if (-not $ownsProbe) {
+        throw 'Fixture ownership check must recognize a matching command line'
+    }
+}
+finally {
+    $ownershipProbe.WaitForExit(3000) | Out-Null
 }
 
 $samePort = Get-FreeTcpPort
@@ -216,10 +272,14 @@ finally {
     $env:PATH = $originalPath
     $env:DEV_TEST_FRONTEND_READY_FILE = $originalFrontendReadyFile
     $env:DEV_TEST_BACKEND_PID_FILE = $originalBackendPidFile
-    if ($null -ne $frontendParentPid -and (Get-Process -Id $frontendParentPid -ErrorAction SilentlyContinue)) {
+    if ($null -ne $frontendParentPid -and
+        (Test-FixtureProcess -ProcessId $frontendParentPid -FixtureRoot $fixtureRoot `
+            -FixtureStub $frontendStub)) {
         & taskkill.exe /PID $frontendParentPid /T /F 2>$null | Out-Null
     }
-    elseif ($null -ne $frontendPid -and (Get-Process -Id $frontendPid -ErrorAction SilentlyContinue)) {
+    elseif ($null -ne $frontendPid -and
+        (Test-FixtureProcess -ProcessId $frontendPid -FixtureRoot $fixtureRoot `
+            -FixtureStub $frontendStub)) {
         & taskkill.exe /PID $frontendPid /T /F 2>$null | Out-Null
     }
     if (Test-Path -LiteralPath $fixtureRoot) {
