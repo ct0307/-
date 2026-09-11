@@ -6,22 +6,34 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.services.runtime.status import RuntimeProbeError
 
 
 def configured_models_url() -> str:
     return f"{settings.LLM_BASE_URL.rstrip('/')}/models"
 
 
-def probe_configured_model() -> dict[str, Any]:
+def _probe_once() -> dict[str, Any]:
     headers = {"Accept": "application/json"}
     if settings.LLM_API_KEY:
         headers["Authorization"] = f"Bearer {settings.LLM_API_KEY}"
-    response = httpx.get(
-        configured_models_url(),
-        headers=headers,
-        timeout=min(float(settings.LLM_TIMEOUT), 10.0),
-    )
-    response.raise_for_status()
+    try:
+        response = httpx.get(
+            configured_models_url(),
+            headers=headers,
+            timeout=min(float(settings.LLM_TIMEOUT), 10.0),
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        code = "auth_failed" if status in {401, 403} else "endpoint_not_found" if status == 404 else "probe_failed"
+        detail = "模型端点鉴权失败" if code == "auth_failed" else "模型端点不存在" if code == "endpoint_not_found" else "模型端点返回错误"
+        raise RuntimeProbeError(code, detail) from None
+    except httpx.TimeoutException:
+        raise RuntimeProbeError("timeout", "模型端点请求超时", retryable=True) from None
+    except httpx.RequestError:
+        raise RuntimeProbeError("network_error", "模型端点网络连接失败", retryable=True) from None
+
     payload = response.json()
     model_ids = {
         str(item.get("id"))
@@ -30,4 +42,14 @@ def probe_configured_model() -> dict[str, Any]:
     }
     if settings.LLM_MODEL in model_ids:
         return {"model": settings.LLM_MODEL}
-    return {}
+    raise RuntimeProbeError("model_not_found", "配置的模型未在端点中找到")
+
+
+def probe_configured_model() -> dict[str, Any]:
+    for attempt in range(2):
+        try:
+            return _probe_once()
+        except RuntimeProbeError as exc:
+            if not exc.retryable or attempt == 1:
+                raise
+    raise AssertionError("unreachable")

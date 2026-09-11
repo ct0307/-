@@ -1,5 +1,5 @@
 """真实模型运行端点健康状态契约。"""
-from app.services.runtime.status import probe_runtime, sanitize_endpoint
+from app.services.runtime.status import RuntimeProbeError, probe_runtime, sanitize_endpoint
 
 
 def test_runtime_is_offline_when_health_request_fails():
@@ -10,6 +10,31 @@ def test_runtime_is_offline_when_health_request_fails():
 
     assert result.status == "offline"
     assert result.checked_at is not None
+
+
+def test_runtime_preserves_classified_probe_failure():
+    def failed_probe():
+        raise RuntimeProbeError("timeout", "模型端点请求超时", retryable=True)
+
+    result = probe_runtime(
+        failed_probe,
+        provider="deepseek",
+        endpoint="https://api.deepseek.com/v1?api_key=secret",
+    )
+
+    assert result.status == "offline"
+    assert result.error_code == "timeout"
+    assert result.detail == "模型端点请求超时"
+    assert result.endpoint == "https://api.deepseek.com/v1"
+
+
+def test_runtime_maps_unclassified_failure_without_exposing_exception():
+    result = probe_runtime(lambda: (_ for _ in ()).throw(RuntimeError("secret-token")))
+
+    assert result.status == "offline"
+    assert result.error_code == "probe_failed"
+    assert result.detail == "模型端点探测失败"
+    assert "secret-token" not in (result.detail or "")
 
 
 def test_runtime_is_online_only_after_successful_probe():

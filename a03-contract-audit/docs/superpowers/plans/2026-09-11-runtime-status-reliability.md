@@ -17,11 +17,11 @@
 - Modify: `backend/evaluation/runtime_client.py`
 - Modify: `backend/app/services/runtime/status.py`
 
-- [ ] **Step 1: Add failing tests** for timeout, HTTP 401, connection failure, missing model, and successful model response. Assert stable `error_code`, `status`, and sanitized endpoint.
-- [ ] **Step 2: Run `backend/.venv/Scripts/python.exe -m pytest backend/tests/test_runtime_status.py -q` and confirm the new assertions fail against the current broad-exception implementation.
-- [ ] **Step 3: Implement a typed probe result and exception mapping. Use one retry only for timeout/connection errors, cap each request at 10 seconds, and never include API keys or response bodies in `detail`.
-- [ ] **Step 4: Run the same test command and confirm all runtime status tests pass.
-- [ ] **Step 5: Commit as `fix: classify model runtime probe failures`.
+- [x] **Step 1: Add failing tests** for timeout, HTTP 401, connection failure, missing model, and successful model response. Assert stable `error_code`, `status`, and sanitized endpoint.
+- [x] **Step 2: Run `backend/.venv/Scripts/python.exe -m pytest backend/tests/test_runtime_status.py -q` and confirm the new assertions fail against the current broad-exception implementation.
+- [x] **Step 3: Implement a typed probe result and exception mapping. Use one retry only for timeout/connection errors, cap each request at 10 seconds, and never include API keys or response bodies in `detail`.
+- [x] **Step 4: Run the same test command and confirm all runtime status tests pass.
+- [x] **Step 5: Commit as `fix: classify model runtime probe failures`.
 
 ### Task 2: Expose complete runtime and readiness contracts
 
