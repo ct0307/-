@@ -45,6 +45,25 @@ def dispatch_audit_item(item: AuditBatchItem, dimensions: list[str]) -> str:
     return dispatch_audit_ids(item.contract_id, dimensions, item.id)
 
 
+def dispatch_import_item(item_id: int) -> str:
+    """按持久导入项标识派发解析任务。"""
+    if settings.AUDIT_ASYNC:
+        from app.tasks.import_tasks import parse_import_item
+
+        task = parse_import_item.delay(item_id)
+        return str(task.id)
+
+    task_id = f"local-import:{uuid.uuid4().hex}"
+
+    def run() -> None:
+        from app.tasks.import_tasks import parse_import_item
+
+        parse_import_item.run(item_id)
+
+    _local_executor.submit(run)
+    return task_id
+
+
 def recover_local_audit_items(
     *,
     session_factory: Callable = SessionLocal,

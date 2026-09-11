@@ -7,7 +7,7 @@ celery_app = Celery(
     "a03",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.audit_tasks"],
+    include=["app.tasks.audit_tasks", "app.tasks.import_tasks"],
 )
 
 celery_app.conf.update(
