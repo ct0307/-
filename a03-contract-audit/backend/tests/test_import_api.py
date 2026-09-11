@@ -125,3 +125,37 @@ def test_confirm_retry_remove_and_delete_have_distinct_semantics(monkeypatch, tm
     failed_contract = db.get(ImportBatchItem, parse_failed_id).contract
     assert failed_contract.deleted_at is not None
     assert db.query(AuditLog).filter(AuditLog.action == "contract_draft_delete").count() == 1
+
+
+def test_create_import_isolates_one_invalid_file_in_a_fifty_two_file_batch(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda item_id: f"task-{item_id}")
+    samples = [
+        ("采购", "采购服务器设备"),
+        ("开发", "交付软件源代码"),
+        ("劳动", "约定劳动关系与试用期"),
+        ("租赁", "出租方与承租方约定租赁期限"),
+        ("扫描", "双方经协商一致订立本文件"),
+    ]
+    files = [
+        _file(f"{label}合同-{index:02d}.txt", text.encode("utf-8"))
+        for index in range(51)
+        for label, text in [samples[index % len(samples)]]
+    ]
+    files.append(_file("病毒.exe", b"bad"))
+
+    result = imports.create_import(
+        files=files,
+        idempotency_key="fifty-two-import-files",
+        department="法务部",
+        db=db,
+        user=legal,
+    )
+
+    assert result.total == 52
+    assert len(result.items) == 52
+    assert sum(item.contract_id is not None for item in result.items) == 51
+    assert sum(item.error_code == "UNSUPPORTED_FILE_TYPE" for item in result.items) == 1
+    assert db.query(Contract).count() == 51

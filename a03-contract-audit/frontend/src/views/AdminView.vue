@@ -2,9 +2,18 @@
 // 权限与审计（仅 admin）：角色权限矩阵 + 操作审计日志 + LLM 调用记录。
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getAccessMatrix, getAuditLogs, getLlmCalls, getLookups, createLookup, deleteLookup } from '@/api/admin'
+import {
+  createLookup,
+  deleteLookup,
+  getAccessMatrix,
+  getAuditLogs,
+  getDepartmentScopeUsers,
+  getLlmCalls,
+  getLookups,
+  updateUserDepartments,
+} from '@/api/admin'
 import type { AccessRole, AuditLogRow, LlmCallRow, Perm } from '@/mock/admin'
-import type { LookupItem } from '@/api/admin'
+import type { DepartmentScopeUser, LookupItem } from '@/api/admin'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
 const modules = ref<string[]>([])
@@ -36,7 +45,7 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(() => { load(); loadLookups() })
+onMounted(() => { load(); loadLookups(); loadDepartmentScopes() })
 
 const filteredLogs = computed(() => {
   const kw = keyword.value.trim()
@@ -102,6 +111,35 @@ const ctypes = ref<LookupItem[]>([])
 const newDept = ref('')
 const newCtype = ref('')
 const lookupLoading = ref(false)
+const scopeUsers = ref<DepartmentScopeUser[]>([])
+const scopeDrafts = ref<Record<number, string[]>>({})
+const scopeSavingId = ref<number | null>(null)
+
+async function loadDepartmentScopes() {
+  try {
+    scopeUsers.value = (await getDepartmentScopeUsers())
+      .filter((user) => ['legal', 'finance'].includes(user.role))
+    scopeDrafts.value = Object.fromEntries(
+      scopeUsers.value.map((user) => [user.id, [...user.authorized_departments]]),
+    )
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '授权部门加载失败')
+  }
+}
+
+async function saveDepartmentScope(user: DepartmentScopeUser) {
+  scopeSavingId.value = user.id
+  try {
+    const updated = await updateUserDepartments(user.id, scopeDrafts.value[user.id] ?? [])
+    scopeUsers.value = scopeUsers.value.map((item) => item.id === user.id ? updated : item)
+    scopeDrafts.value[user.id] = [...updated.authorized_departments]
+    ElMessage.success('授权部门已更新')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '授权部门更新失败')
+  } finally {
+    scopeSavingId.value = null
+  }
+}
 
 async function loadLookups() {
   lookupLoading.value = true
@@ -359,6 +397,41 @@ function exportCsv() {
       </el-tab-pane>
       <!-- ── Tab 4：基础配置 ── -->
       <el-tab-pane label="基础配置" name="config">
+        <el-card shadow="never" class="scope-panel">
+          <template #header>
+            <div class="panel-head">
+              <span>用户部门授权</span>
+              <el-tag size="small" type="info">{{ scopeUsers.length }} 个审查账号</el-tag>
+            </div>
+          </template>
+          <el-empty v-if="!scopeUsers.length" description="暂无可配置的法务或财务账号" />
+          <div v-else class="scope-list">
+            <div v-for="user in scopeUsers" :key="user.id" class="scope-row">
+              <div class="scope-user">
+                <strong>{{ user.username }}</strong>
+                <span>{{ user.role === 'legal' ? '法务' : '财务' }} · 默认 {{ user.department }}</span>
+              </div>
+              <el-select
+                v-model="scopeDrafts[user.id]"
+                multiple
+                filterable
+                collapse-tags
+                :max-collapse-tags="3"
+                :aria-label="`${user.username} 的授权部门`"
+                placeholder="请选择授权部门"
+              >
+                <el-option v-for="department in depts" :key="department.id" :label="department.value" :value="department.value" />
+              </el-select>
+              <el-button
+                type="primary"
+                plain
+                :loading="scopeSavingId === user.id"
+                :aria-label="`保存 ${user.username} 的部门授权`"
+                @click="saveDepartmentScope(user)"
+              >保存</el-button>
+            </div>
+          </div>
+        </el-card>
         <div class="config-grid" v-loading="lookupLoading">
           <!-- 业务部门 -->
           <el-card shadow="never">
@@ -527,6 +600,19 @@ function exportCsv() {
   grid-template-columns: 1fr 1fr;
   gap: 20px;
 }
+.scope-panel { margin-bottom: 16px; }
+.scope-list { display: flex; flex-direction: column; }
+.scope-row {
+  display: grid;
+  grid-template-columns: minmax(150px, .6fr) minmax(260px, 1.4fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.scope-row:last-child { border-bottom: 0; }
+.scope-user strong { display: block; color: var(--ivory); font-size: 13px; }
+.scope-user span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
 .lookup-add {
   display: flex;
   gap: 8px;
@@ -554,5 +640,6 @@ function exportCsv() {
 @media (max-width: 1180px) {
   .llm-stats { grid-template-columns: 1fr 1fr; }
   .config-grid { grid-template-columns: 1fr; }
+  .scope-row { grid-template-columns: 1fr; }
 }
 </style>
