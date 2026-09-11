@@ -162,7 +162,7 @@ def test_model_configuration_metadata_is_stable_and_redacted():
     assert "private" not in repr(metadata)
 
 
-def test_readiness_reuses_runtime_cache(monkeypatch):
+def test_preflight_readiness_forces_a_fresh_runtime_probe(monkeypatch):
     calls: list[dict] = []
 
     def cached_status(**kwargs):
@@ -174,4 +174,4 @@ def test_readiness_reuses_runtime_cache(monkeypatch):
     checks = main_module.collect_readiness()
 
     assert checks["model"]["ready"] is True
-    assert calls == [{}]
+    assert calls == [{"force_refresh": True}]

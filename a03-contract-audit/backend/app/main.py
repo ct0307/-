@@ -81,7 +81,11 @@ def collect_readiness(*, refresh_model: bool = True) -> dict[str, dict[str, obje
 
     try:
         validate_llm_configuration(settings)
-        runtime = _get_cached_runtime_status() if refresh_model else _get_runtime_status_snapshot()
+        runtime = (
+            _get_cached_runtime_status(force_refresh=True)
+            if refresh_model
+            else _get_runtime_status_snapshot()
+        )
         model = {"ready": runtime.status == "online", "status": runtime.status}
         if runtime.status != "online":
             model["error_code"] = runtime.error_code or "probe_failed"
