@@ -67,6 +67,11 @@ function Stop-StartedProcess([System.Diagnostics.Process]$Process) {
     }
 }
 
+if ($BackendPort -eq $FrontendPort) {
+    Write-Output 'BackendPort and FrontendPort must be different. Choose a separate port for each service.'
+    exit 2
+}
+
 Assert-PortAvailable $BackendPort
 Assert-PortAvailable $FrontendPort
 
@@ -100,7 +105,7 @@ try {
 
     $env:VITE_API_PROXY_TARGET = $backendTarget
     $frontendProcess = Start-Process -FilePath $npm.Source `
-        -ArgumentList @('run', 'dev', '--', '--host', '127.0.0.1', '--port', "$FrontendPort") `
+        -ArgumentList @('run', 'dev', '--', '--host', '127.0.0.1', '--port', "$FrontendPort", '--strictPort') `
         -WorkingDirectory $frontendRoot -WindowStyle Hidden -PassThru
 
     $deadline = [DateTime]::UtcNow.Add($startupTimeout)
