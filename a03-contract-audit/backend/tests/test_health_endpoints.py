@@ -143,6 +143,18 @@ def test_model_configuration_requires_model_name():
         validate_llm_configuration(config)
 
 
+def test_model_configuration_rejects_invalid_url_port():
+    config = Settings(
+        _env_file=None,
+        LLM_PROVIDER="qwen",
+        LLM_BASE_URL="http://localhost:not-a-port/v1",
+        LLM_MODEL="qwen2.5:14b",
+    )
+
+    with pytest.raises(ValueError, match="端口"):
+        validate_llm_configuration(config)
+
+
 def test_model_configuration_metadata_is_stable_and_redacted():
     config = Settings(
         _env_file=None,

@@ -1,8 +1,11 @@
 import threading
 import time
 
+import pytest
+
 from app.api.v1.endpoints import runtime
 from app.api.v1.endpoints.runtime import PublicRuntimeStatus
+from app.services.runtime.status import RuntimeStatus
 
 
 def test_expired_runtime_cache_does_not_hold_lock_during_probe(monkeypatch):
@@ -53,3 +56,31 @@ def test_runtime_snapshot_marks_expired_success_as_degraded(monkeypatch):
     assert snapshot.status == "degraded"
     assert snapshot.model == "deepseek-v4-pro"
     assert snapshot.error_code == "status_stale"
+
+
+def test_runtime_refresh_recovers_after_unexpected_probe_exception(monkeypatch):
+    calls = 0
+
+    def flaky_probe(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("unexpected")
+        return RuntimeStatus(
+            status="online",
+            checked_at="2026-09-11T10:00:00Z",
+            provider="deepseek",
+            model="deepseek-v4-pro",
+        )
+
+    monkeypatch.setattr(runtime, "probe_runtime", flaky_probe)
+    runtime._runtime_status_cache.clear()
+    runtime._runtime_status_cache.update({"expires_at": 0.0, "value": None})
+    runtime._runtime_status_refreshing = False
+
+    with pytest.raises(RuntimeError, match="unexpected"):
+        runtime._get_cached_runtime_status(now=10)
+    recovered = runtime._get_cached_runtime_status(now=11)
+
+    assert recovered.status == "online"
+    assert calls == 2

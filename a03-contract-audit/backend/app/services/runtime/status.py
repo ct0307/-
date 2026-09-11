@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Callable, Literal, Mapping
-from urllib.parse import urlsplit, urlunsplit
+
+from app.core.url_security import safe_http_authority
 
 
 RuntimeState = Literal["checking", "online", "degraded", "offline", "unknown"]
@@ -34,14 +35,7 @@ class RuntimeStatus:
 
 
 def sanitize_endpoint(endpoint: str | None) -> str | None:
-    if not endpoint:
-        return None
-    parsed = urlsplit(endpoint)
-    hostname = parsed.hostname or ""
-    if not hostname:
-        return None
-    port = f":{parsed.port}" if parsed.port is not None else ""
-    return urlunsplit((parsed.scheme, f"{hostname}{port}", "", "", ""))
+    return safe_http_authority(endpoint)
 
 
 def probe_runtime(

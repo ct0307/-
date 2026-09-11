@@ -74,32 +74,36 @@ def _get_cached_runtime_status(
             return PublicRuntimeStatus(status="checking", checked_at=datetime.now(timezone.utc).isoformat())
         _runtime_status_refreshing = True
 
-    internal = probe_runtime(
-        probe_configured_model,
-        provider=settings.LLM_PROVIDER,
-        endpoint=settings.LLM_BASE_URL,
-    )
-
-    with _runtime_status_lock:
-        last_success_at = _runtime_status_cache.get("last_success_at")
-        if internal.status == "online":
-            last_success_at = internal.checked_at
-            _runtime_status_cache["last_success_at"] = last_success_at
-        public = PublicRuntimeStatus(
-            status=internal.status,
-            checked_at=internal.checked_at,
-            provider=internal.provider,
-            model=internal.model,
-            endpoint=internal.endpoint,
-            detail=internal.detail,
-            error_code=internal.error_code,
-            latency_ms=internal.latency_ms,
-            last_success_at=last_success_at if isinstance(last_success_at, str) else None,
+    try:
+        internal = probe_runtime(
+            probe_configured_model,
+            provider=settings.LLM_PROVIDER,
+            endpoint=settings.LLM_BASE_URL,
         )
-        _runtime_status_cache["value"] = public
-        _runtime_status_cache["expires_at"] = current + _CACHE_TTL_SECONDS
-        _runtime_status_refreshing = False
-        return public
+        with _runtime_status_lock:
+            last_success_at = _runtime_status_cache.get("last_success_at")
+            if internal.status == "online":
+                last_success_at = internal.checked_at
+                _runtime_status_cache["last_success_at"] = last_success_at
+            public = PublicRuntimeStatus(
+                status=internal.status,
+                checked_at=internal.checked_at,
+                provider=internal.provider,
+                model=internal.model,
+                endpoint=internal.endpoint,
+                detail=internal.detail,
+                error_code=internal.error_code,
+                latency_ms=internal.latency_ms,
+                last_success_at=last_success_at if isinstance(last_success_at, str) else None,
+            )
+            _runtime_status_cache["value"] = public
+            _runtime_status_cache["expires_at"] = current + _CACHE_TTL_SECONDS
+            _runtime_status_refreshing = False
+            return public
+    except BaseException:
+        with _runtime_status_lock:
+            _runtime_status_refreshing = False
+        raise
 
 
 @router.get("/status", response_model=PublicRuntimeStatus)

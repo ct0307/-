@@ -66,3 +66,7 @@ def test_endpoint_label_removes_credentials_query_and_fragment():
 
 def test_endpoint_label_does_not_expose_secret_path_segments():
     assert sanitize_endpoint("https://api.example.com/tenant/secret-token/v1") == "https://api.example.com"
+
+
+def test_endpoint_label_formats_ipv6_authority_without_path():
+    assert sanitize_endpoint("http://[::1]:11434/private/token") == "http://[::1]:11434"

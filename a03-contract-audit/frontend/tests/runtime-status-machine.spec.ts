@@ -74,3 +74,16 @@ test('transitions from degraded to offline and immediately back online', () => {
   expect(recovered.current.status).toBe('online')
   expect(recovered.consecutiveFailures).toBe(0)
 })
+
+test('does not count checking responses as probe failures', () => {
+  const checking: RuntimeStatus = {
+    status: 'checking',
+    checked_at: '2026-09-11T10:00:00Z',
+  }
+
+  const once = transitionRuntimeStatus(createRuntimeStatusState(), checking)
+  const twice = transitionRuntimeStatus(once, checking)
+
+  expect(twice.current.status).toBe('checking')
+  expect(twice.consecutiveFailures).toBe(0)
+})
