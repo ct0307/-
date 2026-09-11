@@ -24,7 +24,6 @@ A4 = fitz.paper_rect("a4")
 MARGIN_X = 50.0
 TOP = 52.0
 BOTTOM = 48.0
-MIN_ANNEX_START_SPACE = 290.0
 
 
 def resolve_cjk_font() -> Path:
@@ -243,6 +242,35 @@ class _PdfFlow:
         self.table(item.rows)
 
 
+def _balanced_annex_breaks(flow: _PdfFlow, annexes: tuple[ContractSection, ...]) -> set[int]:
+    heights = [
+        flow.lines_height(annex.heading, 11.5, bold=True)
+        + sum(flow.lines_height(paragraph, 9.2, indent=14) for paragraph in annex.paragraphs)
+        + flow.table_height(annex.rows)
+        for annex in annexes
+    ]
+    capacity = A4.height - TOP - BOTTOM
+    plans: list[tuple[list[int], list[float]] | None] = [None] * (len(annexes) + 1)
+    plans[0] = ([], [])
+    for end in range(1, len(annexes) + 1):
+        candidates = []
+        for start in range(end):
+            previous = plans[start]
+            group_height = sum(heights[start:end])
+            if previous is None or group_height > capacity:
+                continue
+            breaks, page_heights = previous
+            candidate_breaks = [*breaks, start]
+            candidate_heights = [*page_heights, group_height]
+            spread = max(candidate_heights) - min(candidate_heights)
+            candidates.append(((len(candidate_heights), spread, max(candidate_heights)), candidate_breaks, candidate_heights))
+        if candidates:
+            _, breaks, page_heights = min(candidates, key=lambda item: item[0])
+            plans[end] = (breaks, page_heights)
+    plan = plans[-1]
+    return set(plan[0]) if plan is not None else {0}
+
+
 def _text_pdf_bytes(document: ContractDocument) -> bytes:
     flow = _PdfFlow(document)
     flow.new_page()
@@ -255,9 +283,9 @@ def _text_pdf_bytes(document: ContractDocument) -> bytes:
     flow.new_page()
     for item in document.sections:
         flow.section(item)
+    annex_breaks = _balanced_annex_breaks(flow, document.annexes)
     for index, item in enumerate(document.annexes):
-        remaining_height = A4.height - BOTTOM - flow.y
-        if index == 0 or remaining_height < MIN_ANNEX_START_SPACE:
+        if index in annex_breaks:
             flow.new_page()
         flow.section(item)
     for number, page in enumerate(flow.pdf, start=1):
