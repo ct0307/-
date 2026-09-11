@@ -75,10 +75,10 @@
 **Files:**
 - Modify: `docs/superpowers/specs/2026-09-11-runtime-status-reliability-design.md` only if acceptance wording needs correction.
 
-- [ ] **Step 1: Run focused backend and frontend tests for all changed seams.
-- [ ] **Step 2: Start one backend on 8000 and one frontend on 5173 with the launcher, log in using the seeded development account, and verify the badge shows the configured provider/model.
-- [ ] **Step 3: Exercise readiness failure with a temporary process-level endpoint override; verify 503 and a classified error without exposing secrets. Restore the original running configuration.
-- [ ] **Step 4: Run `powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\quality_gate.ps1` from `a03-contract-audit` and require exit code 0.
-- [ ] **Step 5: Run the full Playwright suite with the local site and verify desktop, mobile, online, degraded, offline, and recovery states.
-- [ ] **Step 6: Review `git diff`, `git status --short`, and committed file list; confirm no `.env`, keys, databases, logs, or outputs are tracked.
-- [ ] **Step 7: Commit the final verification/documentation adjustment only when required, then report exact test evidence.
+- [x] **Step 1: Run focused backend and frontend tests for all changed seams.
+- [x] **Step 2: Start one backend and one frontend with the launcher, log in using the seeded development account, and verify the badge shows the configured provider/model. Used isolated ports 8010/5180 because the user's 8000/5173 services were already running.
+- [x] **Step 3: Exercise readiness/preflight failure with a process-level configuration override; verify 503 and a classified error without exposing secrets. Restore a working process-level configuration.
+- [x] **Step 4: Run `powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\quality_gate.ps1` from `a03-contract-audit` and require exit code 0.
+- [x] **Step 5: Run the full Playwright suite with the local site and verify desktop, mobile, online, degraded, offline, checking, and recovery states.
+- [x] **Step 6: Review `git diff`, `git status --short`, and committed file list; confirm no `.env`, keys, databases, logs, or outputs are tracked.
+- [x] **Step 7: Commit the final verification/documentation adjustment only when required, then report exact test evidence.
