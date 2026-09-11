@@ -32,12 +32,12 @@
 - Modify: `backend/tests/test_merge_readiness_unittest.py`
 - Create: `backend/tests/test_health_endpoints.py`
 
-- [ ] **Step 1: Add failing tests** for `GET /health/live` returning 200, `GET /health/ready` returning 200/503, public runtime fields including endpoint/latency/error code, and startup validation rejecting missing DeepSeek API key or model.
-- [ ] **Step 2: Run the focused backend tests and confirm failure because the endpoints/fields/validation do not exist.
-- [ ] **Step 3: Implement `/health/live` and `/health/ready`; keep `/health` backward-compatible as liveness. Add optional response fields (`error_code`, `latency_ms`, `last_success_at`, `endpoint`) while retaining runtime route authentication.
-- [ ] **Step 4: Add provider-aware settings validation that runs only for explicit production/readiness checks and does not print secrets. Keep development SQLite behavior unchanged.
-- [ ] **Step 5: Run the focused backend tests and confirm they pass.
-- [ ] **Step 6: Commit as `feat: add model readiness and health contracts`.
+- [x] **Step 1: Add failing tests** for `GET /health/live` returning 200, `GET /health/ready` returning 200/503, public runtime fields including endpoint/latency/error code, and startup validation rejecting missing DeepSeek API key or model.
+- [x] **Step 2: Run the focused backend tests and confirm failure because the endpoints/fields/validation do not exist.
+- [x] **Step 3: Implement `/health/live` and `/health/ready`; keep `/health` backward-compatible as liveness. Add optional response fields (`error_code`, `latency_ms`, `last_success_at`, `endpoint`) while retaining runtime route authentication.
+- [x] **Step 4: Add provider-aware settings validation that runs only for explicit production/readiness checks and does not print secrets. Keep development SQLite behavior unchanged.
+- [x] **Step 5: Run the focused backend tests and confirm they pass.
+- [x] **Step 6: Commit as `feat: add model readiness and health contracts`.
 
 ### Task 3: Make the frontend status state machine tolerant
 

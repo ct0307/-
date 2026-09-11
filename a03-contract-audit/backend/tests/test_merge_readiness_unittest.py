@@ -211,7 +211,7 @@ class MergeReadinessTests(unittest.TestCase):
         dependency_calls = {dependency.call for dependency in route.dependant.dependencies}
         self.assertIn(get_current_user, dependency_calls)
 
-    def test_runtime_probe_is_cached_and_public_response_hides_endpoint(self):
+    def test_runtime_probe_is_cached_and_public_response_includes_safe_diagnostics(self):
         get_cached_status = getattr(runtime, "_get_cached_runtime_status", None)
         self.assertIsNotNone(get_cached_status)
         if get_cached_status is None:
@@ -226,7 +226,7 @@ class MergeReadinessTests(unittest.TestCase):
 
         with (
             patch.object(runtime, "probe_configured_model", fake_probe),
-            patch.object(runtime.settings, "LLM_BASE_URL", "http://internal:11434/v1"),
+            patch.object(runtime.settings, "LLM_BASE_URL", "http://user:secret@internal:11434/v1?token=secret"),
         ):
             runtime._runtime_status_cache.clear()
             first = get_cached_status(now=100.0)
@@ -234,7 +234,10 @@ class MergeReadinessTests(unittest.TestCase):
 
         self.assertEqual(calls, 1)
         self.assertEqual(first, second)
-        self.assertFalse(hasattr(first, "endpoint"))
+        self.assertEqual(first.endpoint, "http://internal:11434/v1")
+        self.assertIsNone(first.error_code)
+        self.assertIsInstance(first.latency_ms, int)
+        self.assertEqual(first.last_success_at, first.checked_at)
 
     def test_sqlite_to_postgres_migration_command_exists(self):
         self.assertIsNotNone(find_spec("scripts.migrate_sqlite_to_postgres"))
