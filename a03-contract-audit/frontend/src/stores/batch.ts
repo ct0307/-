@@ -13,6 +13,11 @@ export interface BatchApi {
     dimensions?: string[],
     idempotencyKey?: string,
   ): Promise<AuditBatch>
+  createBatchFromImport(
+    importItemIds: number[],
+    dimensions?: string[],
+    idempotencyKey?: string,
+  ): Promise<AuditBatch>
   getBatch(batchId: number): Promise<AuditBatch>
   retryBatch(batchId: number, dimensions?: string[]): Promise<BatchRetryResult>
 }
@@ -93,6 +98,27 @@ export function createBatchStore(
       }
     }
 
+    async function createFromImport(importItemIds: number[], dimensions: string[] = []) {
+      loading.value = true
+      error.value = ''
+      idempotencyKey.value ||= crypto.randomUUID()
+      try {
+        batch.value = await api.createBatchFromImport(
+          importItemIds,
+          dimensions,
+          idempotencyKey.value,
+        )
+        if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
+        else await startPolling(batch.value.id)
+        return batch.value
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : '批次创建失败'
+        throw cause
+      } finally {
+        loading.value = false
+      }
+    }
+
     async function resume(batchId: number) {
       loading.value = true
       try {
@@ -131,6 +157,7 @@ export function createBatchStore(
       pollOnce,
       startPolling,
       create,
+      createFromImport,
       resume,
       retry,
       stopPolling,

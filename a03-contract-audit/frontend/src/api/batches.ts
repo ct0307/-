@@ -50,6 +50,19 @@ export function createBatch(
   })
 }
 
+export function createBatchFromImport(
+  importItemIds: number[],
+  dimensions: string[] = [],
+  idempotencyKey = crypto.randomUUID(),
+): Promise<AuditBatch> {
+  return client.post('/batches/from-import', {
+    import_item_ids: importItemIds,
+    dimensions,
+  }, {
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
+}
+
 export function getBatch(batchId: number): Promise<AuditBatch> {
   return client.get(`/batches/${batchId}`)
 }

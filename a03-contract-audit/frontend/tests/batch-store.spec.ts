@@ -29,6 +29,7 @@ function fakeApi(responses: AuditBatch[]): BatchApi {
   let index = 0
   return {
     createBatch: async () => responses[0],
+    createBatchFromImport: async () => responses[0],
     getBatch: async () => responses[Math.min(index++, responses.length - 1)],
     retryBatch: async () => ({ batch_id: 1, retried: 1, status: 'queued' }),
   }
@@ -56,4 +57,23 @@ test('keeps polling while an item is running', async () => {
 
   expect(store.polling).toBe(true)
   expect(store.progress).toBe(50)
+})
+
+test('creates an audit batch from selected import items', async () => {
+  const calls: Array<{ itemIds: number[]; dimensions: string[]; key: string }> = []
+  const useStore = createBatchStore({
+    ...fakeApi([batch('done', ['done', 'done'])]),
+    createBatchFromImport: async (itemIds, dimensions, key) => {
+      calls.push({ itemIds, dimensions, key })
+      return batch('done', ['done', 'done'])
+    },
+  }, 'batch-from-import')
+  const store = useStore()
+
+  await store.createFromImport([3, 5], ['legal', 'payment'])
+
+  expect(calls).toHaveLength(1)
+  expect(calls[0].itemIds).toEqual([3, 5])
+  expect(calls[0].dimensions).toEqual(['legal', 'payment'])
+  expect(calls[0].key).toBeTruthy()
 })
