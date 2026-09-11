@@ -30,6 +30,11 @@ DATASET_ROOT = BACKEND_ROOT / "evaluation" / "datasets" / "frozen_contracts_v2"
 V1_ROOT = BACKEND_ROOT / "evaluation" / "datasets" / "frozen_contracts_v1"
 
 
+def _normalized_sha256(path: Path) -> str:
+    """统一换行后计算冻结数据指纹，避免 Windows autocrlf 影响验收。"""
+    return sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def test_v2_profile_is_fixed_and_v1_facts_are_unchanged():
     profile = load_profile(DATASET_ROOT / "corpus-profile.json")
 
@@ -48,10 +53,10 @@ def test_v2_profile_is_fixed_and_v1_facts_are_unchanged():
         "negotiated": 14,
         "baseline": 8,
     }
-    assert sha256((V1_ROOT / "cases.json").read_bytes()).hexdigest() == (
+    assert _normalized_sha256(V1_ROOT / "cases.json") == (
         "5de4784897ff233f0d123e6eb3b8d5f1c49edbc975b2173c65f85317c081076c"
     )
-    assert sha256((V1_ROOT / "corpus-profile.json").read_bytes()).hexdigest() == (
+    assert _normalized_sha256(V1_ROOT / "corpus-profile.json") == (
         "782ecb750e4aa0f057d495d25ff16a418b339fb4072438da6d8ec93c9ba612c4"
     )
 
