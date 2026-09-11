@@ -125,6 +125,9 @@ def run_audit(
         if len(parsed.text) < 200:
             publishing.requires_review = True
             publishing.review_reason = publishing.review_reason or "合同文本长度不足 200 字"
+        if result.get("requires_review"):
+            publishing.requires_review = True
+            publishing.review_reason = result.get("review_reason") or publishing.review_reason
         db.query(Risk).filter(
             Risk.contract_id == contract_id,
             Risk.review_status == "pending",
@@ -225,10 +228,14 @@ def _compute_audit(
             "level": "high",
             "category": "文本解析失败",
             "original_text": f"（合同文本提取长度仅 {len(text)} 字，内容严重残缺）",
+            "risk_reason": "合同文本严重残缺，无法完成可靠审查。",
             "basis": "文件可能为扫描件、图片型 PDF 或文档格式异常，文本层无法提取。",
             "suggestion": "请检查 OCR 运行时日志并人工核对扫描质量，或转换为文字版 PDF/DOCX 后重新上传。",
             "confidence": 0,
             "tier": "red",
+            "evidence_status": "unsupported",
+            "original_text_verified": False,
+            "requires_manual_review": True,
         })
     else:
         # 避免审查时重复调 LLM，同时保留 has_*/text_length 等正则信号。
@@ -256,13 +263,26 @@ def _compute_audit(
             "level": "high",
             "category": "扫描件识别质量不足",
             "original_text": f"OCR 平均置信度：{(parsed.ocr_confidence or 0) * 100:.1f}%",
+            "risk_reason": "OCR 质量未达到自动采信门槛。",
             "basis": parsed.review_reason or "OCR 结果未达到自动采信门槛。",
             "suggestion": "请对照合同原件完成人工复核后再采信自动审查结论。",
             "confidence": int(round((parsed.ocr_confidence or 0) * 100)),
             "tier": "red",
+            "evidence_status": "unsupported",
+            "original_text_verified": False,
+            "requires_manual_review": True,
         })
 
     risk_count = len(risk_payloads)
+    risk_requires_review = any(
+        bool(risk.get("requires_manual_review")) for risk in risk_payloads
+    )
+    requires_review = parsed.requires_review or len(text) < 200 or risk_requires_review
+    review_reason = parsed.review_reason or (
+        "合同文本长度不足 200 字" if len(text) < 200
+        else "存在证据不足或原文未核验的风险" if risk_requires_review
+        else None
+    )
     log.info(
         "audit_runner.done",
         contract_id=contract_id,
@@ -272,11 +292,9 @@ def _compute_audit(
     return {
         "risk_count": risk_count,
         "cross_checks": cross_checks,
-        "requires_review": parsed.requires_review or len(text) < 200,
+        "requires_review": requires_review,
         "ocr_confidence": parsed.ocr_confidence,
-        "review_reason": parsed.review_reason or (
-            "合同文本长度不足 200 字" if len(text) < 200 else None
-        ),
+        "review_reason": review_reason,
         "_parsed": parsed,
         "_risks": risk_payloads,
         "_timings": {"parse_ms": parse_ms, **audit_timings},
@@ -296,12 +314,19 @@ def _risk_model(
         level=risk["level"],
         category=risk["category"],
         original_text=risk["original_text"],
+        risk_reason=risk.get("risk_reason", ""),
         basis=risk["basis"],
         suggestion=risk["suggestion"],
         confidence=risk["confidence"],
         tier=risk.get("tier", "yellow"),
         review_status="pending",
         rag_sources=json.dumps(risk.get("rag_sources", []), ensure_ascii=False),
+        evidence_status=risk.get("evidence_status", "unsupported"),
+        original_text_verified=risk.get("original_text_verified"),
+        requires_manual_review=risk.get("requires_manual_review", True),
+        support_relation_status=risk.get("support_relation_status", "unclear"),
+        support_validation_reason=risk.get("support_validation_reason", ""),
+        support_validator_version=risk.get("support_validator_version", "unvalidated"),
     )
 
 

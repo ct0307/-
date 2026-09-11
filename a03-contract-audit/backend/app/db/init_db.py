@@ -44,6 +44,13 @@ _DEV_COLUMNS = {
         ("tier", "VARCHAR(8) DEFAULT 'yellow'"),
         ("rag_sources", "TEXT DEFAULT '[]'"),   # RAG 检索溯源：结构化来源列表
         ("audit_job_id", "INTEGER"),
+        ("risk_reason", "TEXT DEFAULT ''"),
+        ("evidence_status", "VARCHAR(24) DEFAULT 'unsupported' NOT NULL"),
+        ("original_text_verified", "BOOLEAN"),
+        ("requires_manual_review", "BOOLEAN DEFAULT 1 NOT NULL"),
+        ("support_relation_status", "VARCHAR(16) DEFAULT 'unclear' NOT NULL"),
+        ("support_validation_reason", "TEXT DEFAULT '' NOT NULL"),
+        ("support_validator_version", "VARCHAR(32) DEFAULT 'unvalidated' NOT NULL"),
     ],
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
     "contracts": [
@@ -66,7 +73,10 @@ _DEV_COLUMNS = {
         ("audit_generation", "INTEGER DEFAULT 0 NOT NULL"),
         ("execution_token", "VARCHAR(64)"),
     ],
-    "llm_call_logs": [("audit_job_id", "INTEGER")],
+    "llm_call_logs": [
+        ("audit_job_id", "INTEGER"),
+        ("finish_reason", "VARCHAR(32)"),
+    ],
     "knowledge_chunks": [
         ("article_number", "VARCHAR(64)"),
         ("version", "VARCHAR(64)"),

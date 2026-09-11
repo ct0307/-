@@ -147,6 +147,15 @@ class MergeReadinessTests(unittest.TestCase):
         self.assertNotIn("execution_token", contract_columns)
         self.assertEqual(item_columns["execution_token"], "VARCHAR(64)")
 
+    def test_sqlite_hot_migration_declares_evidence_columns(self):
+        risk_columns = dict(init_db_module._DEV_COLUMNS["risks"])
+
+        self.assertIn("evidence_status", risk_columns)
+        self.assertIn("original_text_verified", risk_columns)
+        self.assertIn("support_relation_status", risk_columns)
+        self.assertIn("support_validation_reason", risk_columns)
+        self.assertIn("support_validator_version", risk_columns)
+
     def test_finishing_last_pending_risk_completes_manual_review(self):
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)

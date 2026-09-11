@@ -62,6 +62,7 @@ def apply_risk_masking(risk: dict | object, role: str) -> dict:
             "level": risk.level,
             "category": risk.category,
             "original_text": mask_original_text(risk.original_text or ""),
+            "risk_reason": risk.risk_reason,
             "basis": risk.basis,
             "suggestion": risk.suggestion,
             "confidence": risk.confidence,
@@ -70,6 +71,12 @@ def apply_risk_masking(risk: dict | object, role: str) -> dict:
             # rag_sources 是公开法条来源、非敏感数据，business 也应可见。
             # DB 里存 JSON 字符串，此处反序列化为 list，与全访问路（RiskOut validator）输出一致。
             "rag_sources": json.loads(risk.rag_sources or "[]"),
+            "evidence_status": risk.evidence_status,
+            "original_text_verified": risk.original_text_verified,
+            "requires_manual_review": risk.requires_manual_review,
+            "support_relation_status": risk.support_relation_status,
+            "support_validation_reason": risk.support_validation_reason,
+            "support_validator_version": risk.support_validator_version,
         }
     else:
         d = dict(risk)

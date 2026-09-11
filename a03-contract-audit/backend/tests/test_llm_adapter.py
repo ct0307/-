@@ -13,7 +13,7 @@ class _Response:
     def json(self) -> dict:
         return {
             "model": "deepseek-v4-pro",
-            "choices": [{"message": {"content": "{}"}}],
+            "choices": [{"message": {"content": "{}"}, "finish_reason": "length"}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         }
 
@@ -39,6 +39,19 @@ def test_chat_request_enforces_output_token_budget(monkeypatch):
     assert captured["json"]["max_tokens"] == 1600
     assert captured["json"]["stream"] is False
     assert captured["timeout"] == 45
+
+
+def test_chat_response_exposes_finish_reason(monkeypatch):
+    monkeypatch.setattr(
+        "app.llm.adapters.openai_compatible.httpx.post",
+        lambda *_args, **_kwargs: _Response(),
+    )
+
+    response = OpenAICompatibleAdapter(base_url="https://llm.example/v1").chat(
+        "system", "user"
+    )
+
+    assert response.finish_reason == "length"
 
 
 def test_http_error_log_does_not_include_provider_response_body(monkeypatch):

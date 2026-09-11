@@ -12,6 +12,7 @@ from evaluation.evidence import RUN_STATUSES, SCHEMA_VERSION
 
 _STREAMS = {
     "elements": "elements.jsonl",
+    "evidence": "evidence.jsonl",
     "batch": "batch-events.jsonl",
     "benchmark": "benchmark.jsonl",
 }
@@ -173,6 +174,32 @@ def _validate_batch(
     return summaries[0]
 
 
+def _validate_evidence(
+    status: str,
+    inputs: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    if status in {"blocked", "error"}:
+        return None
+    summaries = _events_of(events, "summary")
+    cases = _events_of(events, "case")
+    sample_count = inputs.get("sample_count")
+    if len(summaries) != 1:
+        raise InvalidEvidence("evidence 必须且只能包含一个 summary 事件")
+    if not isinstance(sample_count, int) or sample_count <= 0:
+        raise InvalidEvidence("evidence sample_count 必须是正整数")
+    if len(cases) != sample_count or summaries[0].get("sample_count") != sample_count:
+        raise InvalidEvidence("evidence case 事件数量与 sample_count 不一致")
+    overall = summaries[0].get("overall")
+    if not isinstance(overall, Mapping) or not isinstance(overall.get("macro_f1"), (int, float)):
+        raise InvalidEvidence("evidence summary 缺少 overall.macro_f1")
+    min_f1 = inputs.get("min_f1")
+    expected_status = "passed" if overall["macro_f1"] >= min_f1 else "failed"
+    if status != expected_status:
+        raise InvalidEvidence("evidence 状态与宏平均 F1 阈值矛盾")
+    return summaries[0]
+
+
 def _validate_benchmark(
     status: str,
     inputs: Mapping[str, Any],
@@ -278,6 +305,21 @@ def _render_report(
                 f"- GPU P95：{_format_value(benchmark.get('gpu_p95'))}",
             ]
         )
+    evidence = summaries.get("evidence")
+    if evidence is not None:
+        overall = evidence["overall"]
+        lines.extend(
+            [
+                "",
+                "## 依据支持关系评测",
+                "",
+                f"- 合同样本数：{evidence.get('sample_count')}",
+                f"- 风险条数：{evidence.get('risk_count')}",
+                f"- Accuracy：{_format_value(overall.get('accuracy'))}",
+                f"- Macro F1：{_format_value(overall.get('macro_f1'))}",
+                f"- 缺失预测：{evidence.get('missing_prediction_count')}",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -296,6 +338,7 @@ def build_report(run_dir: Path) -> ReportResult:
     summaries: dict[str, Mapping[str, Any] | None] = {}
     validators = {
         "elements": _validate_elements,
+        "evidence": _validate_evidence,
         "batch": _validate_batch,
         "benchmark": _validate_benchmark,
     }

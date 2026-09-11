@@ -17,7 +17,9 @@ import { useImportInboxStore } from '@/stores/import-inbox'
 import ContractInbox from '@/components/audit/ContractInbox.vue'
 import RiskReviewDrawer from '@/components/audit/RiskReviewDrawer.vue'
 import AnnotationModal from '@/components/audit/AnnotationModal.vue'
-import { formatOcrConfidence } from '@/utils/ocr-quality'
+import { auditProgressDisplay, type AuditUiState } from '@/utils/audit-progress'
+import { formatOcrConfidence, reviewStatusLabel } from '@/utils/ocr-quality'
+import { evidenceMeta } from '@/utils/risk-evidence'
 
 const session = useAuditSessionStore()
 const rectify = useRectifyStore()
@@ -365,14 +367,12 @@ const onboardSteps = [
                     <el-tag size="small" effect="plain" class="status-tag">{{ statusLabel[r.review_status] }}</el-tag>
                   </div>
                   <p class="risk-line">{{ r.suggestion }}</p>
-                  <div class="risk-evidence" :class="{ 'is-missing': !r.rag_sources?.length }">
+                  <div class="risk-evidence" :class="{ 'is-missing': r.evidence_status !== 'supported' }">
                     <span class="evidence-dot" />
                     <span>
-                      {{ r.rag_sources?.length
-                        ? `${r.rag_sources.length} 条可靠依据`
-                        : '无可靠依据 · 待人工复核' }}
+                      {{ evidenceMeta(r.evidence_status).label }}
+                      <template v-if="r.rag_sources?.length">· {{ r.rag_sources.length }} 条来源</template>
                     </span>
-                    <span class="risk-confidence mono">{{ r.confidence }}%</span>
                   </div>
                   <span class="review-cta">
                     {{ _DONE_STATUS.has(r.review_status) ? '查看详情' : '进入复核' }}

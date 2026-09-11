@@ -35,7 +35,7 @@ export const AGENTS: Record<AgentKey, AgentMeta> = {
     accent: 'var(--sage)',
     focus: ['合同金额', '付款节点', '发票绑定', '违约金上限', '币种与大小写一致性', '预算合规'],
     ragTopics: ['金额 价款 币种', '付款 发票 结算', '违约金 上限 赔偿', '期限 履约'],
-    promptBias: '只输出金额与付款维度的风险，聚焦资金安全与预算合规，每条须给出置信度与修改建议。',
+    promptBias: '只输出金额与付款维度的风险，聚焦资金安全与预算合规，每条须给出原文、风险原因与修改建议。',
   },
 }
 
@@ -130,7 +130,7 @@ export const CROSS_CHECKS: CrossCheck[] = [
 ]
 
 // —— 分级风险人工干预（对齐组员建议：绿/黄/红三档，动态决定人工介入深度）——
-// 不盲目要求人工审全部，按 AI 置信度 + 风险等级 + 冲突情况分档，红档强制三员会审。
+// 不盲目要求人工审全部，按证据状态 + 风险等级 + 冲突情况分档，红档强制三员会审。
 export type TierKey = 'green' | 'yellow' | 'red'
 
 export interface TierMeta {
@@ -148,7 +148,7 @@ export const RISK_TIERS: Record<TierKey, TierMeta> = {
     key: 'green',
     label: '绿档 · 低风险',
     accent: 'var(--sage)',
-    criteria: '低风险且 AI 置信度 > 95%',
+    criteria: '低风险、原文与依据支持关系均已核验',
     intervention: 'AI 自动审查通过，推送至「自动归档待签批」池',
     approvers: '审批人一键签批',
     actionLabel: '一键签批',

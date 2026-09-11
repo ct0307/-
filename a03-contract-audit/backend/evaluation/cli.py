@@ -25,6 +25,7 @@ from evaluation.benchmark_runner import (
     run_target,
 )
 from evaluation.elements import evaluate_dataset
+from evaluation.evidence_metrics import evaluate_evidence_dataset
 from evaluation.evidence import EvidenceWriter, sha256_file
 from evaluation.report import build_report
 
@@ -121,6 +122,58 @@ def _run_elements(args: argparse.Namespace) -> int:
     writer.append("elements", _safe_elements_summary(report))
     status = "passed" if report["overall"]["f1"] >= args.min_f1 else "failed"
     writer.write_manifest(status=status, modules={"elements": status})
+    return EXIT_OK if status == "passed" else EXIT_FAILED
+
+
+def _run_evidence(args: argparse.Namespace) -> int:
+    if not 0 <= args.min_f1 <= 1:
+        raise ValueError("--min-f1 必须在 0 到 1 之间")
+    gold_records = _read_jsonl(args.gold)
+    if not gold_records:
+        raise ValueError("证据金标准 JSONL 不能为空")
+    predictions = _read_predictions(args.predictions)
+    report = evaluate_evidence_dataset(gold_records, predictions)
+    run_id = args.run_id or _default_run_id("evidence")
+    writer = EvidenceWriter.create(
+        args.runs_root,
+        run_id=run_id,
+        command="evidence",
+        inputs={
+            "gold_sha256": sha256_file(args.gold),
+            "predictions_sha256": sha256_file(args.predictions),
+            "schema_sha256": sha256_file(Path(__file__).with_name("schema.json")),
+            "sample_count": report["sample_count"],
+            "risk_count": report["risk_count"],
+            "min_f1": args.min_f1,
+        },
+    )
+    for case in report["cases"]:
+        writer.append(
+            "evidence",
+            {
+                "event": "case",
+                "case_id": case["case_id"],
+                "contract_type": case["contract_type"],
+                "document_kind": case["document_kind"],
+                "risk_count": case["risk_count"],
+                "correct_count": case["correct_count"],
+                "missing_prediction_count": case["missing_prediction_count"],
+                "metrics": case["metrics"],
+            },
+        )
+    writer.append(
+        "evidence",
+        {
+            "event": "summary",
+            "sample_count": report["sample_count"],
+            "risk_count": report["risk_count"],
+            "correct_count": report["correct_count"],
+            "missing_prediction_count": report["missing_prediction_count"],
+            "overall": report["overall"],
+        },
+    )
+    status = "passed" if report["overall"]["macro_f1"] >= args.min_f1 else "failed"
+    writer.write_manifest(status=status, modules={"evidence": status})
     return EXIT_OK if status == "passed" else EXIT_FAILED
 
 
@@ -307,6 +360,12 @@ def build_parser() -> argparse.ArgumentParser:
     elements.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
     elements.add_argument("--run-id")
     elements.add_argument("--min-f1", type=float, default=0.90)
+    evidence = subcommands.add_parser("evidence", help="评测风险依据支持关系")
+    evidence.add_argument("--gold", type=Path, required=True)
+    evidence.add_argument("--predictions", type=Path, required=True)
+    evidence.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
+    evidence.add_argument("--run-id")
+    evidence.add_argument("--min-f1", type=float, default=0.90)
     batch = subcommands.add_parser("batch", help="执行 50+2 批量验收")
     batch.add_argument("--manifest", type=Path, required=True)
     batch.add_argument("--base-url", required=True)
@@ -335,6 +394,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "elements":
             return _run_elements(args)
+        if args.command == "evidence":
+            return _run_evidence(args)
         if args.command == "batch":
             return _run_batch(args)
         if args.command == "benchmark":

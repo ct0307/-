@@ -63,10 +63,17 @@ export interface RiskOut {
   level: 'high' | 'medium' | 'low'
   category: string
   original_text: string
+  risk_reason: string
   basis: string
   suggestion: string
   confidence: number
   tier: 'green' | 'yellow' | 'red' // 人工干预档位
   review_status: 'pending' | 'confirmed' | 'ignored' | 'to_modify'
   rag_sources: Array<{ content: string; source: string; score: number }> // RAG 检索溯源
+  evidence_status: 'supported' | 'partially_supported' | 'unsupported' | string
+  original_text_verified: boolean | null
+  requires_manual_review: boolean
+  support_relation_status: 'supported' | 'unclear' | 'contradicted' | string
+  support_validation_reason: string
+  support_validator_version: string
 }

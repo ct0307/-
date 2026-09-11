@@ -25,6 +25,8 @@ EVALUATION_TESTS = (
     "tests/test_benchmark_runner.py",
     "tests/test_evaluation_report.py",
     "tests/test_evaluation_cli.py",
+    "tests/test_evidence_metrics.py",
+    "tests/test_evidence_cli.py",
 )
 
 

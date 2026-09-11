@@ -17,6 +17,28 @@ def _risk(category: str, original_text: str, basis: str = "模型自报依据") 
 
 
 class RagGroundingTests(unittest.TestCase):
+    def test_supported_low_risk_can_enter_green_tier(self):
+        risk = _risk("一般提示", "合同原文")
+        risk.update({
+            "level": "low",
+            "confidence": 10,
+            "evidence_status": "supported",
+            "original_text_verified": True,
+        })
+
+        self.assertEqual(auditor.classify_tier(risk), "green")
+
+    def test_unsupported_low_risk_never_enters_green_tier(self):
+        risk = _risk("一般提示", "合同原文")
+        risk.update({
+            "level": "low",
+            "confidence": 99,
+            "evidence_status": "unsupported",
+            "original_text_verified": False,
+        })
+
+        self.assertEqual(auditor.classify_tier(risk), "yellow")
+
     def test_selected_dimension_skips_unrelated_agent(self):
         with patch.object(auditor, "_agent_audit", return_value=[]) as agent_audit:
             auditor.audit_contract({}, "合同正文", dimensions=["payment"])
@@ -51,6 +73,45 @@ class RagGroundingTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["contract_type"], "采购合同")
         self.assertEqual(calls[0][1]["dimensions"], ["breach", "dispute"])
 
+    def test_verified_original_with_retrieved_source_still_requires_support_review(self):
+        risks = [_risk("违约责任", "违约金为50%")]
+
+        with patch.object(auditor, "retrieve", return_value=[{
+            "content": "约定违约金过高时可以适当减少。",
+            "source": "民法典",
+            "article_number": "第五百八十五条",
+            "score": 0.9,
+            "reliable": True,
+        }]):
+            grounded = auditor._ground_risks(
+                risks,
+                contract_text="合同约定：违约金为50%。",
+            )
+
+        self.assertTrue(grounded[0]["original_text_verified"])
+        self.assertEqual(grounded[0]["support_relation_status"], "supported")
+        self.assertEqual(grounded[0]["evidence_status"], "supported")
+        self.assertFalse(grounded[0]["requires_manual_review"])
+
+    def test_unverified_original_is_partial_and_requires_review(self):
+        risks = [_risk("违约责任", "合同没有出现的原文")]
+
+        with patch.object(auditor, "retrieve", return_value=[{
+            "content": "企业规则要求明确违约责任。",
+            "source": "合同模板规则",
+            "score": 0.8,
+            "reliable": True,
+        }]):
+            grounded = auditor._ground_risks(
+                risks,
+                contract_text="合同正文没有该条款。",
+            )
+
+        self.assertFalse(grounded[0]["original_text_verified"])
+        self.assertEqual(grounded[0]["support_relation_status"], "unclear")
+        self.assertEqual(grounded[0]["evidence_status"], "partially_supported")
+        self.assertTrue(grounded[0]["requires_manual_review"])
+
     def test_unverified_basis_is_replaced_and_requires_review(self):
         risks = [_risk("违约责任", "未约定违约责任", basis="《民法典》第9999条")]
 
@@ -59,6 +120,7 @@ class RagGroundingTests(unittest.TestCase):
 
         self.assertEqual(grounded[0]["basis"], auditor.NO_RELIABLE_BASIS)
         self.assertEqual(grounded[0]["rag_sources"], [])
+        self.assertEqual(grounded[0]["support_relation_status"], "unclear")
         self.assertLessEqual(grounded[0]["confidence"], 50)
         self.assertTrue(grounded[0]["requires_manual_review"])
 
