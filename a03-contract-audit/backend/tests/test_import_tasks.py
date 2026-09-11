@@ -3,6 +3,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.core.crypto import encrypt_bytes
 from app.db.session import Base
 from app.models.models import Contract, ImportBatch, ImportBatchItem, LookupItem, User
 from app.tasks import import_tasks
@@ -21,7 +22,7 @@ def test_parse_import_item_persists_type_suggestion(monkeypatch, tmp_path):
         db.add(user)
         db.flush()
         path = tmp_path / "purchase.txt"
-        path.write_text("采购服务器设备，乙方负责供货和验收。", encoding="utf-8")
+        path.write_bytes(encrypt_bytes("采购服务器设备，乙方负责供货和验收。".encode("utf-8")))
         contract = Contract(
             filename="采购合同.txt",
             storage_path=str(path),
