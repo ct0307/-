@@ -27,8 +27,8 @@ test('enterprise delivery desktop, empty, error and mobile states', async ({ pag
 
   await page.getByRole('menuitem', { name: '合同审查' }).click()
   await expect(page).toHaveURL(/\/audit$/)
-  await expect(page.getByText('上传合同', { exact: true })).toBeVisible()
-  await expect(page.getByText('批量上传（支持50份以上）')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '待审合同' })).toBeVisible()
+  await expect(page.getByText('批量上传（支持50份以上）')).toHaveCount(0)
   await page.screenshot({ path: test.info().outputPath('audit-desktop.png'), fullPage: true })
   expect(unresolvedIconWarnings).toEqual([])
   expect(consoleErrors).toEqual([])

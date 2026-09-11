@@ -28,6 +28,20 @@ const HTTP_ERROR_MSGS: Record<number, string> = {
   503: '服务暂时不可用，请稍后重试',
 }
 
+export function extractHttpErrorDetail(detail: unknown): { code?: string; message?: string } {
+  if (!detail || typeof detail !== 'object') return {}
+  const value = detail as { code?: unknown; message?: unknown; detail?: unknown }
+  const message = typeof value.message === 'string'
+    ? value.message
+    : typeof value.detail === 'string'
+      ? value.detail
+      : undefined
+  return {
+    code: typeof value.code === 'string' ? value.code : undefined,
+    message,
+  }
+}
+
 client.interceptors.response.use(
   (res) => res.data,
   (err) => {
@@ -47,13 +61,9 @@ client.interceptors.response.use(
     if (err.response?.status) {
       const status = err.response.status
       const detail = err.response.data?.detail
-      const structuredDetail = detail && typeof detail === 'object'
-        ? detail as { code?: unknown; detail?: unknown }
-        : null
-      const safeDetail = structuredDetail?.detail ?? detail
-      if (structuredDetail && typeof structuredDetail.code === 'string') {
-        err.code = structuredDetail.code
-      }
+      const structuredDetail = extractHttpErrorDetail(detail)
+      const safeDetail = structuredDetail.message ?? detail
+      if (structuredDetail.code) err.code = structuredDetail.code
       // 只使用含中文字符的 detail，避免 FastAPI 自动生成的英文错误（如 "Internal Server Error"）直接展示
       const hasChinese = typeof safeDetail === 'string' && /[一-鿿]/.test(safeDetail)
       err.message = hasChinese

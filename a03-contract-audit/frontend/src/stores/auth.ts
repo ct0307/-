@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { login as loginApi } from '@/api/contract'
 import { useAuditSessionStore } from '@/stores/audit-session'
+import { useBatchStore } from '@/stores/batch'
+import { useImportInboxStore } from '@/stores/import-inbox'
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string>(localStorage.getItem('token') || '')
@@ -10,9 +12,15 @@ export const useAuthStore = defineStore('auth', () => {
   const department = ref<string>(localStorage.getItem('department') || '')
   const authorizedDepartments = ref<string[]>(JSON.parse(localStorage.getItem('authorized_departments') || '[]'))
 
+  function resetUserWork() {
+    useAuditSessionStore().reset()
+    useImportInboxStore().reset()
+    useBatchStore().reset()
+  }
+
   async function login(user: string, password: string) {
     const res = await loginApi(user, password)
-    useAuditSessionStore().reset()
+    resetUserWork()
     token.value = res.access_token
     role.value = res.role
     username.value = res.username
@@ -26,7 +34,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function logout() {
-    useAuditSessionStore().reset()
+    resetUserWork()
     token.value = ''
     role.value = ''
     username.value = ''
