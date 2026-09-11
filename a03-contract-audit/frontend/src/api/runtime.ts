@@ -19,23 +19,33 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   return client.get<RuntimeStatus>('/runtime/status') as unknown as RuntimeStatus
 }
 
+const runtimeErrorLabels: Record<string, string> = {
+  auth_failed: '模型鉴权失败',
+  endpoint_not_found: '模型地址不可用',
+  model_not_found: '配置模型不存在',
+  timeout: '模型服务响应超时',
+  network_error: '模型网络连接失败',
+  invalid_configuration: '模型配置无效',
+  status_unavailable: '状态接口不可用',
+}
+
+function runtimeErrorLabel(runtime: RuntimeStatus): string {
+  return runtime.error_code ? runtimeErrorLabels[runtime.error_code] ?? '模型服务异常' : '连接波动'
+}
+
 export function runtimeStatusText(runtime: RuntimeStatus): string {
   if (runtime.status === 'online') {
     const provider = runtime.provider?.toUpperCase() || '本地模型'
     return runtime.model ? `${provider} · ${runtime.model}` : `${provider} · 运行中`
   }
   if (runtime.status === 'checking') return '正在检测模型服务'
-  if (runtime.status === 'degraded') return '连接波动，正在重试'
+  if (runtime.status === 'degraded') {
+    const provider = runtime.provider?.toUpperCase() || '本地模型'
+    const model = runtime.model ? `${provider} · ${runtime.model} · ` : ''
+    return `${model}${runtimeErrorLabel(runtime)}，正在重试`
+  }
   if (runtime.status === 'offline') {
-    const labels: Record<string, string> = {
-      auth_failed: '模型鉴权失败',
-      endpoint_not_found: '模型地址不可用',
-      model_not_found: '配置模型不存在',
-      timeout: '模型服务响应超时',
-      network_error: '模型网络连接失败',
-      invalid_configuration: '模型配置无效',
-    }
-    return runtime.error_code ? labels[runtime.error_code] ?? '模型服务离线' : '模型服务离线'
+    return `${runtimeErrorLabel(runtime) === '连接波动' ? '模型服务离线' : runtimeErrorLabel(runtime)}，将继续重试`
   }
   return '状态待确认'
 }

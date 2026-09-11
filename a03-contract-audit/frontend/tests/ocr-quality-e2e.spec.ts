@@ -172,6 +172,7 @@ test('requires confirmation when selected type conflicts with the material', asy
   await page.locator('input[name="username"]').fill('legal')
   await page.locator('input[name="password"]').fill('legal123')
   await page.getByRole('button', { name: '登 录' }).click()
+  await expect(page).toHaveURL(/\/dashboard$/)
   await page.goto(`${baseUrl}/audit`)
   await page.locator('input[type="file"]').first().setInputFiles({
     name: '设备采购合同.pdf',

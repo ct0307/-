@@ -60,3 +60,17 @@ test('recovers immediately after a successful probe', () => {
   expect(recovered.consecutiveFailures).toBe(0)
   expect(recovered.current.model).toBe('deepseek-v4-pro')
 })
+
+test('transitions from degraded to offline and immediately back online', () => {
+  const connected = transitionRuntimeStatus(createRuntimeStatusState(), online())
+  const degraded = transitionRuntimeStatus(connected, failure('timeout'))
+  const offline = transitionRuntimeStatus(degraded, failure('network_error'))
+  const recovered = transitionRuntimeStatus(offline, online())
+
+  expect(degraded.current.status).toBe('degraded')
+  expect(degraded.current.model).toBe('deepseek-v4-pro')
+  expect(offline.current.status).toBe('offline')
+  expect(offline.current.error_code).toBe('network_error')
+  expect(recovered.current.status).toBe('online')
+  expect(recovered.consecutiveFailures).toBe(0)
+})

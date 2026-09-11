@@ -14,11 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api.v1.router import api_router
-from app.core.config import settings, validate_llm_configuration
+from app.core.config import llm_configuration_metadata, settings, validate_llm_configuration
 from app.core.logging import get_logger, setup_logging
 from app.db.init_db import init_db
 from app.db.session import engine
-from app.api.v1.endpoints.runtime import _get_cached_runtime_status
+from app.api.v1.endpoints.runtime import _get_cached_runtime_status, _get_runtime_status_snapshot
 
 setup_logging(settings.DEBUG)
 log = get_logger("main")
@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
 
         recovered = recover_local_audit_items()
         log.info("audit_recovery.local_startup", recovered=recovered)
-    log.info("app.startup", env=settings.APP_ENV, llm_provider=settings.LLM_PROVIDER)
+    log.info("app.startup", env=settings.APP_ENV, **llm_configuration_metadata(settings))
     yield
     if not settings.AUDIT_ASYNC:
         from app.tasks.dispatcher import shutdown_local_dispatcher
@@ -71,7 +71,7 @@ def health_live() -> dict:
     return {"status": "ok", "app": settings.APP_NAME}
 
 
-def collect_readiness() -> dict[str, dict[str, object]]:
+def collect_readiness(*, refresh_model: bool = True) -> dict[str, dict[str, object]]:
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
@@ -81,8 +81,8 @@ def collect_readiness() -> dict[str, dict[str, object]]:
 
     try:
         validate_llm_configuration(settings)
-        runtime = _get_cached_runtime_status(force_refresh=True)
-        model = {"ready": runtime.status == "online"}
+        runtime = _get_cached_runtime_status() if refresh_model else _get_runtime_status_snapshot()
+        model = {"ready": runtime.status == "online", "status": runtime.status}
         if runtime.status != "online":
             model["error_code"] = runtime.error_code or "probe_failed"
     except ValueError:
@@ -94,6 +94,15 @@ def collect_readiness() -> dict[str, dict[str, object]]:
 
 @app.get("/health/ready", tags=["系统"])
 def health_ready(response: Response) -> dict:
+    checks = collect_readiness(refresh_model=False)
+    ready = bool(checks.get("database", {}).get("ready"))
+    if not ready:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return {"status": "ready" if ready else "not_ready", "checks": checks}
+
+
+@app.get("/health/preflight", tags=["系统"])
+def health_preflight(response: Response) -> dict:
     checks = collect_readiness()
     ready = all(bool(check.get("ready")) for check in checks.values())
     if not ready:

@@ -1,8 +1,9 @@
 """应用配置：全部从环境变量/.env 读取，便于私有化部署与多环境切换。"""
 import os
 from functools import lru_cache
+from hashlib import sha256
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from cryptography.fernet import Fernet
 from pydantic import model_validator
@@ -154,3 +155,20 @@ def validate_llm_configuration(config: Settings) -> None:
 
     if errors:
         raise ValueError("模型配置无效：" + "; ".join(errors))
+
+
+def llm_configuration_metadata(config: Settings) -> dict[str, str]:
+    """返回可安全记录的模型配置摘要。"""
+    validate_llm_configuration(config)
+    parsed = urlsplit(config.LLM_BASE_URL.strip())
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    endpoint = urlunsplit((parsed.scheme, f"{parsed.hostname}{port}", "", "", ""))
+    provider = config.LLM_PROVIDER.strip().lower()
+    model = config.LLM_MODEL.strip()
+    fingerprint = sha256(f"{provider}|{endpoint}|{model}".encode()).hexdigest()[:12]
+    return {
+        "llm_provider": provider,
+        "llm_model": model,
+        "llm_endpoint": endpoint,
+        "llm_config_fingerprint": fingerprint,
+    }

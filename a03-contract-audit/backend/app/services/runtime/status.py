@@ -41,7 +41,7 @@ def sanitize_endpoint(endpoint: str | None) -> str | None:
     if not hostname:
         return None
     port = f":{parsed.port}" if parsed.port is not None else ""
-    return urlunsplit((parsed.scheme, f"{hostname}{port}", parsed.path.rstrip("/"), "", ""))
+    return urlunsplit((parsed.scheme, f"{hostname}{port}", "", "", ""))
 
 
 def probe_runtime(

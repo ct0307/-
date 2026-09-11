@@ -1,5 +1,6 @@
 """模型运行时状态接口。"""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from threading import Lock
 from time import monotonic
 
@@ -16,6 +17,7 @@ router = APIRouter()
 _CACHE_TTL_SECONDS = 30.0
 _runtime_status_cache: dict[str, object] = {"expires_at": 0.0, "value": None}
 _runtime_status_lock = Lock()
+_runtime_status_refreshing = False
 
 
 @dataclass(frozen=True)
@@ -31,12 +33,33 @@ class PublicRuntimeStatus:
     last_success_at: str | None = None
 
 
+def _get_runtime_status_snapshot() -> PublicRuntimeStatus:
+    with _runtime_status_lock:
+        cached = _runtime_status_cache.get("value")
+        if isinstance(cached, PublicRuntimeStatus):
+            if monotonic() < float(_runtime_status_cache.get("expires_at", 0.0)):
+                return cached
+            return replace(
+                cached,
+                status="degraded",
+                detail="模型状态缓存已过期",
+                error_code="status_stale",
+            )
+    return PublicRuntimeStatus(
+        status="checking",
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        detail="模型状态尚未探测",
+        error_code="probe_pending",
+    )
+
+
 def _get_cached_runtime_status(
     *,
     now: float | None = None,
     force_refresh: bool = False,
 ) -> PublicRuntimeStatus:
     current = monotonic() if now is None else now
+    global _runtime_status_refreshing
     with _runtime_status_lock:
         cached = _runtime_status_cache.get("value")
         if (
@@ -45,12 +68,19 @@ def _get_cached_runtime_status(
             and current < float(_runtime_status_cache.get("expires_at", 0.0))
         ):
             return cached
+        if _runtime_status_refreshing:
+            if isinstance(cached, PublicRuntimeStatus):
+                return replace(cached, status="degraded", detail="正在刷新模型状态")
+            return PublicRuntimeStatus(status="checking", checked_at=datetime.now(timezone.utc).isoformat())
+        _runtime_status_refreshing = True
 
-        internal = probe_runtime(
-            probe_configured_model,
-            provider=settings.LLM_PROVIDER,
-            endpoint=settings.LLM_BASE_URL,
-        )
+    internal = probe_runtime(
+        probe_configured_model,
+        provider=settings.LLM_PROVIDER,
+        endpoint=settings.LLM_BASE_URL,
+    )
+
+    with _runtime_status_lock:
         last_success_at = _runtime_status_cache.get("last_success_at")
         if internal.status == "online":
             last_success_at = internal.checked_at
@@ -68,6 +98,7 @@ def _get_cached_runtime_status(
         )
         _runtime_status_cache["value"] = public
         _runtime_status_cache["expires_at"] = current + _CACHE_TTL_SECONDS
+        _runtime_status_refreshing = False
         return public
 
 

@@ -234,7 +234,7 @@ class MergeReadinessTests(unittest.TestCase):
 
         self.assertEqual(calls, 1)
         self.assertEqual(first, second)
-        self.assertEqual(first.endpoint, "http://internal:11434/v1")
+        self.assertEqual(first.endpoint, "http://internal:11434")
         self.assertIsNone(first.error_code)
         self.assertIsInstance(first.latency_ms, int)
         self.assertEqual(first.last_success_at, first.checked_at)

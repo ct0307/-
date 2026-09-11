@@ -61,6 +61,7 @@ async function openImportDialog(page: Page) {
   await page.locator('input[name="username"]').fill('admin')
   await page.locator('input[name="password"]').fill('admin123')
   await page.getByRole('button', { name: '登 录' }).click()
+  await expect(page).toHaveURL(/\/dashboard$/)
   await page.goto(`${baseUrl}/knowledge`)
   await page.getByRole('button', { name: '导入文件' }).click()
   return page.getByRole('dialog', { name: '批量导入文件' })
