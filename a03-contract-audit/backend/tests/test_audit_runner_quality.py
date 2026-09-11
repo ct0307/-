@@ -4,7 +4,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Query, Session
 
 from app.db.session import Base
-from app.models.models import Contract, Risk
+from app.llm.base import LLMError
+from app.models.models import AuditBatch, AuditBatchItem, Contract, Risk, User
 from app.services.audit import runner
 from app.services.audit.auditor import _record_llm_call
 from app.services.audit.runner import run_audit
@@ -110,14 +111,24 @@ def test_short_native_text_requires_review_without_duplicate_parse_risk(
     assert [risk.category for risk in risks].count("文本解析失败") == 1
 
 
-def test_run_audit_locks_contract_and_commits_once(monkeypatch, db: Session):
+def test_run_audit_releases_claim_transaction_before_external_work(monkeypatch, db: Session):
     contract = _contract(db, "atomic.txt")
     parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
-    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    transaction_states: list[bool] = []
+
+    def fake_extract(_path):
+        transaction_states.append(db.in_transaction())
+        return parsed
+
+    def fake_audit(*_args, **_kwargs):
+        transaction_states.append(db.in_transaction())
+        return {"risks": [], "cross_checks": []}
+
+    monkeypatch.setattr(runner, "extract_document", fake_extract)
     monkeypatch.setattr(
         runner,
         "audit_contract",
-        lambda *_args, **_kwargs: {"risks": [], "cross_checks": []},
+        fake_audit,
     )
 
     lock_calls = 0
@@ -141,8 +152,45 @@ def test_run_audit_locks_contract_and_commits_once(monkeypatch, db: Session):
 
     run_audit(db, contract)
 
-    assert lock_calls == 1
-    assert commits == 1
+    assert transaction_states == [False, False]
+    assert lock_calls == 2
+    assert commits == 2
+
+
+def test_stale_audit_generation_cannot_publish(monkeypatch, db: Session):
+    from app.services.audit.runner import StaleAuditRun
+
+    contract = _contract(db, "stale.txt")
+    old_risk = Risk(
+        contract_id=contract.id,
+        agent="legal",
+        level="low",
+        category="原结果",
+        original_text="原文",
+        basis="依据",
+        suggestion="建议",
+        confidence=80,
+        tier="green",
+        review_status="pending",
+        rag_sources="[]",
+    )
+    db.add(old_risk)
+    db.commit()
+    parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+
+    def supersede_run(*_args, **_kwargs):
+        current = db.get(Contract, contract.id)
+        current.audit_generation += 1
+        db.commit()
+        return {"risks": [], "cross_checks": []}
+
+    monkeypatch.setattr(runner, "audit_contract", supersede_run)
+
+    with pytest.raises(StaleAuditRun):
+        run_audit(db, contract)
+
+    assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 1
 
 
 def test_run_audit_restores_previous_status_after_failure(monkeypatch, db: Session):
@@ -208,11 +256,14 @@ def test_llm_call_log_joins_caller_transaction_without_committing():
         def add(self, _row):
             pass
 
-        def flush(self):
-            self.flushed = True
-
         def commit(self):
             self.committed = True
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
 
     db = FakeSession()
     response = SimpleNamespace(
@@ -222,7 +273,158 @@ def test_llm_call_log_joins_caller_transaction_without_committing():
         latency_ms=20,
     )
 
-    _record_llm_call(db, 1, "legal", response)
+    _record_llm_call(1, "legal", response, session_factory=lambda: db)
 
-    assert db.flushed is True
-    assert db.committed is False
+    assert db.committed is True
+
+
+def test_llm_error_propagates_without_creating_a_fake_risk(monkeypatch):
+    from app.services.audit import auditor
+
+    monkeypatch.setattr(
+        auditor,
+        "_agent_audit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            LLMError("C:/secret/provider timeout")
+        ),
+    )
+
+    with pytest.raises(LLMError, match="provider timeout"):
+        auditor.audit_contract({}, "有效合同正文" * 60)
+
+
+def test_task_publish_rolls_back_risks_and_terminal_state_together(monkeypatch, db: Session):
+    user = User(
+        username="atomic-user",
+        password_hash="not-used",
+        role="legal",
+        department="法务部",
+    )
+    db.add(user)
+    db.flush()
+    contract = Contract(
+        filename="atomic-task.txt",
+        storage_path="/atomic-task.txt",
+        department=user.department,
+        uploaded_by=user.id,
+        status="auditing",
+        audit_generation=1,
+    )
+    batch = AuditBatch(
+        owner_id=user.id,
+        department=user.department,
+        idempotency_key="atomic-task-publish",
+    )
+    db.add_all([contract, batch])
+    db.flush()
+    item = AuditBatchItem(
+        batch_id=batch.id,
+        contract_id=contract.id,
+        filename=contract.filename,
+        status="auditing",
+        audit_generation=1,
+        execution_token="atomic-token",
+    )
+    db.add(item)
+    db.commit()
+
+    parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    monkeypatch.setattr(
+        runner,
+        "audit_contract",
+        lambda *_args, **_kwargs: {
+            "risks": [{
+                "agent": "legal",
+                "level": "high",
+                "category": "原子发布测试",
+                "original_text": "测试原文",
+                "basis": "测试依据",
+                "suggestion": "测试建议",
+                "confidence": 90,
+                "tier": "red",
+            }],
+            "cross_checks": [],
+        },
+    )
+    original_commit = db.commit
+    commits = 0
+
+    def fail_publish_commit():
+        nonlocal commits
+        commits += 1
+        if commits == 1:
+            raise RuntimeError("publish commit failed")
+        return original_commit()
+
+    monkeypatch.setattr(db, "commit", fail_publish_commit)
+
+    with pytest.raises(RuntimeError, match="publish commit failed"):
+        run_audit(
+            db,
+            contract,
+            generation=1,
+            batch_item_id=item.id,
+            execution_token="atomic-token",
+        )
+
+    db.rollback()
+    assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
+    assert db.get(AuditBatchItem, item.id).status == "auditing"
+
+
+def test_expired_worker_execution_token_cannot_publish(monkeypatch, db: Session):
+    user = User(
+        username="fencing-user",
+        password_hash="not-used",
+        role="legal",
+        department="法务部",
+    )
+    db.add(user)
+    db.flush()
+    contract = Contract(
+        filename="fencing.txt",
+        storage_path="/fencing.txt",
+        department=user.department,
+        uploaded_by=user.id,
+        status="auditing",
+        audit_generation=1,
+    )
+    batch = AuditBatch(
+        owner_id=user.id,
+        department=user.department,
+        idempotency_key="fencing-token-test",
+    )
+    db.add_all([contract, batch])
+    db.flush()
+    item = AuditBatchItem(
+        batch_id=batch.id,
+        contract_id=contract.id,
+        filename=contract.filename,
+        status="auditing",
+        audit_generation=1,
+        execution_token="new-worker-token",
+    )
+    db.add(item)
+    db.commit()
+    monkeypatch.setattr(
+        runner,
+        "extract_document",
+        lambda _path: DocumentParseResult(text="有效合同正文" * 60, source="native"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "audit_contract",
+        lambda *_args, **_kwargs: {"risks": [], "cross_checks": []},
+    )
+
+    with pytest.raises(runner.StaleAuditRun, match="execution token"):
+        run_audit(
+            db,
+            contract,
+            generation=1,
+            batch_item_id=item.id,
+            execution_token="expired-worker-token",
+        )
+
+    assert db.get(AuditBatchItem, item.id).status == "auditing"

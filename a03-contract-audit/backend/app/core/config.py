@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "qwen2.5:14b"
     LLM_TIMEOUT: int = 120
+    LLM_MAX_OUTPUT_TOKENS: int = 1600
 
     # Embedding 配置（RAG 向量化用）
     # EMBED_BACKEND=local（默认）：sentence-transformers 本地模型，合同数据不出企业

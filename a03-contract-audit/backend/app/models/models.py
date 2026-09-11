@@ -34,6 +34,13 @@ class User(Base):
 
 class Contract(Base):
     __tablename__ = "contracts"
+    __table_args__ = (
+        UniqueConstraint(
+            "uploaded_by",
+            "upload_idempotency_key",
+            name="uq_contracts_uploader_upload_idempotency",
+        ),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     filename: Mapped[str] = mapped_column(String(255))
     storage_path: Mapped[str] = mapped_column(String(512))  # 私有化本地存储路径
@@ -41,6 +48,9 @@ class Contract(Base):
     department: Mapped[str] = mapped_column(String(64), default="")  # 访问隔离维度
     status: Mapped[str] = mapped_column(String(32), default="uploaded")  # uploaded/parsed/auditing/done
     uploaded_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    upload_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    audit_generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     elements_json: Mapped[str] = mapped_column(Text, default="{}")  # JSON：解析要素（甲方/标的/收付款节点等）
     parse_source: Mapped[str] = mapped_column(
         String(16), default="native", server_default="native"
@@ -66,6 +76,7 @@ class AuditBatch(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     department: Mapped[str] = mapped_column(String(64), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_fingerprint: Mapped[str] = mapped_column(String(64), default="", server_default="")
     dimensions_json: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
     total: Mapped[int] = mapped_column(Integer, default=0)
@@ -94,6 +105,10 @@ class AuditBatchItem(Base):
     filename: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    audit_generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    execution_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -124,6 +139,7 @@ class Risk(Base):
     __tablename__ = "risks"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     contract_id: Mapped[int] = mapped_column(ForeignKey("contracts.id"))
+    audit_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     level: Mapped[str] = mapped_column(String(8))  # high/medium/low
     category: Mapped[str] = mapped_column(String(64))
     agent: Mapped[str] = mapped_column(String(16), default="legal")  # 风险归属智能体：legal/finance
@@ -277,6 +293,7 @@ class LLMCallLog(Base):
     __tablename__ = "llm_call_logs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     contract_id: Mapped[int | None] = mapped_column(ForeignKey("contracts.id"), nullable=True)
+    audit_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     agent: Mapped[str] = mapped_column(String(16), default="")       # legal/finance
     provider: Mapped[str] = mapped_column(String(32), default="")    # deepseek/qwen/openclaw
     model: Mapped[str] = mapped_column(String(64), default="")

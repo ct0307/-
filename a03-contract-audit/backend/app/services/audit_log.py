@@ -16,8 +16,8 @@ def record(
     detail: str = "",
     ip: str = "",
 ) -> None:
-    """记录审计日志。ip 从调用方按需传入（auth/合同操作等），其余内部操作留空。"""
+    """加入审计日志并刷新；事务提交由调用用例显式负责。"""
     entry = AuditLog(user_id=user_id, action=action, target=target, detail=detail, ip=ip)
     db.add(entry)
-    db.commit()
+    db.flush()
     log.info("audit_log", user_id=user_id, action=action, target=target, ip=ip or "-")

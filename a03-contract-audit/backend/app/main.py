@@ -29,8 +29,17 @@ async def lifespan(app: FastAPI):
 
         recovered = recover_orphaned_batch_items()
         log.info("audit_recovery.backend_startup", recovered=recovered)
+    else:
+        from app.tasks.dispatcher import recover_local_audit_items
+
+        recovered = recover_local_audit_items()
+        log.info("audit_recovery.local_startup", recovered=recovered)
     log.info("app.startup", env=settings.APP_ENV, llm_provider=settings.LLM_PROVIDER)
     yield
+    if not settings.AUDIT_ASYNC:
+        from app.tasks.dispatcher import shutdown_local_dispatcher
+
+        shutdown_local_dispatcher()
     log.info("app.shutdown")
 
 

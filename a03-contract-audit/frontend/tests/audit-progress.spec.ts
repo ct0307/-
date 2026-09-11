@@ -1,6 +1,20 @@
 import { expect, test } from '@playwright/test'
 
-import { auditProgressDisplay, waitForAuditTerminal } from '../src/utils/audit-progress'
+import {
+  AUDIT_POLLING_MAX_ATTEMPTS,
+  auditProgressDisplay,
+  waitForAuditTerminal,
+} from '../src/utils/audit-progress'
+import { PARSE_TIMEOUT_MS } from '../src/api/contract'
+
+
+test('default polling budget covers the backend 30 minute task limit', () => {
+  expect(AUDIT_POLLING_MAX_ATTEMPTS).toBeGreaterThanOrEqual(1860)
+})
+
+test('parse timeout leaves transport margin beyond the backend OCR budget', () => {
+  expect(PARSE_TIMEOUT_MS).toBeGreaterThan(120_000)
+})
 
 
 test('single audit never invents a percentage while backend request is running', () => {
@@ -41,4 +55,28 @@ test('single audit surfaces persisted failure status', async () => {
     async () => ({ contract_id: 1, status: 'audit_failed' }),
     { intervalMs: 0, maxAttempts: 1 },
   )).rejects.toThrow('审查任务执行失败')
+})
+
+test('single audit surfaces the persisted backend failure detail', async () => {
+  await expect(waitForAuditTerminal(
+    async () => ({
+      contract_id: 1,
+      status: 'audit_failed',
+      error_code: 'MODEL_TIMEOUT',
+      error_message: '模型响应超时，请稍后重试',
+      retryable: true,
+    }),
+    { intervalMs: 0, maxAttempts: 1 },
+  )).rejects.toMatchObject({
+    message: '模型响应超时，请稍后重试',
+    code: 'MODEL_TIMEOUT',
+    retryable: true,
+  })
+})
+
+test('single audit fails closed for an unknown persisted status', async () => {
+  await expect(waitForAuditTerminal(
+    async () => ({ contract_id: 1, status: 'mystery_state' }),
+    { intervalMs: 0, maxAttempts: 1 },
+  )).rejects.toThrow('审查任务返回未知状态：mystery_state')
 })

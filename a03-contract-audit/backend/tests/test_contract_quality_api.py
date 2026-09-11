@@ -1,15 +1,23 @@
+from io import BytesIO
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.api.v1.endpoints import contracts
+from app.api.v1.endpoints import auth, contracts, lookup
+from app.core.security import hash_password
 from app.db.session import Base
-from app.models.models import Contract, User
+from app.models.models import AuditLog, Contract, LookupItem, User
+from app.schemas.contract import LookupItemCreate
 from app.schemas.contract import AuditRequest
 from app.schemas.contract import ParseErrorResponse
 from app.services.parser.extractor import DocumentParseResult
 from app.services.parser.ocr import OCRUnavailable
+from app.services import audit_log
 
 
 class _CaptureLogger:
@@ -39,6 +47,244 @@ def _create_uploaded_contract(db: Session, tmp_path) -> tuple[User, Contract]:
     db.add(contract)
     db.commit()
     return user, contract
+
+
+def _upload(filename: str, content: bytes) -> object:
+    from fastapi import UploadFile
+
+    return UploadFile(filename=filename, file=BytesIO(content))
+
+
+def test_single_upload_is_idempotent_and_rejects_payload_mismatch(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username="upload-idempotency",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+
+        first = contracts.upload_contract(
+            _upload("contract.pdf", b"same contract"),
+            contract_type="",
+            idempotency_key="upload-request-001",
+            db=db,
+            user=user,
+        )
+        repeated = contracts.upload_contract(
+            _upload("contract.pdf", b"same contract"),
+            contract_type="",
+            idempotency_key="upload-request-001",
+            db=db,
+            user=user,
+        )
+
+        assert repeated.id == first.id
+        assert db.query(Contract).count() == 1
+        assert len(list(tmp_path.iterdir())) == 1
+        assert first.content_sha256 is not None
+
+        with pytest.raises(HTTPException) as exc_info:
+            contracts.upload_contract(
+                _upload("contract.pdf", b"different contract"),
+                contract_type="",
+                idempotency_key="upload-request-001",
+                db=db,
+                user=user,
+            )
+
+        assert exc_info.value.status_code == 409
+        assert db.query(Contract).count() == 1
+        assert len(list(tmp_path.iterdir())) == 1
+    engine.dispose()
+
+
+def test_upload_keeps_committed_file_when_response_refresh_fails(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username="upload-refresh-failure",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+
+        def fail_refresh(*args, **kwargs):
+            raise RuntimeError("connection lost after commit")
+
+        monkeypatch.setattr(db, "refresh", fail_refresh)
+        with pytest.raises(HTTPException) as exc_info:
+            contracts.upload_contract(
+                _upload("contract.pdf", b"committed contract"),
+                contract_type="",
+                idempotency_key="upload-request-refresh-failure",
+                db=db,
+                user=user,
+            )
+
+        assert exc_info.value.status_code == 500
+        assert db.query(Contract).count() == 1
+        assert len(list(tmp_path.iterdir())) == 1
+    engine.dispose()
+
+
+def test_legacy_batch_upload_cleans_uncommitted_file_and_hides_internal_error(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username="legacy-batch-failure",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            contracts.audit_log,
+            "record",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("postgresql://admin:secret@db.internal/contracts")
+            ),
+        )
+
+        result = contracts.batch_upload_contracts(
+            files=[_upload("contract.txt", "合同正文".encode("utf-8"))],
+            contract_type="采购合同",
+            db=db,
+            user=user,
+        )
+
+        assert result == [{
+            "filename": "contract.txt",
+            "status": "failed",
+            "error": "合同上传失败，已回滚",
+        }]
+        assert db.query(Contract).count() == 0
+        assert list(tmp_path.iterdir()) == []
+    engine.dispose()
+
+
+def test_legacy_batch_upload_reports_success_after_commit_when_refresh_fails(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username="legacy-batch-refresh-failure",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            db,
+            "refresh",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("connection lost after commit")
+            ),
+        )
+
+        result = contracts.batch_upload_contracts(
+            files=[_upload("contract.txt", "合同正文".encode("utf-8"))],
+            contract_type="采购合同",
+            db=db,
+            user=user,
+        )
+
+        saved = db.query(Contract).one()
+        assert result == [{
+            "filename": "contract.txt",
+            "status": "success",
+            "contract_id": saved.id,
+            "warning": "合同已上传，但响应确认失败",
+        }]
+        assert len(list(tmp_path.iterdir())) == 1
+    engine.dispose()
+
+
+def test_audit_log_record_does_not_own_the_transaction():
+    db = Mock()
+
+    audit_log.record(db, user_id=7, action="upload", target="contract:1")
+
+    db.add.assert_called_once()
+    db.flush.assert_called_once()
+    db.commit.assert_not_called()
+
+
+def test_login_commits_audit_log_before_request_session_closes():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(User(
+            username="audit-login",
+            password_hash=hash_password("secret123"),
+            role="legal",
+            department="legal",
+        ))
+        db.commit()
+
+        request = Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/login",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+        })
+        auth.login(
+            request=request,
+            form=SimpleNamespace(username="audit-login", password="secret123"),
+            db=db,
+        )
+
+    with Session(engine) as db:
+        assert db.query(AuditLog).filter(AuditLog.action == "login").count() == 1
+    engine.dispose()
+
+
+def test_lookup_write_rolls_back_when_audit_log_fails(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username="audit-admin",
+            password_hash="hash",
+            role="admin",
+            department="admin",
+        )
+        db.add(user)
+        db.commit()
+
+        def fail_record(*args, **kwargs):
+            raise RuntimeError("audit storage unavailable")
+
+        monkeypatch.setattr(lookup.audit_log, "record", fail_record)
+        with pytest.raises(RuntimeError, match="audit storage unavailable"):
+            lookup.create_lookup(
+                LookupItemCreate(
+                    category="department",
+                    value="研发部",
+                    sort_order=1,
+                ),
+                db=db,
+                current_user=user,
+            )
+
+    with Session(engine) as db:
+        assert db.query(LookupItem).count() == 0
+    engine.dispose()
 
 
 def test_history_status_prioritizes_manual_review():
@@ -84,7 +330,13 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
                 "OCR 平均置信度低于 75%",
             ),
         )
-        monkeypatch.setattr(contracts, "extract_elements_with_llm", lambda _text: {})
+        monkeypatch.setattr(contracts, "extract_elements", lambda _text: {})
+        monkeypatch.setattr(
+            contracts,
+            "extract_elements_with_llm",
+            lambda _text: pytest.fail("同步解析端点不得调用大模型"),
+            raising=False,
+        )
 
         response = contracts.parse_contract(contract.id, db=db, user=user)
 
@@ -216,8 +468,8 @@ def test_parse_contract_rolls_back_partial_quality_changes(monkeypatch, tmp_path
         )
         monkeypatch.setattr(
             contracts,
-            "extract_elements_with_llm",
-            lambda _text: (_ for _ in ()).throw(RuntimeError("C:/secret/llm")),
+            "extract_elements",
+            lambda _text: (_ for _ in ()).throw(RuntimeError("C:/secret/parser")),
         )
 
         with pytest.raises(HTTPException):

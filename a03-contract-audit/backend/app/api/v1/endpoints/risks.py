@@ -42,9 +42,9 @@ def update_risk_status(
             contract.requires_review = False
             contract.review_reason = None
             contract.status = "done"
-    db.commit()
     audit_log.record(
         db, user_id=user.id, action="update_risk",
         target=f"risk:{risk_id}", detail=f"{old} -> {payload.review_status}",
     )
+    db.commit()
     return {"risk_id": risk_id, "review_status": risk.review_status}

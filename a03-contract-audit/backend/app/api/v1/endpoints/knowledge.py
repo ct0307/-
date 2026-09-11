@@ -434,7 +434,7 @@ def _do_index(chunks: list[dict], db: Session) -> int:
     try:
         for row in rows:
             db.add(row)
-        db.commit()
+        db.flush()
     except Exception:
         db.rollback()
         raise
@@ -466,7 +466,7 @@ def _replace_source_chunks(db: Session, source: str, chunks: list[dict]) -> tupl
         deleted = db.query(KnowledgeChunk).filter(KnowledgeChunk.source == source).delete()
         for row in rows:
             db.add(row)
-        db.commit()
+        db.flush()
     except Exception:
         db.rollback()
         raise
@@ -495,6 +495,7 @@ def import_knowledge(
         db, user_id=user.id, action="import_knowledge", target=payload.category,
         detail=f"mode={split.mode} chunks={count} skipped={skipped}",
     )
+    db.commit()
     return {
         "category": payload.category,
         "source": payload.source,
@@ -580,6 +581,7 @@ async def import_knowledge_file(
             f"skipped={skipped} placeholders_filtered={filtered_placeholders}"
         ),
     )
+    db.commit()
     return {
         "source": source,
         "category": final_category,
@@ -632,26 +634,33 @@ async def apply_legal_source(
             extracted_text=text_content,
             token=token,
             user_id=user.id,
+            commit=False,
         )
+        audit_log.record(
+            db,
+            user_id=user.id,
+            action="import_authoritative_legal_source",
+            target=result.source_id,
+            detail=(
+                f"sha256={hashlib.sha256(raw).hexdigest()} "
+                f"articles={result.article_count} chunks={result.chunk_count} "
+                f"embedding_signature={result.embedding_signature}"
+            ),
+        )
+        db.commit()
+        return asdict(result)
     except LegalImportError as exc:
+        db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except LegalSourceError as exc:
+        db.rollback()
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     except LLMError as exc:
+        db.rollback()
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
-
-    audit_log.record(
-        db,
-        user_id=user.id,
-        action="import_authoritative_legal_source",
-        target=result.source_id,
-        detail=(
-            f"sha256={hashlib.sha256(raw).hexdigest()} "
-            f"articles={result.article_count} chunks={result.chunk_count} "
-            f"embedding_signature={result.embedding_signature}"
-        ),
-    )
-    return asdict(result)
+    except Exception:
+        db.rollback()
+        raise
 
 
 def _check_article_overlap(chunks: list[str], category: str, source: str, db: Session) -> str | None:

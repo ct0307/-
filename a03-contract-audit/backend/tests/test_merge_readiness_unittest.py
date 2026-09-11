@@ -140,6 +140,13 @@ class MergeReadinessTests(unittest.TestCase):
         finally:
             engine.dispose()
 
+    def test_sqlite_hot_migration_keeps_execution_token_on_batch_items(self):
+        contract_columns = dict(init_db_module._DEV_COLUMNS["contracts"])
+        item_columns = dict(init_db_module._DEV_COLUMNS["audit_batch_items"])
+
+        self.assertNotIn("execution_token", contract_columns)
+        self.assertEqual(item_columns["execution_token"], "VARCHAR(64)")
+
     def test_finishing_last_pending_risk_completes_manual_review(self):
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)

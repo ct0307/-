@@ -66,9 +66,10 @@ def create_rule(
         builtin=False,
     )
     db.add(row)
+    db.flush()
+    audit_log.record(db, user_id=user.id, action="create_rule", target=f"rule:{row.id}", detail=payload.name)
     db.commit()
     db.refresh(row)
-    audit_log.record(db, user_id=user.id, action="create_rule", target=f"rule:{row.id}", detail=payload.name)
     return AuditRuleOut.from_orm_row(row)
 
 
@@ -85,8 +86,8 @@ def delete_rule(
     if row.builtin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "内置规则不可删除")
     db.delete(row)
-    db.commit()
     audit_log.record(db, user_id=user.id, action="delete_rule", target=f"rule:{pk}", detail=row.name)
+    db.commit()
 
 
 # ──────────────── 合同模板 ────────────────
@@ -113,9 +114,10 @@ def create_template(
         builtin=False,
     )
     db.add(row)
+    db.flush()
+    audit_log.record(db, user_id=user.id, action="create_template", target=f"template:{row.id}", detail=payload.name)
     db.commit()
     db.refresh(row)
-    audit_log.record(db, user_id=user.id, action="create_template", target=f"template:{row.id}", detail=payload.name)
     return ContractTemplateOut.from_orm_row(row)
 
 
@@ -132,5 +134,5 @@ def delete_template(
     if row.builtin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "内置模板不可删除")
     db.delete(row)
-    db.commit()
     audit_log.record(db, user_id=user.id, action="delete_template", target=f"template:{pk}", detail=row.name)
+    db.commit()

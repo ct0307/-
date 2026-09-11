@@ -69,12 +69,13 @@ def create_rectification(
         risk_id=payload.risk_id,
     )
     db.add(row)
-    db.commit()
-    db.refresh(row)
+    db.flush()
     audit_log.record(
         db, user_id=user.id, action="create_rectification",
         target=f"rectification:{row.id}", detail=f"{payload.contract} · {payload.risk}",
     )
+    db.commit()
+    db.refresh(row)
     return RectificationOut.from_orm_row(row)
 
 
@@ -93,10 +94,10 @@ def update_rectification_status(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "整改项不存在")
     old = row.status
     row.status = payload.status
-    db.commit()
-    db.refresh(row)
     audit_log.record(
         db, user_id=user.id, action="update_rectification",
         target=f"rectification:{row.id}", detail=f"{old} -> {payload.status}",
     )
+    db.commit()
+    db.refresh(row)
     return RectificationOut.from_orm_row(row)

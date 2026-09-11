@@ -11,12 +11,15 @@ from sqlalchemy.orm import Session
 from app.api.deps import require_roles
 from app.core.config import settings
 from app.core.crypto import encrypt_bytes
+from app.core.logging import get_logger
 from app.db.session import get_db
 from app.models.models import AuditBatch, AuditBatchItem, AuditLog, Contract, User
 from app.schemas.batch import BatchOut, BatchRetryOut
 from app.services.batch.service import retry_failed_item, summarize
+from app.tasks.dispatcher import dispatch_audit_item
 
 router = APIRouter()
+log = get_logger("batches")
 
 _ALLOWED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
 _MAX_BATCH_FILES = 200
@@ -54,10 +57,21 @@ def _validate_uploads(files: list[UploadFile]) -> list[_ValidatedUpload]:
 
 
 def _dispatch_item(item: AuditBatchItem, dimensions: list[str]) -> str:
-    from app.tasks.audit_tasks import run_contract_audit
+    return dispatch_audit_item(item, dimensions)
 
-    task = run_contract_audit.delay(item.contract_id, dimensions, item.id)
-    return str(task.id)
+
+def _mark_dispatch_pending(item: AuditBatchItem, exc: Exception) -> None:
+    item.status = "queued"
+    item.task_id = None
+    item.error_code = "DISPATCH_PENDING"
+    item.error = "任务已保存，正在等待重新派发"
+    log.error(
+        "audit.dispatch_pending",
+        batch_id=item.batch_id,
+        job_id=item.id,
+        contract_id=item.contract_id,
+        exception_type=type(exc).__name__,
+    )
 
 
 def _refresh_batch(batch: AuditBatch) -> None:
@@ -100,6 +114,7 @@ def create_batch(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "请先确认合同类型")
     os.makedirs(settings.storage_path, exist_ok=True)
     created_paths: list[str] = []
+    committed = False
     try:
         batch = AuditBatch(
             owner_id=user.id,
@@ -124,6 +139,7 @@ def create_batch(
                 department=user.department,
                 status="uploaded",
                 uploaded_by=user.id,
+                audit_generation=1,
             )
             db.add(contract)
             db.flush()
@@ -131,6 +147,7 @@ def create_batch(
                 contract_id=contract.id,
                 filename=upload.filename,
                 status="queued",
+                audit_generation=1,
             ))
 
         db.add(AuditLog(
@@ -140,6 +157,7 @@ def create_batch(
             detail=f"files={len(uploads)},dimensions={','.join(dimensions) or 'all'}",
         ))
         db.commit()
+        committed = True
         db.refresh(batch)
     except IntegrityError:
         db.rollback()
@@ -152,23 +170,32 @@ def create_batch(
                 if os.path.isfile(path):
                     os.unlink(path)
             return BatchOut.model_validate(duplicate)
-        _cleanup_created_files(created_paths)
+        if not committed:
+            _cleanup_created_files(created_paths)
         raise HTTPException(status.HTTP_409_CONFLICT, "批次幂等键冲突")
     except HTTPException:
         db.rollback()
-        _cleanup_created_files(created_paths)
+        if not committed:
+            _cleanup_created_files(created_paths)
         raise
     except Exception as exc:
         db.rollback()
-        _cleanup_created_files(created_paths)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "批次创建失败，已回滚") from exc
+        if not committed:
+            _cleanup_created_files(created_paths)
+        detail = (
+            "批次已创建，但响应确认失败，请使用原幂等键重试查询"
+            if committed
+            else "批次创建失败，已回滚"
+        )
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail) from exc
 
     for item in batch.items:
         try:
             item.task_id = _dispatch_item(item, dimensions)
+            item.error_code = None
+            item.error = None
         except Exception as exc:
-            item.status = "failed"
-            item.error = f"任务派发失败: {str(exc)[:240]}"
+            _mark_dispatch_pending(item, exc)
     _refresh_batch(batch)
     db.commit()
     db.refresh(batch)
@@ -226,6 +253,7 @@ def retry_batch(
         item.status = decision.status
         item.attempts = decision.attempts
         item.error = None
+        item.error_code = None
         item.finished_at = None
         item.task_id = None
         pending_dispatch.append(item)
@@ -239,8 +267,7 @@ def retry_batch(
             item.task_id = _dispatch_item(item, effective_dimensions)
             retried += 1
         except Exception as exc:
-            item.status = "failed"
-            item.error = f"任务派发失败: {str(exc)[:240]}"
+            _mark_dispatch_pending(item, exc)
     _refresh_batch(batch)
     db.commit()
     return BatchRetryOut(batch_id=batch.id, retried=retried, status=batch.status)

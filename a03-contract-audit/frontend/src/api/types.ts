@@ -44,7 +44,12 @@ export interface AuditResult {
   contract_id: number
   risk_count?: number
   task_id?: string
+  job_id?: number
+  batch_id?: number
   status: string
+  error_code?: string | null
+  error_message?: string | null
+  retryable?: boolean
   cross_checks?: CrossCheckOut[]
   requires_review?: boolean
   ocr_confidence?: number | null

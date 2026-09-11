@@ -25,6 +25,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
         model: str | None = None,
         timeout: int | None = None,
         embed_model: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> None:
         # base_url 末尾去斜杠，拼接端点时统一加前缀
         self.base_url = (base_url or settings.LLM_BASE_URL).rstrip("/")
@@ -33,6 +34,13 @@ class OpenAICompatibleAdapter(LLMAdapter):
         # embedding 用独立模型（EMBED_MODEL），与 chat 模型解耦
         self.embed_model = embed_model or settings.EMBED_MODEL
         self.timeout = timeout or settings.LLM_TIMEOUT
+        self.max_output_tokens = (
+            settings.LLM_MAX_OUTPUT_TOKENS
+            if max_output_tokens is None
+            else max_output_tokens
+        )
+        if self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens 必须大于 0")
 
     def _headers(self) -> dict[str, str]:
         # 本地 Ollama 等无需鉴权；有 key 才带 Authorization，避免空 Bearer 被拒。
@@ -53,11 +61,25 @@ class OpenAICompatibleAdapter(LLMAdapter):
             log.error("llm.timeout", path=path, timeout=self.timeout)
             raise LLMError(f"LLM 调用超时（{self.timeout}s）：{path}") from exc
         except httpx.HTTPStatusError as exc:
-            log.error("llm.http_error", path=path, status=exc.response.status_code, body=exc.response.text[:500])
+            request_id = (
+                exc.response.headers.get("x-ds-trace-id")
+                or exc.response.headers.get("x-request-id")
+                or ""
+            )
+            log.error(
+                "llm.http_error",
+                path=path,
+                status=exc.response.status_code,
+                request_id=request_id,
+            )
             raise LLMError(f"LLM 返回错误状态 {exc.response.status_code}：{path}") from exc
         except httpx.HTTPError as exc:
-            log.error("llm.request_error", path=path, error=str(exc))
-            raise LLMError(f"LLM 请求失败：{exc}") from exc
+            log.error(
+                "llm.request_error",
+                path=path,
+                exception_type=type(exc).__name__,
+            )
+            raise LLMError(f"LLM 请求失败：{path}") from exc
         latency_ms = int((time.perf_counter() - start) * 1000)
         return data, latency_ms
 
@@ -69,6 +91,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 {"role": "user", "content": user},
             ],
             "temperature": temperature,
+            "max_tokens": self.max_output_tokens,
             "stream": False,
         }
         data, latency_ms = self._post("/chat/completions", payload)

@@ -9,7 +9,15 @@ import {
   updateRiskStatus,
   uploadContract,
 } from '@/api/contract'
-import { waitForAuditTerminal } from '@/utils/audit-progress'
+import {
+  AuditTaskError,
+  isAuditPendingStatus,
+  waitForAuditTerminal,
+} from '@/utils/audit-progress'
+import {
+  createAuditIdempotencyKey,
+  createUploadIdempotencyKey,
+} from '@/utils/idempotency'
 
 export type UploadStatus = 'uploading' | 'upload_failed' | 'parsing' | 'parse_failed' | 'parsed'
 
@@ -20,6 +28,45 @@ export interface UploadRecord {
   status: UploadStatus
   errorCode: string
   errorMessage: string
+}
+
+interface ActiveAudit {
+  owner: string
+  contractId: number
+  filename: string
+  idempotencyKey: string
+  contractType: string
+  dimensions: string[]
+  jobId?: number
+  batchId?: number
+}
+
+const ACTIVE_AUDIT_STORAGE_KEY = 'qijian-active-audit'
+
+function readActiveAudit(): ActiveAudit | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_AUDIT_STORAGE_KEY)
+    if (!raw) return null
+    const value = JSON.parse(raw) as Partial<ActiveAudit>
+    const currentOwner = window.localStorage.getItem('username') || ''
+    if (
+      value.owner !== currentOwner
+      || !Number.isInteger(value.contractId)
+      || typeof value.filename !== 'string'
+      || typeof value.idempotencyKey !== 'string'
+      || typeof value.contractType !== 'string'
+      || !Array.isArray(value.dimensions)
+      || !value.dimensions.every(item => typeof item === 'string')
+    ) {
+      window.localStorage.removeItem(ACTIVE_AUDIT_STORAGE_KEY)
+      return null
+    }
+    return value as ActiveAudit
+  } catch {
+    window.localStorage.removeItem(ACTIVE_AUDIT_STORAGE_KEY)
+    return null
+  }
 }
 
 function errorInfo(error: unknown): { code: string; message: string } {
@@ -35,6 +82,12 @@ function errorInfo(error: unknown): { code: string; message: string } {
   return { code: '', message: '上传或解析失败，请稍后重试' }
 }
 
+function isMissingPersistedAudit(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const response = (error as { response?: { status?: unknown } }).response
+  return response?.status === 404
+}
+
 // 审查会话状态：承接 上传→解析→审查→复核 真实闭环，供 AuditView 及子组件共享。
 export const useAuditSessionStore = defineStore('auditSession', () => {
   const contractId = ref<number | null>(null)
@@ -47,6 +100,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   const reviewReason = ref('')
   const busy = ref(false)
   const uploadRecords = ref<UploadRecord[]>([])
+  const activeAudit = ref<ActiveAudit | null>(readActiveAudit())
   let uploadSequence = 0
   let _auditAbort: AbortController | null = null
   // 0 未上传 / 1 已解析 / 2 已审查
@@ -59,6 +113,17 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     medium: risks.value.filter((r) => r.level === 'medium').length,
     low: risks.value.filter((r) => r.level === 'low').length,
   }))
+  const hasActiveAudit = computed(() => activeAudit.value !== null)
+
+  function saveActiveAudit(value: ActiveAudit | null) {
+    activeAudit.value = value
+    if (typeof window === 'undefined') return
+    if (value) {
+      window.localStorage.setItem(ACTIVE_AUDIT_STORAGE_KEY, JSON.stringify(value))
+    } else {
+      window.localStorage.removeItem(ACTIVE_AUDIT_STORAGE_KEY)
+    }
+  }
 
   function applyQuality(source: ParseResult | AuditResult) {
     requiresReview.value = source.requires_review ?? false
@@ -79,6 +144,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     reviewReason.value = ''
     busy.value = false
     uploadRecords.value = []
+    saveActiveAudit(null)
     step.value = 0
   }
 
@@ -129,7 +195,8 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     uploadRecords.value.push(record)
     busy.value = true
     try {
-      const c = await uploadContract(file, contractType)
+      const idempotencyKey = await createUploadIdempotencyKey(file)
+      const c = await uploadContract(file, contractType, idempotencyKey)
       record.contractId = c.id
       record.filename = c.filename
       record.status = 'parsing'
@@ -158,25 +225,102 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
 
   async function runAudit(contractType: string, dimensions?: string[]) {
     if (!contractId.value) return
+    if (busy.value) throw new Error('当前任务处理中，请稍后再试')
+    const currentContractId = contractId.value
+    const selectedDimensions = dimensions ?? []
+    busy.value = true
+    try {
+      const owner = typeof window === 'undefined' ? '' : window.localStorage.getItem('username') || ''
+      const pending = activeAudit.value
+      const recovery: ActiveAudit = pending
+        && pending.owner === owner
+        && pending.contractId === currentContractId
+        ? pending
+        : {
+            owner,
+            contractId: currentContractId,
+            filename: filename.value,
+            idempotencyKey: await createAuditIdempotencyKey(),
+            contractType,
+            dimensions: selectedDimensions,
+          }
+      saveActiveAudit(recovery)
+      _auditAbort = new AbortController()
+      const initial = recovery.jobId
+        ? await getAuditStatus(currentContractId, recovery.jobId, _auditAbort.signal)
+        : await auditContract(
+            currentContractId,
+            recovery.contractType,
+            recovery.dimensions,
+            recovery.idempotencyKey,
+            _auditAbort.signal,
+          )
+      saveActiveAudit({
+        ...recovery,
+        jobId: initial.job_id,
+        batchId: initial.batch_id,
+      })
+      const res = isAuditPendingStatus(initial.status)
+        ? await waitForAuditTerminal(
+            (signal) => getAuditStatus(currentContractId, initial.job_id, signal),
+            { signal: _auditAbort.signal },
+          )
+        : await waitForAuditTerminal(
+            async () => initial,
+            { intervalMs: 0, maxAttempts: 1, signal: _auditAbort.signal },
+          )
+      applyQuality(res)
+      crossChecks.value = res.cross_checks ?? []
+      risks.value = await getRisks(currentContractId, res.job_id ?? initial.job_id)
+      step.value = 2
+      saveActiveAudit(null)
+      return res
+    } catch (error) {
+      if (error instanceof AuditTaskError || isMissingPersistedAudit(error)) saveActiveAudit(null)
+      throw error
+    } finally {
+      busy.value = false
+      _auditAbort = null
+    }
+  }
+
+  async function resumeActiveAudit() {
+    const recovery = activeAudit.value
+    if (!recovery) return null
+    contractId.value = recovery.contractId
+    filename.value = recovery.filename
     busy.value = true
     _auditAbort = new AbortController()
     try {
-      const initial = await auditContract(
-        contractId.value,
-        contractType,
-        dimensions,
-        _auditAbort.signal,
-      )
-      const res = initial.status === 'auditing'
-        ? await waitForAuditTerminal(
-            (signal) => getAuditStatus(contractId.value!, signal),
-            { signal: _auditAbort.signal },
+      const initial = recovery.jobId
+        ? await getAuditStatus(recovery.contractId, recovery.jobId, _auditAbort.signal)
+        : await auditContract(
+            recovery.contractId,
+            recovery.contractType,
+            recovery.dimensions,
+            recovery.idempotencyKey,
+            _auditAbort.signal,
           )
-        : initial
-      applyQuality(res)
-      crossChecks.value = res.cross_checks ?? []
-      risks.value = await getRisks(contractId.value)
+      if (!recovery.jobId && initial.job_id) {
+        saveActiveAudit({
+          ...recovery,
+          jobId: initial.job_id,
+          batchId: initial.batch_id,
+        })
+      }
+      const result = await waitForAuditTerminal(
+        (signal) => getAuditStatus(recovery.contractId, initial.job_id, signal),
+        { signal: _auditAbort.signal },
+      )
+      applyQuality(result)
+      crossChecks.value = result.cross_checks ?? []
+      risks.value = await getRisks(recovery.contractId, result.job_id ?? initial.job_id)
       step.value = 2
+      saveActiveAudit(null)
+      return result
+    } catch (error) {
+      if (error instanceof AuditTaskError || isMissingPersistedAudit(error)) saveActiveAudit(null)
+      throw error
     } finally {
       busy.value = false
       _auditAbort = null
@@ -211,11 +355,13 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     riskCount,
     reviewingCount,
     levelCounts,
+    hasActiveAudit,
     reset,
     uploadAndParse,
     retryParse,
     selectParsedContract,
     runAudit,
+    resumeActiveAudit,
     abortAudit,
     setRiskStatus,
   }

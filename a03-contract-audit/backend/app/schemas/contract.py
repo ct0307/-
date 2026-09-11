@@ -36,7 +36,7 @@ class RiskOut(BaseModel):
 
 
 class CrossCheckOut(BaseModel):
-    """交叉验证 / 冲突消解项：跨 Agent 触发的复查结果（审查态动态结果，不落库）。"""
+    """交叉验证 / 冲突消解项：跨 Agent 触发的持久审查结果。"""
     id: str
     from_agent: str
     to_agent: str
@@ -54,12 +54,17 @@ class AuditRequest(BaseModel):
 
 
 class AuditResponse(BaseModel):
-    """审查触发响应：同步返回风险数与冲突项；异步返回 task_id。"""
+    """审查触发与状态响应，以持久任务状态为事实来源。"""
     contract_id: int
     status: str
     risk_count: int | None = None
     cross_checks: list[CrossCheckOut] = []
     task_id: str | None = None
+    batch_id: int | None = None
+    job_id: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    retryable: bool = False
     requires_review: bool = False
     ocr_confidence: float | None = None
     review_reason: str | None = None
@@ -236,6 +241,7 @@ class LLMCallLogOut(BaseModel):
     """LLM 调用日志行：供演示「可解释性」与 OpenClaw 算力对比。"""
     id: str           # L{n:04d}
     contract_id: int | None
+    audit_job_id: int | None = None
     agent: str        # legal/finance
     provider: str     # deepseek/qwen/openclaw
     model: str

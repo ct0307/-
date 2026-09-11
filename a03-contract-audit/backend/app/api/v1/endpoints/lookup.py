@@ -54,9 +54,16 @@ def create_lookup(
 
     item = LookupItem(category=body.category, value=body.value, sort_order=body.sort_order)
     db.add(item)
+    db.flush()
+    audit_log.record(
+        db,
+        user_id=current_user.id,
+        action="lookup_create",
+        target=body.category,
+        detail=body.value,
+    )
     db.commit()
     db.refresh(item)
-    audit_log.record(db, current_user.id, "lookup_create", body.category, body.value)
     return LookupItemOut(id=item.id, category=item.category, value=item.value, sort_order=item.sort_order)
 
 
@@ -69,6 +76,12 @@ def delete_lookup(
     item = db.get(LookupItem, item_id)
     if not item:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "条目不存在")
-    audit_log.record(db, current_user.id, "lookup_delete", item.category, item.value)
+    audit_log.record(
+        db,
+        user_id=current_user.id,
+        action="lookup_delete",
+        target=item.category,
+        detail=item.value,
+    )
     db.delete(item)
     db.commit()

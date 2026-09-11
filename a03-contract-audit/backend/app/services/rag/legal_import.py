@@ -221,6 +221,7 @@ def apply_legal_import(
     extracted_text: str,
     token: str,
     user_id: int,
+    commit: bool = True,
 ) -> LegalImportResult:
     del filename  # 文件名不参与信任判断，内容和令牌才是安全边界。
     payload = verify_preview_token(token, raw_content=raw_content, user_id=user_id)
@@ -256,7 +257,7 @@ def apply_legal_import(
     # 向量必须在替换事务之前全部生成并通过维度校验。
     rows = retriever.prepare_documents(chunks, embedding_cache=cache)
     db.rollback()
-    with db.begin():
+    try:
         old_article_ids = db.query(LegalArticle.id).filter(
             LegalArticle.source_id == spec.source_id
         )
@@ -297,6 +298,11 @@ def apply_legal_import(
         for chunk, row in zip(chunks, rows):
             row.legal_article_id = article_rows[chunk["article_key"]].id
             db.add(row)
+        if commit:
+            db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     article_numbers = {article.article_number for article in articles}
     first_row = rows[0]

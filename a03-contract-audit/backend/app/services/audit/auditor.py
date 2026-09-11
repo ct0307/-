@@ -80,19 +80,25 @@ _ROLE_DIMENSIONS: dict[str, set[str]] = {
 
 
 def _record_llm_call(
-    db: "Session | None",
     contract_id: int | None,
     agent: str,
     resp,
     mode: str = "llm",
+    audit_job_id: int | None = None,
+    session_factory=None,
 ) -> None:
-    """写入 LLM 调用日志。db 为 None（测试/独立调用）时跳过，不阻断审查。"""
-    if db is None:
+    """以独立短事务写模型调用日志，绝不跨越下一次外部模型调用。"""
+    if contract_id is None:
         return
+    if session_factory is None:
+        from app.db.session import SessionLocal
+        session_factory = SessionLocal
+    log_db = session_factory()
     try:
         from app.models.models import LLMCallLog
-        db.add(LLMCallLog(
+        log_db.add(LLMCallLog(
             contract_id=contract_id,
+            audit_job_id=audit_job_id,
             agent=agent,
             provider=settings.LLM_PROVIDER,
             model=resp.model,
@@ -101,9 +107,12 @@ def _record_llm_call(
             latency_ms=resp.latency_ms,
             mode=mode,
         ))
-        db.flush()
+        log_db.commit()
     except Exception as exc:  # 不让日志写入失败影响审查主链路
-        log.warning("audit.llm_log_failed", error=str(exc)[:120])
+        log_db.rollback()
+        log.warning("audit.llm_log_failed", exception_type=type(exc).__name__)
+    finally:
+        log_db.close()
 
 
 def audit_contract(
@@ -113,6 +122,7 @@ def audit_contract(
     contract_id: int | None = None,
     dimensions: list[str] | None = None,
     contract_type: str = "",
+    audit_job_id: int | None = None,
 ) -> dict:
     """多智能体主从协同审查。dimensions 为空/None 时全量审查。"""
     all_risks: list[dict] = []
@@ -135,13 +145,20 @@ def audit_contract(
                 dimensions=dimensions or [],
                 contract_type=contract_type,
                 timings=timings,
+                audit_job_id=audit_job_id,
             )
             log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(risks))
-        except (LLMError, ValueError) as exc:
+        except LLMError:
+            raise
+        except ValueError as exc:
             timings[f"{role}_agent_ms"] = round(
                 (time.perf_counter() - role_started) * 1000
             )
-            log.warning("audit.agent_fallback", agent=role, error=str(exc)[:120])
+            log.warning(
+                "audit.agent_fallback",
+                agent=role,
+                exception_type=type(exc).__name__,
+            )
             # 不写假风险数据进台账——用一条系统提示风险标明 Agent 降级，
             # 让法务知道该 Agent 本次未能审查，需要人工补充。
             risks = [{
@@ -149,7 +166,7 @@ def audit_contract(
                 "level": "medium",
                 "category": "审查引擎降级",
                 "original_text": "（AI 审查服务暂时不可用，本次结果由系统自动标注）",
-                "basis": f"Agent={role} 审查失败：{str(exc)[:80]}",
+                "basis": "模型返回格式不符合审查协议，未生成可采信结论。",
                 "suggestion": "请人工对本份合同进行补充审查，或重新触发审查。",
                 "confidence": 0,
                 "disclaimer": DISCLAIMER,
@@ -219,6 +236,7 @@ def _agent_audit(
     dimensions: list[str] | None = None,
     contract_type: str = "",
     timings: dict[str, int] | None = None,
+    audit_job_id: int | None = None,
 ) -> list[dict]:
     """单个 Agent 审查：定向 RAG 依据 + 角色 prompt（含上游共享上下文）→ chat → 解析。
     db/contract_id 可选，仅用于写 LLM 调用日志，不影响审查主链路。
@@ -288,7 +306,13 @@ def _agent_audit(
     adapter = get_llm_adapter()
     resp = adapter.chat(system_prompt, user_prompt)
     # 记录本次 LLM 调用（provider/model/token/latency），供可解释性溯源与算力对比
-    _record_llm_call(db, contract_id, agent=role, resp=resp, mode="llm")
+    _record_llm_call(
+        contract_id,
+        agent=role,
+        resp=resp,
+        mode="llm",
+        audit_job_id=audit_job_id,
+    )
     raw = _parse_risk_json(resp.text)
     normalized = [_normalize(r, role) for r in raw]
     if timings is not None:

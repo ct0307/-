@@ -1,12 +1,16 @@
-from datetime import datetime, timedelta, timezone
+import asyncio
+from datetime import date, datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from fastapi import UploadFile
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.session import Base
-from app.models.models import KnowledgeChunk, LegalArticle
+from app.models.models import KnowledgeChunk, LegalArticle, LegalSource, User
 from app.llm.base import LLMError
 from app.services.rag import retriever
 from app.services.rag.legal_import import (
@@ -229,3 +233,64 @@ def test_router_exposes_authoritative_preview_and_apply_endpoints():
 
     assert ("/legal-import/preview", ("POST",)) in routes
     assert ("/legal-import/apply", ("POST",)) in routes
+
+
+def test_apply_endpoint_rolls_back_import_when_audit_log_fails(db, monkeypatch):
+    user = User(
+        username="legal-import-admin",
+        password_hash="not-used",
+        role="admin",
+        department="管理",
+    )
+    db.add(user)
+    db.commit()
+
+    async def fake_read(_file):
+        return b"official", "official"
+
+    def fake_apply(session, *, commit=True, **_kwargs):
+        assert commit is False
+        session.add(LegalSource(
+            source_id="atomic-legal-source",
+            title="测试法源",
+            issuing_authority="测试机关",
+            official_url="https://example.test/legal",
+            publication_date=date(2026, 1, 1),
+            effective_date=date(2026, 1, 1),
+            version_status="现行有效",
+            retrieved_at=date(2026, 1, 1),
+            file_sha256="a" * 64,
+        ))
+        return SimpleNamespace(
+            source_id="atomic-legal-source",
+            article_count=1,
+            chunk_count=1,
+            reused_embeddings=0,
+            rebuilt_embeddings=1,
+            embedding_model="test",
+            embedding_dimension=2,
+            embedding_signature="signature",
+            first_article_ok=True,
+            article_585_ok=True,
+            last_article_ok=True,
+        )
+
+    monkeypatch.setattr(knowledge, "_read_file_payload", fake_read)
+    monkeypatch.setattr(knowledge, "apply_legal_import", fake_apply)
+    monkeypatch.setattr(
+        knowledge.audit_log,
+        "record",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("audit log unavailable")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="audit log unavailable"):
+        asyncio.run(knowledge.apply_legal_source(
+            file=UploadFile(filename="legal.txt", file=BytesIO(b"official")),
+            token="preview-token",
+            db=db,
+            user=user,
+        ))
+
+    assert db.query(LegalSource).filter_by(source_id="atomic-legal-source").count() == 0

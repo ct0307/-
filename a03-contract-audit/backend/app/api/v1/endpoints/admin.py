@@ -46,6 +46,7 @@ def get_llm_calls(
         result.append(LLMCallLogOut(
             id=f"LC{l.id:04d}",
             contract_id=l.contract_id,
+            audit_job_id=l.audit_job_id,
             agent=l.agent,
             provider=l.provider,
             model=l.model,

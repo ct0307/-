@@ -66,6 +66,33 @@ def test_create_batch_persists_fifty_items(monkeypatch, tmp_path):
     assert len(list(tmp_path.iterdir())) == 50
 
 
+def test_create_batch_keeps_committed_files_when_refresh_fails(monkeypatch, tmp_path):
+    db = _session()
+    user = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        db,
+        "refresh",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("connection lost after commit")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        batches.create_batch(
+            files=_files(1),
+            idempotency_key="batch-refresh-failure",
+            contract_type="采购合同",
+            dimensions=["legal"],
+            db=db,
+            user=user,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert db.query(Contract).count() == 1
+    assert len(list(tmp_path.iterdir())) == 1
+
+
 def test_create_batch_rejects_empty_contract_type_before_writing_files(monkeypatch, tmp_path):
     db = _session()
     user = _user(db)
@@ -92,6 +119,31 @@ def test_create_batch_persists_dimensions_for_recovery(monkeypatch, tmp_path):
 
     assert saved is not None
     assert json.loads(saved.dimensions_json) == ["legal", "payment"]
+
+
+def test_create_batch_keeps_dispatch_failure_recoverable_and_safe(monkeypatch, tmp_path):
+    db = _session()
+    user = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        batches,
+        "_dispatch_item",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("redis://worker:secret@queue.internal/0")
+        ),
+    )
+
+    result = batches.create_batch(
+        _files(1), "dispatch-pending", "采购合同", ["legal"], db, user
+    )
+    saved = db.get(AuditBatchItem, result.items[0].id)
+
+    assert saved is not None
+    assert saved.status == "queued"
+    assert saved.task_id is None
+    assert saved.error_code == "DISPATCH_PENDING"
+    assert saved.error == "任务已保存，正在等待重新派发"
+    assert "secret" not in repr(result.model_dump())
 
 
 def test_completed_batch_item_exposes_contract_review_quality(tmp_path):
@@ -234,9 +286,38 @@ def test_audit_task_updates_batch_item_and_forwards_dimensions(monkeypatch, tmp_
 
     captured: list[list[str]] = []
 
-    def fake_run_audit(_db, _contract, dimensions=None):
+    def fake_run_audit(
+        _db,
+        _contract,
+        dimensions=None,
+        *,
+        generation=None,
+        batch_item_id=None,
+        execution_token=None,
+    ):
         captured.append(dimensions or [])
-        return {"risk_count": 0, "cross_checks": []}
+        cross_checks = [{
+            "id": "CC1",
+            "from": "legal",
+            "to": "finance",
+            "trigger": "付款冲突",
+            "action": "复核",
+            "verdict": "conflict",
+            "note": "比例不一致",
+            "category": "付款",
+        }]
+        saved_item = _db.get(AuditBatchItem, batch_item_id)
+        saved_item.status = "done"
+        saved_item.result_json = json.dumps({"risk_count": 1, "cross_checks": cross_checks})
+        saved_item.finished_at = datetime.now(timezone.utc)
+        _db.commit()
+        return {
+            "risk_count": 1,
+            "cross_checks": cross_checks,
+            "requires_review": False,
+            "ocr_confidence": None,
+            "review_reason": None,
+        }
 
     monkeypatch.setattr(audit_tasks, "SessionLocal", lambda: Session(engine))
     monkeypatch.setattr(audit_tasks, "run_audit", fake_run_audit)
@@ -249,6 +330,9 @@ def test_audit_task_updates_batch_item_and_forwards_dimensions(monkeypatch, tmp_
         assert saved is not None
         assert saved.status == "done"
         assert saved.finished_at is not None
+        persisted_result = json.loads(saved.result_json)
+        assert persisted_result["risk_count"] == 1
+        assert persisted_result["cross_checks"][0]["id"] == "CC1"
     assert result["status"] == "done"
     assert repeated["status"] == "already_done"
     assert captured == [["legal"]]
@@ -321,7 +405,7 @@ def test_audit_task_reclaims_an_expired_lease(monkeypatch, tmp_path):
     monkeypatch.setattr(
         audit_tasks,
         "run_audit",
-        lambda _db, saved_contract, dimensions=None: (
+        lambda _db, saved_contract, dimensions=None, **_kwargs: (
             calls.append(saved_contract.id) or {"risk_count": 0, "cross_checks": []}
         ),
     )
@@ -330,6 +414,58 @@ def test_audit_task_reclaims_an_expired_lease(monkeypatch, tmp_path):
 
     assert result["status"] == "done"
     assert calls == [contract_id]
+
+
+def test_expired_worker_cannot_overwrite_new_execution_state(monkeypatch, tmp_path):
+    from app.services.audit.runner import StaleAuditRun
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'worker-fencing.db').as_posix()}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = _user(db)
+        contract = Contract(
+            filename="fencing.txt",
+            storage_path=str(tmp_path / "fencing.txt"),
+            department=user.department,
+            uploaded_by=user.id,
+            audit_generation=1,
+        )
+        batch = AuditBatch(
+            owner_id=user.id,
+            department=user.department,
+            idempotency_key="worker-fencing",
+        )
+        db.add_all([contract, batch])
+        db.flush()
+        item = AuditBatchItem(
+            batch_id=batch.id,
+            contract_id=contract.id,
+            filename=contract.filename,
+            audit_generation=1,
+        )
+        db.add(item)
+        db.commit()
+        contract_id, item_id = contract.id, item.id
+
+    def lose_lease(session, *_args, batch_item_id=None, **_kwargs):
+        current = session.get(AuditBatchItem, batch_item_id)
+        current.execution_token = "new-worker-token"
+        current.status = "auditing"
+        session.commit()
+        raise StaleAuditRun("execution token mismatch")
+
+    monkeypatch.setattr(audit_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(audit_tasks, "run_audit", lose_lease)
+
+    with pytest.raises(StaleAuditRun):
+        run_contract_audit.run(contract_id, ["legal"], item_id)
+
+    with Session(engine) as db:
+        saved = db.get(AuditBatchItem, item_id)
+        assert saved.status == "auditing"
+        assert saved.execution_token == "new-worker-token"
+        assert saved.error_code is None
+        assert saved.error is None
 
 
 def test_recovery_dispatches_queued_and_expired_items_only(tmp_path):
@@ -404,6 +540,66 @@ def test_recovery_dispatches_queued_and_expired_items_only(tmp_path):
 
     assert second_count == 0
     assert set(dispatched) == expected_ids
+
+
+def test_recovery_redispatches_stale_queued_item_with_task_id(tmp_path):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'stale-queued.db').as_posix()}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = _user(db)
+        contract = Contract(
+            filename="stale.txt",
+            storage_path=str(tmp_path / "stale.txt"),
+            department=user.department,
+            uploaded_by=user.id,
+        )
+        batch = AuditBatch(
+            owner_id=user.id,
+            department=user.department,
+            idempotency_key="stale-queued-recovery",
+        )
+        db.add_all([contract, batch])
+        db.flush()
+        item = AuditBatchItem(
+            batch_id=batch.id,
+            contract_id=contract.id,
+            filename=contract.filename,
+            status="queued",
+            task_id="lost-broker-message",
+        )
+        db.add(item)
+        db.commit()
+        db.execute(
+            AuditBatchItem.__table__.update()
+            .where(AuditBatchItem.id == item.id)
+            .values(updated_at=datetime.now(timezone.utc) - timedelta(minutes=10))
+        )
+        db.commit()
+        item_id = item.id
+
+    dispatched: list[int] = []
+    recovered = audit_tasks.recover_orphaned_batch_items(
+        session_factory=lambda: Session(engine),
+        dispatch=lambda _contract_id, _dimensions, saved_item_id: (
+            dispatched.append(saved_item_id) or f"recovered-{saved_item_id}"
+        ),
+    )
+
+    assert recovered == 1
+    assert dispatched == [item_id]
+
+
+def test_batch_dispatch_uses_shared_dispatcher(monkeypatch):
+    calls: list[int] = []
+    item = AuditBatchItem(id=7, contract_id=11, filename="contract.txt")
+    monkeypatch.setattr(
+        batches,
+        "dispatch_audit_item",
+        lambda saved_item, _dimensions: calls.append(saved_item.id) or "local:test",
+    )
+
+    assert batches._dispatch_item(item, ["legal"]) == "local:test"
+    assert calls == [7]
 
 
 def test_retry_reuses_persisted_dimensions_by_default(monkeypatch, tmp_path):

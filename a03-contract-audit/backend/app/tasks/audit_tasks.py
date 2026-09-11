@@ -5,8 +5,10 @@
 """
 from app.core.logging import get_logger
 from app.db.session import SessionLocal
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import uuid
 from typing import Callable
 
 from celery.signals import worker_ready
@@ -14,11 +16,30 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.models.models import AuditBatchItem, Contract
-from app.services.audit.runner import run_audit
+from app.llm.base import LLMError
+from app.services.audit.runner import StaleAuditRun, run_audit
 from app.services.batch.service import retry_failed_item, transition_item
 from app.tasks.celery_app import celery_app
 
 log = get_logger("audit_task")
+
+
+@dataclass(frozen=True)
+class TaskErrorInfo:
+    code: str
+    message: str
+    retryable: bool
+
+
+def classify_task_error(exc: Exception) -> TaskErrorInfo:
+    """把内部异常映射成可持久化、可展示的安全错误。"""
+    if isinstance(exc, StaleAuditRun):
+        return TaskErrorInfo("STALE_AUDIT_RUN", "审查任务已被更新的运行取代", False)
+    if isinstance(exc, LLMError):
+        if "超时" in str(exc):
+            return TaskErrorInfo("MODEL_TIMEOUT", "模型调用超时，请稍后重试", True)
+        return TaskErrorInfo("MODEL_UNAVAILABLE", "模型服务暂时不可用，请稍后重试", True)
+    return TaskErrorInfo("AUDIT_INTERNAL_ERROR", "审查任务执行失败，请联系管理员", False)
 
 
 def _lease_is_active(expires_at: datetime | None, now: datetime) -> bool:
@@ -37,6 +58,7 @@ def recover_orphaned_batch_items(
     """重新投递未发布或租约过期的批次项；数据库行锁负责多实例去重。"""
     db = (session_factory or SessionLocal)()
     now = datetime.now(timezone.utc)
+    stale_queued_before = now - timedelta(minutes=5)
     dispatch_item = dispatch or (
         lambda contract_id, dimensions, item_id: run_contract_audit.delay(contract_id, dimensions, item_id)
     )
@@ -48,7 +70,10 @@ def recover_orphaned_batch_items(
                 or_(
                     and_(
                         AuditBatchItem.status == "queued",
-                        AuditBatchItem.task_id.is_(None),
+                        or_(
+                            AuditBatchItem.task_id.is_(None),
+                            AuditBatchItem.updated_at <= stale_queued_before,
+                        ),
                     ),
                     and_(
                         AuditBatchItem.status.in_(("parsing", "auditing")),
@@ -70,6 +95,7 @@ def recover_orphaned_batch_items(
                     item.status = "queued"
                     item.lease_expires_at = None
                     item.task_id = None
+                    item.execution_token = None
                 dimensions = json.loads(item.batch.dimensions_json or "[]")
                 if not isinstance(dimensions, list) or not all(isinstance(value, str) for value in dimensions):
                     dimensions = []
@@ -77,7 +103,11 @@ def recover_orphaned_batch_items(
                 item.task_id = str(getattr(task, "id", task))
                 recovered += 1
             except Exception as exc:  # noqa: BLE001
-                log.error("audit_recovery.dispatch_failed", item_id=item.id, error=str(exc)[:240])
+                log.error(
+                    "audit_recovery.dispatch_failed",
+                    item_id=item.id,
+                    exception_type=type(exc).__name__,
+                )
         db.commit()
         return recovered
     except Exception:
@@ -107,6 +137,7 @@ def run_contract_audit(
 ) -> dict:
     """单份合同审查任务：解析 → 审查 → 落库。worker 进程内自建 DB 会话。"""
     db = SessionLocal()
+    execution_token: str | None = None
     try:
         item = (
             db.query(AuditBatchItem)
@@ -129,6 +160,8 @@ def run_contract_audit(
             item.status = transition_item(item.status, "parsing") if item.status == "queued" else "parsing"
             item.started_at = item.started_at or now
             item.lease_expires_at = now + timedelta(minutes=30)
+            execution_token = uuid.uuid4().hex
+            item.execution_token = execution_token
             db.commit()
 
         contract = db.query(Contract).filter(Contract.id == contract_id).first()
@@ -142,13 +175,14 @@ def run_contract_audit(
         if item:
             item.status = transition_item(item.status, "auditing")
             db.commit()
-        result = run_audit(db, contract, dimensions=dimensions or [])
-        if item:
-            item.status = transition_item(item.status, "done")
-            item.error = None
-            item.finished_at = datetime.now(timezone.utc)
-            item.lease_expires_at = None
-            db.commit()
+        result = run_audit(
+            db,
+            contract,
+            dimensions=dimensions or [],
+            generation=item.audit_generation if item else None,
+            batch_item_id=item.id if item else None,
+            execution_token=execution_token,
+        )
         return {
             "contract_id": contract_id,
             "risk_count": result["risk_count"],
@@ -160,25 +194,38 @@ def run_contract_audit(
         }
     except Exception as exc:  # noqa: BLE001
         db.rollback()
-        log.error("audit_task.failed", contract_id=contract_id, error=str(exc))
+        failure = classify_task_error(exc)
+        log.error(
+            "audit_task.failed",
+            contract_id=contract_id,
+            error_code=failure.code,
+            exception_type=type(exc).__name__,
+        )
         item = db.query(AuditBatchItem).filter(AuditBatchItem.id == batch_item_id).first() if batch_item_id else None
+        if item and item.execution_token != execution_token:
+            db.rollback()
+            raise
         retries = int(getattr(self.request, "retries", 0))
         contract = db.query(Contract).filter(Contract.id == contract_id).first()
+        persisted_attempts = item.attempts if item else retries
+        should_retry = failure.retryable and max(retries, persisted_attempts) < self.max_retries
         if item:
             if item.status not in {"done", "failed"}:
                 item.status = transition_item(item.status, "failed")
-            item.error = str(exc)[:1000]
+            item.error_code = failure.code
+            item.error = failure.message
             item.lease_expires_at = None
-            if retries < self.max_retries:
+            item.execution_token = None
+            if should_retry:
                 decision = retry_failed_item(item.status, attempts=item.attempts)
                 item.status = decision.status
                 item.attempts = decision.attempts
             else:
                 item.finished_at = datetime.now(timezone.utc)
-        if retries >= self.max_retries and contract:
+        if not should_retry and failure.code != "STALE_AUDIT_RUN" and contract:
             contract.status = "audit_failed"
         db.commit()
-        if retries < self.max_retries:
+        if should_retry:
             raise self.retry(exc=exc, countdown=10)
         raise
     finally:

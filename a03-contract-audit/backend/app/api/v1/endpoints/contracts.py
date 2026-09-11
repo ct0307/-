@@ -1,17 +1,19 @@
 """合同端点：上传、解析、触发审查、查询。"""
+import hashlib
 import json
 import os
 import uuid
 from datetime import timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_db
-from app.models.models import Contract, Risk, User
+from app.models.models import AuditBatchItem, Contract, Risk, User
 from app.schemas.contract import (
     AuditRequest,
     AuditResponse,
@@ -24,13 +26,14 @@ from app.schemas.contract import (
 )
 from app.services import audit_log
 from app.services import masking
+from app.services.audit.jobs import AuditJobConflict, create_single_audit_job
 from app.services.audit.runner import apply_parse_quality, run_audit
 from app.services.parser.extractor import (
     extract_document,
     extract_elements,
-    extract_elements_with_llm,
 )
 from app.services.parser.ocr import OCRError, OCRUnavailable
+from app.tasks.dispatcher import dispatch_audit_item
 
 router = APIRouter()
 log = get_logger("contracts")
@@ -182,6 +185,9 @@ def batch_upload_contracts(
     for file in files:
         fname = file.filename or "unknown"
         ext = os.path.splitext(fname)[1].lower()
+        stored_path: str | None = None
+        contract_id: int | None = None
+        committed = False
         try:
             if ext not in _ALLOWED_EXT:
                 results.append({"filename": fname, "status": "failed", "error": f"不支持的文件类型 {ext}"})
@@ -206,6 +212,7 @@ def batch_upload_contracts(
             )
             db.add(contract)
             db.flush()  # 获取 id 但不提交，出错可回滚
+            contract_id = contract.id
 
             # 解析并写入 elements_json
             try:
@@ -220,14 +227,36 @@ def batch_upload_contracts(
             except Exception:
                 pass  # 解析失败不影响上传结果
 
-            db.commit()
-            db.refresh(contract)
             audit_log.record(db, user_id=user.id, action="batch_upload",
                              target=f"contract:{contract.id}", detail=f"{fname} encrypted={encrypted_flag}")
+            db.commit()
+            committed = True
+            db.refresh(contract)
             results.append({"filename": fname, "status": "success", "contract_id": contract.id})
         except Exception as exc:
             db.rollback()
-            results.append({"filename": fname, "status": "failed", "error": str(exc)})
+            if committed and contract_id is not None:
+                log.warning(
+                    "contract.batch_upload_response_unconfirmed",
+                    filename=fname,
+                    contract_id=contract_id,
+                    exception_type=type(exc).__name__,
+                )
+                results.append({
+                    "filename": fname,
+                    "status": "success",
+                    "contract_id": contract_id,
+                    "warning": "合同已上传，但响应确认失败",
+                })
+                continue
+            if not committed and stored_path and os.path.isfile(stored_path):
+                os.unlink(stored_path)
+            log.error(
+                "contract.batch_upload_failed",
+                filename=fname,
+                exception_type=type(exc).__name__,
+            )
+            results.append({"filename": fname, "status": "failed", "error": "合同上传失败，已回滚"})
 
     return results
 
@@ -236,6 +265,7 @@ def batch_upload_contracts(
 def upload_contract(
     file: UploadFile,
     contract_type: str = "",
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Contract:
@@ -250,30 +280,72 @@ def upload_contract(
     if len(content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "文件超过大小限制")
 
+    content_sha256 = hashlib.sha256(content).hexdigest()
+    key = (idempotency_key or f"sha256:{content_sha256}").strip()
+    if not 8 <= len(key) <= 128:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Idempotency-Key 长度必须为 8 至 128")
+    existing = db.query(Contract).filter(
+        Contract.uploaded_by == user.id,
+        Contract.upload_idempotency_key == key,
+    ).first()
+    if existing:
+        if existing.content_sha256 != content_sha256:
+            raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键与文件内容不一致")
+        return existing
+
     # 加密存储：启用 FILE_ENCRYPT_KEY 时落盘前加密，防止明文泄漏
     from app.core.crypto import encrypt_bytes, is_encryption_enabled
     to_write = encrypt_bytes(content)
     encrypted = is_encryption_enabled()
-    with open(stored_path, "wb") as f:
-        f.write(to_write)
+    created_path = False
+    committed = False
+    try:
+        with open(stored_path, "wb") as f:
+            f.write(to_write)
+        created_path = True
 
-    contract = Contract(
-        filename=file.filename or stored_name,
-        storage_path=stored_path,
-        contract_type=contract_type,
-        department=user.department,
-        status="uploaded",
-        uploaded_by=user.id,
-    )
-    db.add(contract)
-    db.commit()
-    db.refresh(contract)
-    audit_log.record(
-        db, user_id=user.id, action="upload",
-        target=f"contract:{contract.id}",
-        detail=f"{contract.filename} encrypted={encrypted}",
-    )
-    return contract
+        contract = Contract(
+            filename=file.filename or stored_name,
+            storage_path=stored_path,
+            contract_type=contract_type,
+            department=user.department,
+            status="uploaded",
+            uploaded_by=user.id,
+            upload_idempotency_key=key,
+            content_sha256=content_sha256,
+        )
+        db.add(contract)
+        db.flush()
+        audit_log.record(
+            db, user_id=user.id, action="upload",
+            target=f"contract:{contract.id}",
+            detail=f"{contract.filename} encrypted={encrypted}",
+        )
+        db.commit()
+        committed = True
+        db.refresh(contract)
+        return contract
+    except IntegrityError as exc:
+        db.rollback()
+        if not committed and created_path and os.path.isfile(stored_path):
+            os.unlink(stored_path)
+        duplicate = db.query(Contract).filter(
+            Contract.uploaded_by == user.id,
+            Contract.upload_idempotency_key == key,
+        ).first()
+        if duplicate and duplicate.content_sha256 == content_sha256:
+            return duplicate
+        raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键冲突") from exc
+    except HTTPException:
+        db.rollback()
+        if not committed and created_path and os.path.isfile(stored_path):
+            os.unlink(stored_path)
+        raise
+    except Exception as exc:
+        db.rollback()
+        if not committed and created_path and os.path.isfile(stored_path):
+            os.unlink(stored_path)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "合同上传失败，已回滚") from exc
 
 
 @router.post(
@@ -298,20 +370,20 @@ def parse_contract(
             db.rollback()
             _raise_parse_error(contract_id, empty_error, code="PDF_TEXT_EMPTY")
         apply_parse_quality(contract, parsed)
-        # 精解析：正则 + LLM 语义抽取六要素（供报表/Excel 展示），LLM 失败自动降级正则
-        elements = extract_elements_with_llm(parsed.text)
+        # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
+        elements = extract_elements(parsed.text)
         contract.status = "parsed"
         contract.elements_json = json.dumps(
             {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
             ensure_ascii=False,
         )
+        audit_log.record(db, user_id=user.id, action="parse", target=f"contract:{contract_id}")
         db.commit()
     except HTTPException:
         raise
     except Exception as exc:
         db.rollback()
         _raise_parse_error(contract_id, exc)
-    audit_log.record(db, user_id=user.id, action="parse", target=f"contract:{contract_id}")
     return ParseResponse(
         contract_id=contract_id,
         elements=elements,
@@ -326,6 +398,7 @@ def parse_contract(
 def audit_contract_endpoint(
     contract_id: int,
     body: AuditRequest = AuditRequest(),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("legal", "finance")),
 ) -> AuditResponse:
@@ -333,47 +406,133 @@ def audit_contract_endpoint(
     confirmed_type = body.contract_type.strip()
     if not confirmed_type:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "请先确认合同类型")
-    contract.contract_type = confirmed_type
-    db.commit()
     dimensions = body.dimensions or []
+    key = (idempotency_key or f"audit:{uuid.uuid4().hex}").strip()
+    try:
+        creation = create_single_audit_job(
+            db,
+            contract=contract,
+            user=user,
+            idempotency_key=key,
+            contract_type=confirmed_type,
+            dimensions=dimensions,
+        )
+    except AuditJobConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
-    if settings.AUDIT_ASYNC:
-        from app.tasks.audit_tasks import run_contract_audit
-        task = run_contract_audit.delay(contract_id, dimensions)
-        contract.status = "auditing"
+    item = creation.item
+    if creation.created:
+        try:
+            item.task_id = dispatch_audit_item(
+                item,
+                json.loads(creation.batch.dimensions_json or "[]"),
+            )
+            item.error_code = None
+            item.error = None
+        except Exception as exc:  # noqa: BLE001
+            item.error_code = "DISPATCH_PENDING"
+            item.error = "任务已保存，正在等待重新派发"
+            log.error(
+                "audit.dispatch_pending",
+                contract_id=contract_id,
+                job_id=item.id,
+                exception_type=type(exc).__name__,
+            )
         db.commit()
-        audit_log.record(db, user_id=user.id, action="audit_dispatch", target=f"contract:{contract_id}", detail=f"task:{task.id}")
-        return AuditResponse(contract_id=contract_id, task_id=task.id, status="auditing")
+        db.refresh(item)
 
-    result = run_audit(db, contract, dimensions=dimensions)
-    dim_detail = f"risks={result['risk_count']},dims={','.join(dimensions) if dimensions else 'all'}"
-    audit_log.record(db, user_id=user.id, action="audit", target=f"contract:{contract_id}", detail=dim_detail)
     return AuditResponse(
         contract_id=contract_id,
-        status=contract.status,
-        risk_count=result["risk_count"],
-        cross_checks=[_to_cross_out(c) for c in result["cross_checks"]],
-        requires_review=result["requires_review"],
-        ocr_confidence=result["ocr_confidence"],
-        review_reason=result["review_reason"],
+        status="auditing",
+        task_id=item.task_id,
+        batch_id=creation.batch.id,
+        job_id=item.id,
+        error_code=item.error_code,
+        error_message=item.error,
+        retryable=item.error_code == "DISPATCH_PENDING",
+        requires_review=contract.requires_review,
+        ocr_confidence=contract.ocr_confidence,
+        review_reason=contract.review_reason,
     )
 
 
 @router.get("/{contract_id}/audit-status", response_model=AuditResponse)
 def get_contract_audit_status(
     contract_id: int,
+    job_id: int | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> AuditResponse:
     contract = _get_contract(db, contract_id, user)
-    risk_count = db.query(Risk).filter(Risk.contract_id == contract_id).count()
+    item_query = db.query(AuditBatchItem).filter(
+        AuditBatchItem.contract_id == contract_id
+    )
+    if job_id is not None:
+        item = item_query.filter(AuditBatchItem.id == job_id).first()
+        if not item:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "审查任务不存在")
+    else:
+        item = item_query.order_by(AuditBatchItem.id.desc()).first()
+    result: dict = {}
+    if item:
+        try:
+            candidate = json.loads(item.result_json or "{}")
+            result = candidate if isinstance(candidate, dict) else {}
+        except (TypeError, ValueError):
+            result = {}
+    risk_count = result.get("risk_count")
+    if not isinstance(risk_count, int):
+        risk_query = db.query(Risk).filter(Risk.contract_id == contract_id)
+        if item:
+            risk_query = risk_query.filter(
+                Risk.audit_job_id == item.id
+                if item.audit_generation > 0
+                else Risk.audit_job_id.is_(None)
+            )
+        risk_count = risk_query.count()
+    raw_cross_checks = result.get("cross_checks", [])
+    cross_checks = (
+        [_to_cross_out(value) for value in raw_cross_checks if isinstance(value, dict)]
+        if isinstance(raw_cross_checks, list)
+        else []
+    )
+    item_status = item.status if item else contract.status
+    response_status = "audit_failed" if item_status == "failed" else item_status
+    requires_review = result.get("requires_review")
+    if not isinstance(requires_review, bool):
+        requires_review = contract.requires_review
+    ocr_confidence = (
+        result.get("ocr_confidence")
+        if "ocr_confidence" in result
+        else contract.ocr_confidence
+    )
+    review_reason = (
+        result.get("review_reason")
+        if "review_reason" in result
+        else contract.review_reason
+    )
+    retryable_codes = {
+        "DISPATCH_PENDING",
+        "MODEL_TIMEOUT",
+        "MODEL_UNAVAILABLE",
+        "NETWORK_UNCERTAIN",
+    }
     return AuditResponse(
         contract_id=contract_id,
-        status=contract.status,
+        status=response_status,
         risk_count=risk_count,
-        requires_review=contract.requires_review,
-        ocr_confidence=contract.ocr_confidence,
-        review_reason=contract.review_reason,
+        cross_checks=cross_checks,
+        task_id=item.task_id if item else None,
+        batch_id=item.batch_id if item else None,
+        job_id=item.id if item else None,
+        error_code=item.error_code if item else None,
+        error_message=item.error if item else None,
+        retryable=bool(item and item.error_code in retryable_codes),
+        requires_review=requires_review,
+        ocr_confidence=ocr_confidence,
+        review_reason=review_reason,
     )
 
 
@@ -381,8 +540,8 @@ def _to_cross_out(c: dict) -> CrossCheckOut:
     """把 auditor 的冲突项 dict（键含保留字 from/to）映射到 schema。"""
     return CrossCheckOut(
         id=c["id"],
-        from_agent=c["from"],
-        to_agent=c["to"],
+        from_agent=c.get("from_agent", c.get("from", "")),
+        to_agent=c.get("to_agent", c.get("to", "")),
         trigger=c["trigger"],
         action=c["action"],
         verdict=c["verdict"],
@@ -392,10 +551,27 @@ def _to_cross_out(c: dict) -> CrossCheckOut:
 
 
 @router.get("/{contract_id}/risks")
-def get_contract_risks(contract_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> list:
+def get_contract_risks(
+    contract_id: int,
+    job_id: int | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list:
     """风险列表：business 角色的原文字段截断脱敏，其他角色完整返回。"""
     _get_contract(db, contract_id, user)
-    risks = db.query(Risk).filter(Risk.contract_id == contract_id).all()
+    risk_query = db.query(Risk).filter(Risk.contract_id == contract_id)
+    if job_id is not None:
+        item = db.query(AuditBatchItem).filter(
+            AuditBatchItem.id == job_id,
+            AuditBatchItem.contract_id == contract_id,
+        ).first()
+        if not item:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "审查任务不存在")
+        if item.audit_generation > 0:
+            risk_query = risk_query.filter(Risk.audit_job_id == job_id)
+        else:
+            risk_query = risk_query.filter(Risk.audit_job_id.is_(None))
+    risks = risk_query.all()
     if masking.is_full_access(user.role):
         # 高权限角色：走 Pydantic 序列化，类型安全
         return [RiskOut.model_validate(r) for r in risks]
@@ -425,13 +601,13 @@ def escalate_contract(
     """
     contract = _get_contract(db, contract_id, current_user)
     contract.status = "three_review"
-    db.commit()
     audit_log.record(
         db,
-        current_user.id,
-        "三方会审发起",
-        f"合同#{contract_id}",
-        f"由 {current_user.username}（{current_user.role}）发起，状态更新为 three_review",
+        user_id=current_user.id,
+        action="三方会审发起",
+        target=f"合同#{contract_id}",
+        detail=f"由 {current_user.username}（{current_user.role}）发起，状态更新为 three_review",
     )
+    db.commit()
     return {"contract_id": contract_id, "status": "three_review"}
 

@@ -14,6 +14,7 @@ class BatchItemOut(BaseModel):
     filename: str
     status: BatchItemStatus
     error: str | None = None
+    error_code: str | None = None
     attempts: int
     started_at: datetime | None = None
     finished_at: datetime | None = None

@@ -59,6 +59,7 @@ def export_report(
             raise HTTPException(status.HTTP_403_FORBIDDEN, "所选合同包含无权访问的数据")
     data = export_risk_ledger(db, contract_ids, department_scope=department_scope)
     audit_log.record(db, user_id=user.id, action="export", target="risk_ledger", detail=f"ids={contract_ids or 'all'}")
+    db.commit()
 
     filename = quote("风险台账.xlsx")  # RFC 5987 编码中文文件名
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}

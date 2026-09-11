@@ -43,6 +43,7 @@ _DEV_COLUMNS = {
     "risks": [
         ("tier", "VARCHAR(8) DEFAULT 'yellow'"),
         ("rag_sources", "TEXT DEFAULT '[]'"),   # RAG 检索溯源：结构化来源列表
+        ("audit_job_id", "INTEGER"),
     ],
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
     "contracts": [
@@ -51,8 +52,21 @@ _DEV_COLUMNS = {
         ("ocr_confidence", "FLOAT"),
         ("requires_review", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("review_reason", "VARCHAR(255)"),
+        ("upload_idempotency_key", "VARCHAR(128)"),
+        ("content_sha256", "VARCHAR(64)"),
+        ("audit_generation", "INTEGER DEFAULT 0 NOT NULL"),
     ],
-    "audit_batches": [("dimensions_json", "TEXT DEFAULT '[]'")],
+    "audit_batches": [
+        ("dimensions_json", "TEXT DEFAULT '[]'"),
+        ("request_fingerprint", "VARCHAR(64) DEFAULT '' NOT NULL"),
+    ],
+    "audit_batch_items": [
+        ("error_code", "VARCHAR(64)"),
+        ("result_json", "TEXT DEFAULT '{}' NOT NULL"),
+        ("audit_generation", "INTEGER DEFAULT 0 NOT NULL"),
+        ("execution_token", "VARCHAR(64)"),
+    ],
+    "llm_call_logs": [("audit_job_id", "INTEGER")],
     "knowledge_chunks": [
         ("article_number", "VARCHAR(64)"),
         ("version", "VARCHAR(64)"),
@@ -73,6 +87,23 @@ _DEV_COLUMNS = {
     ],
 }
 
+_DEV_INDEXES = {
+    "contracts": ((
+        "uq_contracts_uploader_upload_idempotency",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_contracts_uploader_upload_idempotency "
+        "ON contracts(uploaded_by, upload_idempotency_key)",
+    ),),
+    "risks": ((
+        "ix_risks_audit_job_id",
+        "CREATE INDEX IF NOT EXISTS ix_risks_audit_job_id ON risks(audit_job_id)",
+    ),),
+    "llm_call_logs": ((
+        "ix_llm_call_logs_audit_job_id",
+        "CREATE INDEX IF NOT EXISTS ix_llm_call_logs_audit_job_id "
+        "ON llm_call_logs(audit_job_id)",
+    ),),
+}
+
 
 def _migrate_dev_columns() -> None:
     if settings.DB_BACKEND != "sqlite":
@@ -87,6 +118,29 @@ def _migrate_dev_columns() -> None:
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
                     log.info("db.migrate_column", table=table, column=name)
+        for table, indexes in _DEV_INDEXES.items():
+            if not inspector.has_table(table):
+                continue
+            migrated_inspector = inspect(conn)
+            table_columns = {
+                column["name"]
+                for column in migrated_inspector.get_columns(table)
+            }
+            existing_indexes = {
+                index["name"]
+                for index in migrated_inspector.get_indexes(table)
+            }
+            for name, ddl in indexes:
+                required_columns = {
+                    "uq_contracts_uploader_upload_idempotency": {
+                        "uploaded_by", "upload_idempotency_key"
+                    },
+                    "ix_risks_audit_job_id": {"audit_job_id"},
+                    "ix_llm_call_logs_audit_job_id": {"audit_job_id"},
+                }[name]
+                if required_columns <= table_columns and name not in existing_indexes:
+                    conn.execute(text(ddl))
+                    log.info("db.migrate_index", table=table, index=name)
 
 
 def _seed_users() -> None:

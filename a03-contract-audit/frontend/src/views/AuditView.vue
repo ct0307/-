@@ -26,6 +26,14 @@ const batchStore = useBatchStore()
 const route = useRoute()
 const router = useRouter()
 
+function isPollingCancellation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as { name?: unknown; code?: unknown }
+  return candidate.name === 'AbortError'
+    || candidate.name === 'CanceledError'
+    || candidate.code === 'ERR_CANCELED'
+}
+
 const department = ref('采购中心') // 保留兼容（批量上传可能引用），实际展示改用 auth.department
 const contractType = ref('')
 const dimExpanded = ref(false) // 审查维度折叠面板，默认收起
@@ -71,6 +79,24 @@ onMounted(async () => {
     if (ctypes.length) contractTypeOptions.value = ctypes.map((c) => c.value)
   } catch {
     // 静默降级：保持内置默认值，不打断用户流程
+  }
+})
+
+onMounted(async () => {
+  if (!session.hasActiveAudit) return
+  auditState.value = 'running'
+  try {
+    const result = await session.resumeActiveAudit()
+    if (!result) return
+    auditState.value = 'done'
+    ElMessage.success(`已恢复审查结果，检出 ${session.riskCount} 条风险`)
+  } catch (error: unknown) {
+    if (isPollingCancellation(error)) {
+      auditState.value = 'idle'
+      return
+    }
+    auditState.value = 'failed'
+    ElMessage.error(error instanceof Error ? error.message : '审查任务恢复失败，请稍后重试')
   }
 })
 
@@ -187,9 +213,13 @@ async function onAudit() {
     if (session.levelCounts.high > 0) {
       notify.push('alert', '高风险预警', `${session.filename} 检出 ${session.levelCounts.high} 项高风险条款。`)
     }
-  } catch {
+  } catch (error: unknown) {
+    if (isPollingCancellation(error)) {
+      auditState.value = 'idle'
+      return
+    }
     auditState.value = 'failed'
-    ElMessage.error('审查失败（需 legal / finance 角色）')
+    ElMessage.error(error instanceof Error ? error.message : '审查失败，请稍后重试')
   }
 }
 
@@ -211,7 +241,7 @@ async function cancelUpload() {
 function onAbort() {
   session.abortAudit()
   auditState.value = 'idle'
-  ElMessage.info('审查已中止')
+  ElMessage.info('已停止页面等待，后台审查仍在执行，可刷新页面恢复')
 }
 
 // —— 维度关键词映射：用于判断风险条目属于哪个维度 ——
@@ -531,7 +561,7 @@ function closeBatch() {
           :loading="false"
           @click="onAbort"
         >
-          ✕ 终止审查
+          ✕ 停止等待
         </el-button>
         <el-button
           v-else

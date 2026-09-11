@@ -2,6 +2,8 @@
 import client from './client'
 import type { AuditResult, ContractOut, LoginResult, ParseResult, RiskOut } from './types'
 
+export const PARSE_TIMEOUT_MS = 150_000
+
 export function login(username: string, password: string): Promise<LoginResult> {
   // 后端 OAuth2PasswordRequestForm 要求 form 编码
   const form = new URLSearchParams()
@@ -10,34 +12,56 @@ export function login(username: string, password: string): Promise<LoginResult> 
   return client.post('/auth/login', form)
 }
 
-export function uploadContract(file: File, contractType = ''): Promise<ContractOut> {
+export function uploadContract(
+  file: File,
+  contractType: string,
+  idempotencyKey: string,
+): Promise<ContractOut> {
   const fd = new FormData()
   fd.append('file', file)
   const params = contractType ? { contract_type: contractType } : {}
   // 上传接口单独设 120s 超时：大文件需经过加密存储 + 文本解析，30s 默认值不够
-  return client.post('/contracts/upload', fd, { params, timeout: 120_000 })
+  return client.post('/contracts/upload', fd, {
+    params,
+    headers: { 'Idempotency-Key': idempotencyKey },
+    timeout: 120_000,
+  })
 }
 
 export function parseContract(id: number): Promise<ParseResult> {
-  return client.post(`/contracts/${id}/parse`)
+  return client.post(`/contracts/${id}/parse`, undefined, { timeout: PARSE_TIMEOUT_MS })
 }
 
 export function auditContract(
   id: number,
   contractType: string,
   dimensions?: string[],
+  idempotencyKey?: string,
   signal?: AbortSignal,
 ): Promise<AuditResult> {
   const body = { contract_type: contractType, dimensions: dimensions ?? [] }
-  return client.post(`/contracts/${id}/audit`, body, { signal, timeout: 180_000 })
+  return client.post(`/contracts/${id}/audit`, body, {
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+    signal,
+    timeout: 180_000,
+  })
 }
 
-export function getAuditStatus(id: number, signal?: AbortSignal): Promise<AuditResult> {
-  return client.get(`/contracts/${id}/audit-status`, { signal })
+export function getAuditStatus(
+  id: number,
+  jobId?: number,
+  signal?: AbortSignal,
+): Promise<AuditResult> {
+  return client.get(`/contracts/${id}/audit-status`, {
+    params: jobId ? { job_id: jobId } : undefined,
+    signal,
+  })
 }
 
-export function getRisks(id: number): Promise<RiskOut[]> {
-  return client.get(`/contracts/${id}/risks`)
+export function getRisks(id: number, jobId?: number): Promise<RiskOut[]> {
+  return client.get(`/contracts/${id}/risks`, {
+    params: jobId ? { job_id: jobId } : undefined,
+  })
 }
 
 export interface BatchUploadResult {
