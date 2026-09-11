@@ -63,12 +63,12 @@
 - Modify: `README.md`
 - Create: `scripts/tests/test_dev_script.ps1`
 
-- [ ] **Step 1: Add a script contract test** that checks the launcher fixes frontend port 5173, backend port 8000, honors `VITE_API_PROXY_TARGET`, and refuses an occupied port with an actionable message.
-- [ ] **Step 2: Run the script contract test and confirm failure because no launcher exists.
-- [ ] **Step 3: Implement `scripts/dev.ps1` using existing Python/Vite commands only; do not install packages, kill processes, or overwrite `.env`. The script checks ports before starting and prints the selected backend target.
-- [ ] **Step 4: Update README local-start instructions to use the launcher and document that `.env` changes require backend restart.
-- [ ] **Step 5: Run the script contract test and inspect `git diff --check`.
-- [ ] **Step 6: Commit as `chore: standardize local service startup`.
+- [x] **Step 1: Add a script contract test** that checks the launcher fixes frontend port 5173, backend port 8000, honors `VITE_API_PROXY_TARGET`, and refuses an occupied port with an actionable message.
+- [x] **Step 2: Run the script contract test and confirm failure because no launcher exists.
+- [x] **Step 3: Implement `scripts/dev.ps1` using existing Python/Vite commands only; do not install packages, kill processes, or overwrite `.env`. The script checks ports before starting and prints the selected backend target.
+- [x] **Step 4: Update README local-start instructions to use the launcher and document that `.env` changes require backend restart.
+- [x] **Step 5: Run the script contract test and inspect `git diff --check`.
+- [x] **Step 6: Commit as `chore: standardize local service startup`.
 
 ### Task 5: Full regression and acceptance
 
