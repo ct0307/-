@@ -23,3 +23,12 @@ test('keeps offline and unknown states distinct', () => {
   expect(runtimeStatusText(status('offline'))).toBe('模型服务离线')
   expect(runtimeStatusText(status('unknown'))).toBe('状态待确认')
 })
+
+test('maps safe classified failures without exposing backend detail', () => {
+  const failed = status('offline')
+  failed.error_code = 'auth_failed'
+  failed.detail = 'Authorization=Bearer secret'
+
+  expect(runtimeStatusText(failed)).toBe('模型鉴权失败')
+  expect(runtimeStatusText(failed)).not.toContain('secret')
+})

@@ -49,12 +49,12 @@
 - Create: `frontend/src/utils/runtime-status.ts`
 - Create: `frontend/tests/runtime-status-machine.spec.ts`
 
-- [ ] **Step 1: Add failing unit tests** for `checking`, single failure as `degraded`, consecutive failures as `offline`, recovery to `online`, and safe error text mapping.
-- [ ] **Step 2: Run `npm.cmd --prefix frontend exec playwright test frontend/tests/runtime-status-machine.spec.ts frontend/tests/runtime-status.spec.ts` and confirm failure because the state machine helper does not exist.
-- [ ] **Step 3: Implement the small pure state-machine helper and extend `RuntimeStatus` with optional backend metadata.
-- [ ] **Step 4: Update `OpenClawBadge.vue` to preserve the last online model during one failed poll, show retrying/degraded state, and only show offline after two consecutive failures. Keep the 30-second polling interval and avoid sensitive details.
-- [ ] **Step 5: Run focused frontend tests, then type-check with `npm.cmd --prefix frontend run type-check`.
-- [ ] **Step 6: Commit as `fix: prevent transient runtime outage misreports`.
+- [x] **Step 1: Add failing unit tests** for `checking`, single failure as `degraded`, consecutive failures as `offline`, recovery to `online`, and safe error text mapping.
+- [x] **Step 2: Run `npm.cmd --prefix frontend exec playwright test frontend/tests/runtime-status-machine.spec.ts frontend/tests/runtime-status.spec.ts` and confirm failure because the state machine helper does not exist.
+- [x] **Step 3: Implement the small pure state-machine helper and extend `RuntimeStatus` with optional backend metadata.
+- [x] **Step 4: Update `OpenClawBadge.vue` to preserve the last online model during one failed poll, show retrying/degraded state, and only show offline after two consecutive failures. Keep the 30-second polling interval and avoid sensitive details.
+- [x] **Step 5: Run focused frontend tests, then type-check with `npm.cmd --prefix frontend run type-check`.
+- [x] **Step 6: Commit as `fix: prevent transient runtime outage misreports`.
 
 ### Task 4: Standardize local startup and prevent port drift
 
