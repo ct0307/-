@@ -6,6 +6,7 @@ import { ChatDotRound, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { RiskOut } from '@/api/types'
 import { chatWithRisk, type ChatMessage } from '@/api/chat'
+import { evidenceMeta } from '@/utils/risk-evidence'
 
 const props = defineProps<{
   modelValue: boolean
@@ -84,7 +85,7 @@ function onEnter(e: KeyboardEvent) {
       <div class="rd-head">
         <el-tag :type="levelMeta[risk.level].type" size="small">{{ levelMeta[risk.level].label }}</el-tag>
         <span class="rd-cat">{{ risk.category }}</span>
-        <span class="rd-confidence mono">置信度 {{ risk.confidence }}%</span>
+        <span class="rd-confidence mono">{{ evidenceMeta(risk.evidence_status).label }}</span>
       </div>
 
       <section class="rd-block evidence-step">
@@ -99,6 +100,9 @@ function onEnter(e: KeyboardEvent) {
         <div class="step-content">
           <h4>法规 / 规则依据</h4>
           <p class="rd-text">{{ risk.basis }}</p>
+          <p v-if="risk.support_validation_reason" class="rd-validation-note">
+            支持关系校验：{{ risk.support_validation_reason }}（{{ risk.support_validator_version }}）
+          </p>
         </div>
       </section>
 
@@ -287,6 +291,12 @@ function onEnter(e: KeyboardEvent) {
   line-height: 1.7;
   color: var(--ivory-dim);
   font-size: 13px;
+}
+.rd-validation-note {
+  margin: 8px 0 0;
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.6;
 }
 .rd-disclaimer {
   margin: 2px 0 0 44px;

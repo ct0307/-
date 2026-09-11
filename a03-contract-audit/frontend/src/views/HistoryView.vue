@@ -8,6 +8,7 @@ import { getRisks } from '@/api/contract'
 import type { HistoryRow } from '@/mock/history'
 import type { RiskOut } from '@/api/types'
 import DemoBadge from '@/components/common/DemoBadge.vue'
+import { evidenceMeta } from '@/utils/risk-evidence'
 
 const router = useRouter()
 
@@ -173,7 +174,7 @@ function goAudit() { router.push('/audit') }
             <el-tag :type="riskLevelType[r.level]" size="small">{{ riskLevelLabel[r.level] }}</el-tag>
             <el-tag size="small" effect="plain" type="info">{{ r.agent === 'legal' ? '法务' : '财务' }}</el-tag>
             <b class="risk-cat">{{ r.category }}</b>
-            <span class="conf mono">{{ r.confidence }}%</span>
+            <span class="conf mono">{{ evidenceMeta(r.evidence_status).label }}</span>
           </div>
           <p class="risk-text">{{ r.original_text }}</p>
           <p class="risk-basis">依据：{{ r.basis }}</p>

@@ -1,12 +1,13 @@
 # 赛题硬指标证据矩阵
 
-更新时间：2026-09-01
+更新时间：2026-09-11
 
 状态定义：`已验证` 表示存在本轮可重复执行证据；`代码就绪待实测` 表示实现和自动化契约已完成，但缺真实数据或设备；`阻塞` 表示缺少外部前置条件，禁止写成达标。
 
 | 优先级 | 硬指标 | 目标口径 | 当前状态 | 证据/复现 | 剩余条件 |
 |---|---|---|---|---|---|
 | P1 | 风险法规溯源 | 每条风险绑定原文、法规来源和建议 | 已验证 | `pytest tests/test_audit_evidence.py tests/test_rag_hybrid.py -q` | 用比赛演示合同补最终截图 |
+| P1 | 依据支持关系 | 原文核验、来源可信、支持关系三项同时通过才允许自动采信 | 代码就绪待实测 | `pytest tests/test_evidence_support_validation.py tests/test_evidence_metrics.py tests/test_evidence_cli.py -q`；标注与复现口径见 `evidence-support-protocol.md` | 准备双人复核冻结的真实脱敏合同金标，报告三分类 Macro F1 |
 | P1 | 50 份以上异步批次 | 50 有效 + 2 异常；失败隔离、重试、刷新恢复、启动补投、租约去重、幂等 | 代码就绪待实测 | `pytest tests/test_evaluation_batch.py tests/test_evaluation_cli.py tests/test_batch_service.py tests/test_batch_api.py -q`；执行入口为 `python -m evaluation.cli batch ...` | 准备 52 份冻结文件并在 Compose 环境执行，保留 `batch-events.jsonl` |
 | P1 | 部门数据隔离 | business 只读本部门，越权显式 403 | 已验证 | `pytest tests/test_report_scope.py -q` | 在 PostgreSQL 容器补接口实测 |
 | P1 | PostgreSQL 可交付 | 空库迁移、回滚、应用不绕过 Alembic | 代码就绪待实测 | `pytest tests/test_hard_indicator_smoke.py -q` 当前迁移烟雾使用 SQLite，不构成 PostgreSQL 实测证据 | 在 PostgreSQL 16 执行空库迁移、回滚、再升级、旧 SQLite 数据导入核对及备份恢复演练 |

@@ -1,4 +1,6 @@
 """单条风险法规证据链契约。"""
+import pytest
+
 from app.llm.base import LLMResponse
 from app.services.audit import auditor
 from app.services.audit.evidence import bind_risk_evidence, build_evidence_query
@@ -61,6 +63,50 @@ def test_selected_dimensions_are_enforced_in_agent_prompt(monkeypatch):
     )
 
     assert "本次仅审查以下维度：保密条款审查" in captured[0]
+
+
+def test_confidentiality_dimension_runs_legal_agent(monkeypatch):
+    calls: list[str] = []
+
+    def fake_agent(role, *_args, **_kwargs):
+        calls.append(role)
+        return []
+
+    monkeypatch.setattr(auditor, "_agent_audit", fake_agent)
+
+    auditor.audit_contract({}, "合同正文", dimensions=["confidentiality"])
+
+    assert calls == ["legal"]
+
+
+def test_prompt_leaves_formal_basis_to_grounding(monkeypatch):
+    captured: list[str] = []
+
+    class Adapter:
+        def chat(self, system: str, _user: str) -> LLMResponse:
+            captured.append(system)
+            return LLMResponse(text="[]", model="test")
+
+    monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
+    monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
+
+    auditor._agent_audit("legal", {}, "合同正文", {"elements": {}})
+
+    assert "basis(依据来源)" not in captured[0]
+    assert "risk_reason(风险原因)" in captured[0]
+    assert "confidence(0-100" not in captured[0]
+
+
+def test_truncated_model_output_is_rejected(monkeypatch):
+    class Adapter:
+        def chat(self, _system: str, _user: str) -> LLMResponse:
+            return LLMResponse(text="[]", model="test", finish_reason="length")
+
+    monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
+    monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
+
+    with pytest.raises(ValueError, match="截断"):
+        auditor._agent_audit("legal", {}, "合同正文", {"elements": {}})
 
 
 def test_auditor_reports_agent_and_grounding_timings(monkeypatch):

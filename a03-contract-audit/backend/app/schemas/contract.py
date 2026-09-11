@@ -14,9 +14,16 @@ class RiskOut(BaseModel):
     basis: str
     suggestion: str
     confidence: int
+    risk_reason: str = ""
     tier: str  # 人工干预档位：green/yellow/red
     review_status: str
     rag_sources: list[dict] = []   # RAG 检索来源：[{content, source, score}]
+    evidence_status: str = "unsupported"
+    original_text_verified: bool | None = None
+    requires_manual_review: bool = True
+    support_relation_status: str = "unclear"
+    support_validation_reason: str = ""
+    support_validator_version: str = "unvalidated"
 
     model_config = {"from_attributes": True}
 
@@ -250,6 +257,7 @@ class LLMCallLogOut(BaseModel):
     latency_ms: int
     mode: str         # llm/mock
     time: str         # YYYY-MM-DD HH:mm
+    finish_reason: str | None = None
 
 
 class AccessRoleOut(BaseModel):

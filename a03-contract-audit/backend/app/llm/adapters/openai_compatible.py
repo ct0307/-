@@ -97,6 +97,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
         data, latency_ms = self._post("/chat/completions", payload)
         try:
             text = data["choices"][0]["message"]["content"]
+            finish_reason = data["choices"][0].get("finish_reason")
         except (KeyError, IndexError, TypeError) as exc:
             log.error("llm.bad_response", keys=list(data.keys()) if isinstance(data, dict) else type(data).__name__)
             raise LLMError("LLM 响应结构异常：未找到 choices[0].message.content") from exc
@@ -114,6 +115,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
             latency_ms=latency_ms,
+            finish_reason=finish_reason,
         )
 
     def embed(self, texts: list[str]) -> list[list[float]]:

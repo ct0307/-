@@ -19,6 +19,7 @@ class LLMResponse:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     latency_ms: int = 0  # 用于 OpenClaw vs 通用模型的算力对比记录
+    finish_reason: str | None = None
 
 
 class LLMAdapter(ABC):

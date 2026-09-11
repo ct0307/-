@@ -18,6 +18,7 @@ import {
   type TierKey,
 } from '@/mock/collaboration'
 import type { RiskOut } from '@/api/types'
+import { evidenceMeta } from '@/utils/risk-evidence'
 
 const router = useRouter()
 const session = useAuditSessionStore()
@@ -36,14 +37,15 @@ function risksOf(agent: AgentKey) {
   return risks.value.filter((r) => r.agent === agent)
 }
 
-// 单个 Agent 的统计：检出数 / 高风险数 / 平均置信度
+// 单个 Agent 的统计：检出数 / 高风险数 / 依据已核验数
 function statsOf(agent: AgentKey) {
   const list = risksOf(agent)
   const high = list.filter((r) => r.level === 'high').length
-  const avg = list.length
-    ? Math.round(list.reduce((s, r) => s + r.confidence, 0) / list.length)
-    : 0
-  return { count: list.length, high, avg }
+  const supported = list.filter((r) =>
+    'evidence_status' in r && r.evidence_status === 'supported'
+    && 'original_text_verified' in r && r.original_text_verified === true,
+  ).length
+  return { count: list.length, high, supported }
 }
 
 // 协同总览统计
@@ -51,10 +53,11 @@ const overview = computed(() => {
   const total = risks.value.length
   const high = risks.value.filter((r) => r.level === 'high').length
   const confirmed = risks.value.filter((r) => r.review_status === 'confirmed').length
-  const avg = total
-    ? Math.round(risks.value.reduce((s, r) => s + r.confidence, 0) / total)
-    : 0
-  return { total, high, confirmed, avg }
+  const supported = risks.value.filter((r) =>
+    'evidence_status' in r && r.evidence_status === 'supported'
+    && 'original_text_verified' in r && r.original_text_verified === true,
+  ).length
+  return { total, high, confirmed, supported }
 })
 
 const agentList = [AGENTS.legal, AGENTS.finance]
@@ -102,7 +105,11 @@ function tierOf(r: RiskOut | DemoRisk): TierKey {
   if ('tier' in r && r.tier) return r.tier
   const sensitive = RED_KEYWORDS.some((k) => r.category.includes(k) || r.basis.includes(k))
   if (r.level === 'high' || sensitive) return 'red'
-  if (r.level === 'low' && r.confidence > 95) return 'green'
+  if (
+    r.level === 'low'
+    && 'evidence_status' in r && r.evidence_status === 'supported'
+    && 'original_text_verified' in r && r.original_text_verified === true
+  ) return 'green'
   return 'yellow'
 }
 
@@ -199,7 +206,7 @@ function goAudit() {
 
         <div class="agent-mini-kpis">
           <div><span>高风险</span><strong class="seal-num">{{ statsOf(a.key).high }}</strong></div>
-          <div><span>平均置信度</span><strong>{{ statsOf(a.key).avg }}%</strong></div>
+          <div><span>依据已核验</span><strong>{{ statsOf(a.key).supported }}</strong></div>
         </div>
       </el-card>
     </div>
@@ -255,7 +262,7 @@ function goAudit() {
       <template #header>
         <div class="card-head">
           <span>分级风险 · 人工干预策略</span>
-          <span class="mono status-note tier-note">按 AI 置信度 + 风险等级 + 冲突动态分档</span>
+          <span class="mono status-note tier-note">按证据状态 + 风险等级 + 冲突动态分档</span>
         </div>
       </template>
       <div class="tier-board">
@@ -282,7 +289,7 @@ function goAudit() {
           <ul v-if="t.items.length" class="tier-items">
             <li v-for="r in t.items" :key="r.id">
               <span class="ti-cat">{{ r.category }}</span>
-              <span class="ti-conf mono">{{ r.confidence }}%</span>
+              <span class="ti-conf mono">{{ evidenceMeta('evidence_status' in r ? r.evidence_status : null).label }}</span>
             </li>
             <li v-if="t.meta.key === 'red' && conflictCount" class="ti-extra">
               + {{ conflictCount }} 项跨 Agent 冲突
@@ -310,8 +317,8 @@ function goAudit() {
         </section>
       </div>
       <p class="disclaimer">
-        系统不盲目要求人工审核全部合同：绿档 AI 高置信自动过、黄档逐条核实、红档强制三员会审。
-        分档结果由 AI 辅助，最终以人工复核为准。
+        系统按证据状态和风险等级安排人工介入：依据支持关系已核验的低风险进入绿档，黄档逐条核实，红档强制三员会审。
+        分档结果仅供辅助，最终以人工复核为准。
       </p>
     </el-card>
 
@@ -320,7 +327,7 @@ function goAudit() {
       <div class="kpi"><span>协同检出</span><strong class="mono">{{ overview.total }}</strong></div>
       <div class="kpi"><span>高风险</span><strong class="mono seal-num">{{ overview.high }}</strong></div>
       <div class="kpi"><span>已确认</span><strong class="mono">{{ overview.confirmed }}</strong></div>
-      <div class="kpi"><span>平均置信度</span><strong class="mono">{{ overview.avg }}%</strong></div>
+      <div class="kpi"><span>依据已核验</span><strong class="mono">{{ overview.supported }}</strong></div>
     </div>
 
     <!-- 结果分析：按 Agent 分栏的风险清单对比 -->
@@ -361,7 +368,7 @@ function goAudit() {
             <p class="risk-line">{{ r.suggestion }}</p>
             <div class="risk-foot">
               <span class="basis mono">{{ r.basis }}</span>
-              <span class="conf mono">置信度 {{ r.confidence }}%</span>
+              <span class="conf mono">{{ evidenceMeta('evidence_status' in r ? r.evidence_status : null).label }}</span>
             </div>
           </article>
         </div>

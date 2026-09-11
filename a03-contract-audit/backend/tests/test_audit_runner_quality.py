@@ -87,6 +87,44 @@ def test_native_high_quality_contract_finishes_without_quality_risk(
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
 
 
+def test_evidence_gap_promotes_contract_to_manual_review(monkeypatch, db: Session):
+    contract = _contract(db, "evidence-gap.txt")
+    parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    monkeypatch.setattr(
+        runner,
+        "audit_contract",
+        lambda *_args, **_kwargs: {
+            "risks": [{
+                "agent": "legal",
+                "level": "medium",
+                "category": "待核验风险",
+                "original_text": "候选原文",
+                "risk_reason": "需要补充证据",
+                "basis": "无可靠检索依据，请人工复核",
+                "suggestion": "请法务复核",
+                "confidence": 0,
+                "tier": "yellow",
+                "evidence_status": "unsupported",
+                "original_text_verified": False,
+                "requires_manual_review": True,
+                "rag_sources": [],
+            }],
+            "cross_checks": [],
+        },
+    )
+
+    result = run_audit(db, contract)
+    db.refresh(contract)
+
+    assert result["requires_review"] is True
+    assert contract.requires_review is True
+    assert contract.status == "review_required"
+    assert contract.review_reason == "存在证据不足或原文未核验的风险"
+    risk = db.query(Risk).filter(Risk.contract_id == contract.id).one()
+    assert risk.support_validator_version == "unvalidated"
+
+
 def test_short_native_text_requires_review_without_duplicate_parse_risk(
     monkeypatch, db: Session
 ):

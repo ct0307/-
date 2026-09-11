@@ -52,6 +52,7 @@ def get_llm_calls(
             model=l.model,
             prompt_tokens=l.prompt_tokens,
             completion_tokens=l.completion_tokens,
+            finish_reason=l.finish_reason,
             latency_ms=l.latency_ms,
             mode=l.mode,
             time=time_str,

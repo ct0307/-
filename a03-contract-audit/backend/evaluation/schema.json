@@ -30,6 +30,18 @@
         "payment_terms": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
       },
       "additionalProperties": false
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["risk_key", "support_relation_status"],
+        "properties": {
+          "risk_key": {"type": "string", "minLength": 1},
+          "support_relation_status": {"enum": ["supported", "unclear", "contradicted"]}
+        },
+        "additionalProperties": false
+      }
     }
   },
   "allOf": [

@@ -144,12 +144,19 @@ class Risk(Base):
     category: Mapped[str] = mapped_column(String(64))
     agent: Mapped[str] = mapped_column(String(16), default="legal")  # 风险归属智能体：legal/finance
     original_text: Mapped[str] = mapped_column(Text)   # 原文引用
+    risk_reason: Mapped[str] = mapped_column(Text, default="")  # 候选风险原因，不作为正式依据
     basis: Mapped[str] = mapped_column(Text)           # 依据来源（法规/规则，来自 RAG）
     suggestion: Mapped[str] = mapped_column(Text)      # 建议修改
     confidence: Mapped[int] = mapped_column(Integer, default=0)  # 置信度 0-100
     tier: Mapped[str] = mapped_column(String(8), default="yellow")  # 人工干预档位：green/yellow/red
     review_status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/confirmed/ignored/to_modify
     rag_sources: Mapped[str] = mapped_column(Text, default="[]")   # JSON: [{content, source, score}]，RAG 检索溯源
+    evidence_status: Mapped[str] = mapped_column(String(24), default="unsupported")
+    original_text_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    requires_manual_review: Mapped[bool] = mapped_column(Boolean, default=True)
+    support_relation_status: Mapped[str] = mapped_column(String(16), default="unclear")
+    support_validation_reason: Mapped[str] = mapped_column(Text, default="")
+    support_validator_version: Mapped[str] = mapped_column(String(32), default="unvalidated")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     contract: Mapped["Contract"] = relationship(back_populates="risks")
@@ -299,6 +306,7 @@ class LLMCallLog(Base):
     model: Mapped[str] = mapped_column(String(64), default="")
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    finish_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     mode: Mapped[str] = mapped_column(String(8), default="llm")       # llm/mock（降级时不记录）
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

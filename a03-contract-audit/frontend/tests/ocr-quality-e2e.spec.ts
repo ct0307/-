@@ -26,12 +26,16 @@ const risks = [{
   level: 'high',
   category: '扫描件识别质量不足',
   original_text: 'OCR 平均置信度：42.3%',
+  risk_reason: 'OCR 质量未达到自动采信门槛。',
   basis: parseResult.review_reason,
   suggestion: '请人工复核',
   confidence: 42,
   tier: 'red',
   review_status: 'pending',
   rag_sources: [],
+  evidence_status: 'unsupported',
+  original_text_verified: false,
+  requires_manual_review: true,
 }]
 
 test('renders low-confidence OCR review state without mobile overflow', async ({ page }) => {
@@ -116,7 +120,7 @@ test('renders low-confidence OCR review state without mobile overflow', async ({
   await expect(reviewAlert).toContainText('42.3%')
   await expect(page.getByText('待人工复核', { exact: true })).toBeVisible()
   await expect(page.getByText('扫描件识别质量不足')).toBeVisible()
-  await expect(page.getByText('无可靠依据 · 待人工复核')).toBeVisible()
+  await expect(page.getByText('证据不足 · 待复核')).toBeVisible()
 
   await page.getByText('扫描件识别质量不足').click()
   await expect(page.getByRole('alert').filter({ hasText: '无可靠依据' })).toContainText(
@@ -172,6 +176,7 @@ test('requires confirmation when selected type conflicts with the material', asy
   await page.locator('input[name="username"]').fill('legal')
   await page.locator('input[name="password"]').fill('legal123')
   await page.getByRole('button', { name: '登 录' }).click()
+  await expect(page).toHaveURL(/\/dashboard$/)
   await page.goto(`${baseUrl}/audit`)
   await page.locator('input[type="file"]').first().setInputFiles({
     name: '设备采购合同.pdf',
