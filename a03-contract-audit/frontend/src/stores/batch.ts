@@ -34,7 +34,6 @@ export function createBatchStore(
     const loading = ref(false)
     const polling = ref(false)
     const error = ref('')
-    const idempotencyKey = ref('')
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const progress = computed(() => {
@@ -84,9 +83,9 @@ export function createBatchStore(
     async function create(files: File[], contractType = '', dimensions: string[] = []) {
       loading.value = true
       error.value = ''
-      idempotencyKey.value ||= crypto.randomUUID()
+      const actionKey = crypto.randomUUID()
       try {
-        batch.value = await api.createBatch(files, contractType, dimensions, idempotencyKey.value)
+        batch.value = await api.createBatch(files, contractType, dimensions, actionKey)
         if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
         else await startPolling(batch.value.id)
         return batch.value
@@ -101,12 +100,12 @@ export function createBatchStore(
     async function createFromImport(importItemIds: number[], dimensions: string[] = []) {
       loading.value = true
       error.value = ''
-      idempotencyKey.value ||= crypto.randomUUID()
+      const actionKey = crypto.randomUUID()
       try {
         batch.value = await api.createBatchFromImport(
           importItemIds,
           dimensions,
-          idempotencyKey.value,
+          actionKey,
         )
         if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
         else await startPolling(batch.value.id)
@@ -144,7 +143,6 @@ export function createBatchStore(
       stopPolling()
       batch.value = null
       error.value = ''
-      idempotencyKey.value = ''
     }
 
     return {

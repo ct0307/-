@@ -77,3 +77,39 @@ test('creates an audit batch from selected import items', async () => {
   expect(calls[0].dimensions).toEqual(['legal', 'payment'])
   expect(calls[0].key).toBeTruthy()
 })
+
+test('uses a new idempotency key for each import audit action', async () => {
+  const keys: string[] = []
+  const useStore = createBatchStore({
+    ...fakeApi([batch('done', ['done'])]),
+    createBatchFromImport: async (_itemIds, _dimensions, key) => {
+      keys.push(key ?? '')
+      return batch('done', ['done'])
+    },
+  }, 'import-action-keys')
+  const store = useStore()
+
+  await store.createFromImport([1])
+  await store.createFromImport([2])
+
+  expect(keys).toHaveLength(2)
+  expect(keys[0]).not.toBe(keys[1])
+})
+
+test('uses a new idempotency key for each direct file audit action', async () => {
+  const keys: string[] = []
+  const useStore = createBatchStore({
+    ...fakeApi([batch('done', ['done'])]),
+    createBatch: async (_files, _contractType, _dimensions, key) => {
+      keys.push(key ?? '')
+      return batch('done', ['done'])
+    },
+  }, 'file-action-keys')
+  const store = useStore()
+
+  await store.create([new File(['first'], 'first.txt')])
+  await store.create([new File(['second'], 'second.txt')])
+
+  expect(keys).toHaveLength(2)
+  expect(keys[0]).not.toBe(keys[1])
+})
