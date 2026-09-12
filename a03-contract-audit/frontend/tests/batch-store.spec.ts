@@ -113,3 +113,24 @@ test('uses a new idempotency key for each direct file audit action', async () =>
   expect(keys).toHaveLength(2)
   expect(keys[0]).not.toBe(keys[1])
 })
+
+test('reuses the idempotency key when retrying the same failed audit action', async () => {
+  const keys: string[] = []
+  let attempts = 0
+  const useStore = createBatchStore({
+    ...fakeApi([batch('done', ['done'])]),
+    createBatchFromImport: async (_itemIds, _dimensions, key) => {
+      keys.push(key ?? '')
+      attempts += 1
+      if (attempts === 1) throw new Error('网络超时')
+      return batch('done', ['done'])
+    },
+  }, 'retry-audit-action-key')
+  const store = useStore()
+
+  await expect(store.createFromImport([1], ['legal'])).rejects.toThrow('网络超时')
+  await store.createFromImport([1], ['legal'])
+
+  expect(keys).toHaveLength(2)
+  expect(keys[1]).toBe(keys[0])
+})

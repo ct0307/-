@@ -1,11 +1,13 @@
 """可恢复合同导入 API 测试。"""
 
 from io import BytesIO
+from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException, UploadFile
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.query import Query
 
 from app.api.v1.endpoints import imports
 from app.core.config import settings
@@ -87,6 +89,59 @@ def test_append_import_adds_files_to_the_existing_batch(monkeypatch, tmp_path):
     assert appended.total == 2
     assert [item.filename for item in appended.items] == ["first.txt", "second.txt"]
     assert db.query(Contract).count() == 2
+
+
+def test_create_import_persists_the_batch_department(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda item_id: f"task-{item_id}")
+
+    created = imports.create_import(
+        [_file("first.txt", b"first")], "create-key", legal.department, db, legal
+    )
+
+    assert db.get(ImportBatch, created.id).department == legal.department
+
+
+def test_append_import_locks_the_batch_before_checking_capacity(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda item_id: f"task-{item_id}")
+    created = imports.create_import(
+        [_file("first.txt", b"first")], "create-key", legal.department, db, legal
+    )
+
+    original = Query.with_for_update
+    with patch.object(Query, "with_for_update", autospec=True, side_effect=original) as lock:
+        imports.append_import_items(
+            created.id, [_file("second.txt", b"second")], "append-key", db, legal
+        )
+
+    lock.assert_called_once()
+
+
+def test_append_import_uses_the_batch_department_after_item_reclassification(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    legal.authorized_departments_json = '["采购中心"]'
+    db.commit()
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda item_id: f"task-{item_id}")
+    created = imports.create_import(
+        [_file("first.txt", b"first")], "create-key", legal.department, db, legal
+    )
+    first_contract = db.query(Contract).filter(Contract.filename == "first.txt").one()
+    first_contract.department = "采购中心"
+    db.commit()
+
+    imports.append_import_items(
+        created.id, [_file("second.txt", b"second")], "append-key", db, legal
+    )
+
+    second_contract = db.query(Contract).filter(Contract.filename == "second.txt").one()
+    assert second_contract.department == legal.department
 
 
 def test_append_import_replays_the_same_request_without_duplicates(monkeypatch, tmp_path):
@@ -216,6 +271,23 @@ def test_append_import_rejects_a_non_owner_in_the_same_department(monkeypatch, t
 
     assert error.value.status_code == 403
     assert db.query(ImportBatchItem).filter(ImportBatchItem.batch_id == batch.id).count() == 1
+
+
+def test_append_import_rejects_an_admin_who_does_not_own_the_batch(monkeypatch, tmp_path):
+    db = _session()
+    owner = _user(db, username="owner")
+    admin = _user(db, username="admin", role="admin", department="管理部")
+    batch = ImportBatch(owner_id=owner.id, idempotency_key="private-batch", department=owner.department)
+    db.add(batch)
+    db.commit()
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+
+    with pytest.raises(HTTPException) as error:
+        imports.append_import_items(
+            batch.id, [_file("injected.txt", b"content")], "admin-append", db, admin
+        )
+
+    assert error.value.status_code == 403
 
 
 def test_get_import_rejects_an_unrelated_user():

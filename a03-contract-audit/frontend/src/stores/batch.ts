@@ -25,6 +25,29 @@ export interface BatchApi {
 const TERMINAL_STATUSES = new Set<AuditBatch['status']>(['done', 'partial_failed', 'failed'])
 let testStoreSequence = 0
 
+interface PendingAction {
+  signature: string
+  key: string
+}
+
+function fileActionSignature(files: File[], contractType: string, dimensions: string[]): string {
+  return JSON.stringify({
+    kind: 'files',
+    contractType,
+    dimensions,
+    files: files.map((file) => ({
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      lastModified: file.lastModified,
+    })),
+  })
+}
+
+function importActionSignature(importItemIds: number[], dimensions: string[]): string {
+  return JSON.stringify({ kind: 'import', importItemIds, dimensions })
+}
+
 export function createBatchStore(
   api: BatchApi = batchRequests,
   storeId = `batch-${++testStoreSequence}`,
@@ -34,7 +57,16 @@ export function createBatchStore(
     const loading = ref(false)
     const polling = ref(false)
     const error = ref('')
+    let pendingAction: PendingAction | null = null
     let timer: ReturnType<typeof setTimeout> | null = null
+
+    function actionKey(signature: string): string {
+      const key = pendingAction?.signature === signature
+        ? pendingAction.key
+        : crypto.randomUUID()
+      pendingAction = { signature, key }
+      return key
+    }
 
     const progress = computed(() => {
       if (!batch.value?.total) return 0
@@ -83,9 +115,10 @@ export function createBatchStore(
     async function create(files: File[], contractType = '', dimensions: string[] = []) {
       loading.value = true
       error.value = ''
-      const actionKey = crypto.randomUUID()
+      const key = actionKey(fileActionSignature(files, contractType, dimensions))
       try {
-        batch.value = await api.createBatch(files, contractType, dimensions, actionKey)
+        batch.value = await api.createBatch(files, contractType, dimensions, key)
+        pendingAction = null
         if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
         else await startPolling(batch.value.id)
         return batch.value
@@ -100,13 +133,14 @@ export function createBatchStore(
     async function createFromImport(importItemIds: number[], dimensions: string[] = []) {
       loading.value = true
       error.value = ''
-      const actionKey = crypto.randomUUID()
+      const key = actionKey(importActionSignature(importItemIds, dimensions))
       try {
         batch.value = await api.createBatchFromImport(
           importItemIds,
           dimensions,
-          actionKey,
+          key,
         )
+        pendingAction = null
         if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
         else await startPolling(batch.value.id)
         return batch.value
@@ -143,6 +177,7 @@ export function createBatchStore(
       stopPolling()
       batch.value = null
       error.value = ''
+      pendingAction = null
     }
 
     return {

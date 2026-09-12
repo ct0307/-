@@ -52,15 +52,7 @@ const batchFixture: ImportBatch = {
   items: [readyItem, failedItem, failedWithoutContract],
 }
 
-type AppendImport = (
-  batchId: number,
-  files: File[],
-  idempotencyKey: string,
-) => Promise<ImportBatch>
-
-function api(
-  overrides: Partial<ImportApi> & { appendImport?: AppendImport } = {},
-): ImportApi {
+function api(overrides: Partial<ImportApi> = {}): ImportApi {
   return {
     createImport: async () => batchFixture,
     appendImport: async () => batchFixture,
@@ -70,7 +62,7 @@ function api(
     removeFailedRecord: async () => undefined,
     deleteDraft: async () => ({ ...failedItem, status: 'deleted' }),
     ...overrides,
-  } as ImportApi
+  }
 }
 
 test.beforeEach(() => setActivePinia(createPinia()))
@@ -156,6 +148,51 @@ test('keeps the current inbox and selection when append fails', async () => {
 
   expect(store.batch).toEqual(batchFixture)
   expect(store.selectedIds).toEqual([readyItem.id])
+})
+
+test('reuses the action key when retrying the same failed upload', async () => {
+  const keys: string[] = []
+  let attempts = 0
+  const store = createImportInboxStore(api({
+    createImport: async (_files, _department, key) => {
+      keys.push(key ?? '')
+      attempts += 1
+      if (attempts === 1) throw new Error('网络超时')
+      return batchFixture
+    },
+  }), 'retry-import-key')()
+  const files = [new File(['same'], 'same.txt', { lastModified: 1 })]
+
+  await expect(store.create(files, '法务部')).rejects.toThrow('网络超时')
+  await store.create(files, '法务部')
+
+  expect(keys).toHaveLength(2)
+  expect(keys[1]).toBe(keys[0])
+})
+
+test('uses a new action key when files change after a failed upload', async () => {
+  const keys: string[] = []
+  const store = createImportInboxStore(api({
+    createImport: async (_files, _department, key) => {
+      keys.push(key ?? '')
+      throw new Error('网络超时')
+    },
+  }), 'changed-import-key')()
+
+  await expect(store.create([new File(['first'], 'first.txt')], '法务部')).rejects.toThrow()
+  await expect(store.create([new File(['second'], 'second.txt')], '法务部')).rejects.toThrow()
+
+  expect(keys).toHaveLength(2)
+  expect(keys[1]).not.toBe(keys[0])
+})
+
+test('reports zero additions when the server replays an existing batch', async () => {
+  const store = createImportInboxStore(api(), 'replayed-import')()
+  await store.resume(batchFixture.id)
+
+  await store.create([new File(['same'], readyItem.filename)], '法务部')
+
+  expect(store.lastAddedCount).toBe(0)
 })
 
 test('rejects a concurrent upload before sending another request', async () => {

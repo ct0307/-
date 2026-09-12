@@ -24,6 +24,24 @@ export interface ImportApi {
 const ACTIVE_STATUSES = new Set<ImportItem['status']>(['queued', 'parsing', 'auditing'])
 let testStoreSequence = 0
 
+interface PendingUpload {
+  signature: string
+  key: string
+}
+
+function uploadSignature(batchId: number | null, department: string, files: File[]): string {
+  return JSON.stringify({
+    batchId,
+    department,
+    files: files.map((file) => ({
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      lastModified: file.lastModified,
+    })),
+  })
+}
+
 export function createImportInboxStore(
   api: ImportApi = importRequests,
   storeId = `import-inbox-${++testStoreSequence}`,
@@ -34,6 +52,8 @@ export function createImportInboxStore(
     const loading = ref(false)
     const polling = ref(false)
     const error = ref('')
+    const lastAddedCount = ref(0)
+    let pendingUpload: PendingUpload | null = null
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const selectableIds = computed(() => new Set(
@@ -117,12 +137,20 @@ export function createImportInboxStore(
       loading.value = true
       error.value = ''
       const currentBatch = batch.value
-      const actionKey = crypto.randomUUID()
+      const signature = uploadSignature(currentBatch?.id ?? null, department, files)
+      const actionKey = pendingUpload?.signature === signature
+        ? pendingUpload.key
+        : crypto.randomUUID()
+      pendingUpload = { signature, key: actionKey }
+      lastAddedCount.value = 0
       try {
         const next = currentBatch
           ? await api.appendImport(currentBatch.id, files, actionKey)
           : await api.createImport(files, department, actionKey)
+        const previousIds = new Set(currentBatch?.items.map((item) => item.id) ?? [])
+        lastAddedCount.value = next.items.filter((item) => !previousIds.has(item.id)).length
         batch.value = next
+        pendingUpload = null
         error.value = ''
         if (currentBatch) updateSelection()
         else selectedIds.value = []
@@ -203,6 +231,8 @@ export function createImportInboxStore(
       selectedIds.value = []
       loading.value = false
       error.value = ''
+      lastAddedCount.value = 0
+      pendingUpload = null
     }
 
     return {
@@ -211,6 +241,7 @@ export function createImportInboxStore(
       loading,
       polling,
       error,
+      lastAddedCount,
       selectableIds,
       summary,
       create,

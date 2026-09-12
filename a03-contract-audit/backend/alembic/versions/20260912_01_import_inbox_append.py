@@ -20,6 +20,23 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
+    op.add_column(
+        "import_batches",
+        sa.Column("department", sa.String(64), server_default="", nullable=False),
+    )
+    op.execute(
+        """
+        UPDATE import_batches
+        SET department = COALESCE((
+            SELECT contracts.department
+            FROM import_batch_items
+            JOIN contracts ON contracts.id = import_batch_items.contract_id
+            WHERE import_batch_items.batch_id = import_batches.id
+            ORDER BY import_batch_items.id
+            LIMIT 1
+        ), '')
+        """
+    )
     op.create_table(
         "import_append_requests",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -56,4 +73,5 @@ def downgrade() -> None:
         table_name="import_append_requests",
     )
     op.drop_table("import_append_requests")
+    op.drop_column("import_batches", "department")
     op.drop_column("import_batches", "request_fingerprint")

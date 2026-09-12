@@ -86,6 +86,7 @@ _DEV_COLUMNS = {
     ],
     "import_batches": [
         ("request_fingerprint", "VARCHAR(64) DEFAULT '' NOT NULL"),
+        ("department", "VARCHAR(64) DEFAULT '' NOT NULL"),
     ],
     "llm_call_logs": [
         ("audit_job_id", "INTEGER"),

@@ -156,6 +156,7 @@ class ImportBatch(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(128))
     request_fingerprint: Mapped[str] = mapped_column(String(64), default="")
+    department: Mapped[str] = mapped_column(String(64), default="", server_default="")
     status: Mapped[str] = mapped_column(String(24), default="processing", index=True)
     total: Mapped[int] = mapped_column(Integer, default=0)
     ready: Mapped[int] = mapped_column(Integer, default=0)

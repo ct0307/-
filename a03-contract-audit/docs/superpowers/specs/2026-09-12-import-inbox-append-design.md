@@ -43,7 +43,7 @@
 - 相同作用域、相同幂等键、相同指纹：返回当前完整批次，不重复写入。
 - 相同作用域、相同幂等键、不同指纹：返回 `409 IDEMPOTENCY_CONFLICT`。
 
-初始创建请求的指纹保存在 `import_batches.request_fingerprint`。追加请求使用独立的 `import_append_requests` 记录，字段至少包括 `batch_id`、`idempotency_key`、`request_fingerprint` 和创建时间，并对 `(batch_id, idempotency_key)` 建立唯一约束。
+初始创建请求的指纹保存在 `import_batches.request_fingerprint`。收件箱创建时的原始归属部门保存在 `import_batches.department`，后续合同确认时允许修改单份合同部门，但不得改变收件箱的追加归属。追加请求使用独立的 `import_append_requests` 记录，字段至少包括 `batch_id`、`idempotency_key`、`request_fingerprint` 和创建时间，并对 `(batch_id, idempotency_key)` 建立唯一约束。
 
 ### 追加事务
 
@@ -69,7 +69,7 @@
 
 ### 兼容与迁移
 
-- 新字段允许旧批次的请求指纹为空；只对新请求执行严格指纹判断。
+- 新字段允许旧批次的请求指纹和原始部门为空；只对新请求执行严格指纹判断。迁移按首个有效合同回填旧批次部门，无法唯一推导部门的旧批次拒绝追加。
 - 使用项目现有数据库初始化迁移机制补齐 SQLite 开发库字段和新表。
 - PostgreSQL 目标环境依赖唯一约束和行锁保证并发一致性。
 

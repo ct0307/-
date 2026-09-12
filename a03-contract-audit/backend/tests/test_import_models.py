@@ -87,6 +87,7 @@ def test_import_request_idempotency_is_persisted_and_unique_per_batch():
         saved = db.get(ImportBatch, batch.id)
         assert saved is not None
         assert saved.request_fingerprint == "a" * 64
+        assert saved.department == ""
 
         db.add(ImportAppendRequest(
             batch_id=batch.id,

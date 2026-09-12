@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Response, UploadFile, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_department_access
@@ -35,9 +36,10 @@ _MAX_TOTAL_BYTES = 500 * 1024 * 1024
 
 @dataclass(frozen=True)
 class PreparedUpload:
+    source: UploadFile
     filename: str
     extension: str
-    content: bytes
+    size: int
     content_sha256: str
 
 
@@ -45,12 +47,18 @@ def _prepare_uploads(files: list[UploadFile]) -> list[PreparedUpload]:
     prepared: list[PreparedUpload] = []
     for file in files:
         filename = os.path.basename(file.filename or "unknown")
-        content = file.file.read()
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := file.file.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+        file.file.seek(0)
         prepared.append(PreparedUpload(
+            source=file,
             filename=filename,
             extension=os.path.splitext(filename)[1].lower(),
-            content=content,
-            content_sha256=hashlib.sha256(content).hexdigest(),
+            size=size,
+            content_sha256=digest.hexdigest(),
         ))
     return prepared
 
@@ -61,7 +69,7 @@ def _request_fingerprint(department: str, uploads: list[PreparedUpload]) -> str:
         "files": [
             {
                 "filename": upload.filename,
-                "size": len(upload.content),
+                "size": upload.size,
                 "content_sha256": upload.content_sha256,
             }
             for upload in uploads
@@ -94,16 +102,17 @@ def _append_prepared_uploads(
         if item.status != "deleted"
     }
     for index, upload in enumerate(uploads):
-        total_bytes += len(upload.content)
+        content = upload.source.file.read()
+        total_bytes += upload.size
         error_code = None
         error_message = None
         if upload.filename in filenames:
             error_code, error_message = "DUPLICATE_FILENAME", "本批次存在同名文件"
         elif upload.extension not in _ALLOWED_EXTENSIONS:
             error_code, error_message = "UNSUPPORTED_FILE_TYPE", "不支持的文件类型"
-        elif not upload.content:
+        elif not content:
             error_code, error_message = "EMPTY_FILE", "文件为空"
-        elif len(upload.content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
+        elif upload.size > settings.MAX_UPLOAD_MB * 1024 * 1024:
             error_code, error_message = "FILE_TOO_LARGE", "文件超过大小限制"
         elif total_bytes > _MAX_TOTAL_BYTES:
             error_code, error_message = "BATCH_TOO_LARGE", "批次总大小超过 500MB"
@@ -122,7 +131,7 @@ def _append_prepared_uploads(
                 f"{uuid.uuid4().hex}{upload.extension}",
             )
             with open(stored_path, "wb") as stream:
-                stream.write(encrypt_bytes(upload.content))
+                stream.write(encrypt_bytes(content))
             created_paths.append(stored_path)
             contract = Contract(
                 filename=upload.filename,
@@ -185,8 +194,17 @@ def _batch_out(batch: ImportBatch) -> ImportBatchOut:
     )
 
 
-def _get_batch(db: Session, batch_id: int, user: User) -> ImportBatch:
-    batch = db.query(ImportBatch).filter(ImportBatch.id == batch_id).first()
+def _get_batch(
+    db: Session,
+    batch_id: int,
+    user: User,
+    *,
+    lock: bool = False,
+) -> ImportBatch:
+    query = db.query(ImportBatch).filter(ImportBatch.id == batch_id)
+    if lock:
+        query = query.with_for_update()
+    batch = query.first()
     if not batch:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "导入批次不存在")
     if user.role == "admin" or batch.owner_id == user.id:
@@ -243,13 +261,14 @@ def create_import(
         owner_id=user.id,
         idempotency_key=key,
         request_fingerprint=request_fingerprint,
+        department=target_department,
         total=len(uploads),
     )
-    db.add(batch)
-    db.flush()
     os.makedirs(settings.storage_path, exist_ok=True)
     created_paths: list[str] = []
     try:
+        db.add(batch)
+        db.flush()
         new_items = _append_prepared_uploads(
             batch,
             uploads,
@@ -266,6 +285,20 @@ def create_import(
         _refresh_batch(batch)
         db.commit()
         db.refresh(batch)
+    except IntegrityError as exc:
+        db.rollback()
+        for path in created_paths:
+            if os.path.isfile(path):
+                os.unlink(path)
+        duplicate = db.query(ImportBatch).filter(
+            ImportBatch.owner_id == user.id,
+            ImportBatch.idempotency_key == key,
+        ).first()
+        if duplicate:
+            if duplicate.request_fingerprint != request_fingerprint:
+                _raise_idempotency_conflict()
+            return _batch_out(duplicate)
+        raise HTTPException(status.HTTP_409_CONFLICT, "导入请求冲突") from exc
     except Exception:
         db.rollback()
         for path in created_paths:
@@ -300,17 +333,30 @@ def append_import_items(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次必须上传 1 至 200 份合同")
 
     batch = _get_batch(db, batch_id, user)
-    if user.role != "admin" and batch.owner_id != user.id:
+    if batch.owner_id != user.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "只有收件箱所有者可以继续添加合同")
-    departments = {
-        item.contract.department
-        for item in batch.items
-        if item.contract is not None and item.status != "deleted"
-    }
-    target_department = next(iter(departments), user.department).strip()
+    target_department = batch.department.strip()
+    if not target_department:
+        departments = {
+            item.contract.department
+            for item in batch.items
+            if item.contract is not None and item.status != "deleted"
+        }
+        if len(departments) > 1:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "IMPORT_BATCH_DEPARTMENT_UNDETERMINED",
+                    "message": "旧收件箱包含多个归属部门，无法继续追加合同",
+                },
+            )
+        target_department = next(iter(departments), user.department).strip()
+        batch.department = target_department
     require_department_access(user, target_department)
     uploads = _prepare_uploads(files)
     request_fingerprint = _request_fingerprint(target_department, uploads)
+    batch = _get_batch(db, batch_id, user, lock=True)
+    db.expire(batch, ["items"])
     existing_request = db.query(ImportAppendRequest).filter(
         ImportAppendRequest.batch_id == batch.id,
         ImportAppendRequest.idempotency_key == key,
@@ -354,6 +400,21 @@ def append_import_items(
         _refresh_batch(batch)
         db.commit()
         db.refresh(batch)
+    except IntegrityError as exc:
+        db.rollback()
+        for path in created_paths:
+            if os.path.isfile(path):
+                os.unlink(path)
+        duplicate = db.query(ImportAppendRequest).filter(
+            ImportAppendRequest.batch_id == batch_id,
+            ImportAppendRequest.idempotency_key == key,
+        ).first()
+        if duplicate:
+            if duplicate.request_fingerprint != request_fingerprint:
+                _raise_idempotency_conflict()
+            replay_batch = _get_batch(db, batch_id, user)
+            return _batch_out(replay_batch)
+        raise HTTPException(status.HTTP_409_CONFLICT, "追加请求冲突") from exc
     except Exception:
         db.rollback()
         for path in created_paths:

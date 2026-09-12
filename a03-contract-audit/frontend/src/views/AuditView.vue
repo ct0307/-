@@ -113,7 +113,11 @@ async function uploadFiles(files: File[]) {
   try {
     const created = await inbox.create(files, auth.department)
     await router.replace({ query: { ...route.query, import: String(created.id) } })
-    ElMessage.success(`已接收 ${files.length} 份合同`)
+    if (inbox.lastAddedCount > 0) {
+      ElMessage.success(`已接收 ${inbox.lastAddedCount} 份合同`)
+    } else {
+      ElMessage.info('合同已在收件箱中，无需重复添加')
+    }
   } catch {
     ElMessage.error(inbox.error || '合同导入失败，请稍后重试')
   }

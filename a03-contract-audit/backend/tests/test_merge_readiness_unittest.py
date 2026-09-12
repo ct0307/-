@@ -214,6 +214,7 @@ class MergeReadinessTests(unittest.TestCase):
             )
             self.assertIn("import_item_id", item_columns)
             self.assertIn("request_fingerprint", import_batch_columns)
+            self.assertIn("department", import_batch_columns)
             self.assertIn("import_append_requests", Base.metadata.tables)
             self.assertIn("ix_contracts_deleted_at", contract_indexes)
             self.assertIn("ix_audit_batch_items_import_item_id", item_indexes)
