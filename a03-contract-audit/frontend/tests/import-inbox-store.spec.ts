@@ -52,16 +52,25 @@ const batchFixture: ImportBatch = {
   items: [readyItem, failedItem, failedWithoutContract],
 }
 
-function api(overrides: Partial<ImportApi> = {}): ImportApi {
+type AppendImport = (
+  batchId: number,
+  files: File[],
+  idempotencyKey: string,
+) => Promise<ImportBatch>
+
+function api(
+  overrides: Partial<ImportApi> & { appendImport?: AppendImport } = {},
+): ImportApi {
   return {
     createImport: async () => batchFixture,
+    appendImport: async () => batchFixture,
     getImport: async () => batchFixture,
     confirmItem: async () => readyItem,
     retryItem: async () => ({ ...failedItem, status: 'queued', error_code: null, error_message: null }),
     removeFailedRecord: async () => undefined,
     deleteDraft: async () => ({ ...failedItem, status: 'deleted' }),
     ...overrides,
-  }
+  } as ImportApi
 }
 
 test.beforeEach(() => setActivePinia(createPinia()))
@@ -102,4 +111,70 @@ test('replaces one item with the server-confirmed state', async () => {
   await store.confirm(awaiting.id, '采购合同', '法务部')
 
   expect(store.batch?.items[0]).toEqual(confirmed)
+})
+
+test('appends a second file to the active inbox with a new action key', async () => {
+  const createKeys: string[] = []
+  const appendCalls: Array<{ batchId: number; key: string }> = []
+  const appendedItem = { ...readyItem, id: 4, contract_id: 14, filename: '追加合同.txt' }
+  const appendedBatch = {
+    ...batchFixture,
+    total: 4,
+    ready: 2,
+    items: [...batchFixture.items, appendedItem],
+  }
+  const store = createImportInboxStore(api({
+    createImport: async (_files, _department, key) => {
+      createKeys.push(key ?? '')
+      return batchFixture
+    },
+    appendImport: async (batchId, _files, key) => {
+      appendCalls.push({ batchId, key })
+      return appendedBatch
+    },
+  }), 'append-import')()
+
+  await store.create([new File(['first'], 'first.txt')], '法务部')
+  store.toggleSelected(readyItem.id)
+  await store.create([new File(['second'], 'second.txt')], '法务部')
+
+  expect(appendCalls).toHaveLength(1)
+  expect(appendCalls[0].batchId).toBe(batchFixture.id)
+  expect(appendCalls[0].key).not.toBe(createKeys[0])
+  expect(store.batch?.items).toHaveLength(4)
+  expect(store.selectedIds).toEqual([readyItem.id])
+})
+
+test('keeps the current inbox and selection when append fails', async () => {
+  const store = createImportInboxStore(api({
+    appendImport: async () => { throw new Error('追加失败') },
+  }), 'failed-append-import')()
+  await store.create([new File(['first'], 'first.txt')], '法务部')
+  store.toggleSelected(readyItem.id)
+
+  await expect(store.create([new File(['second'], 'second.txt')], '法务部')).rejects.toThrow('追加失败')
+
+  expect(store.batch).toEqual(batchFixture)
+  expect(store.selectedIds).toEqual([readyItem.id])
+})
+
+test('rejects a concurrent upload before sending another request', async () => {
+  let releaseFirst: ((value: ImportBatch) => void) | undefined
+  let calls = 0
+  const firstResponse = new Promise<ImportBatch>((resolve) => { releaseFirst = resolve })
+  const store = createImportInboxStore(api({
+    createImport: async () => {
+      calls += 1
+      return calls === 1 ? firstResponse : batchFixture
+    },
+  }), 'concurrent-import')()
+
+  const first = store.create([new File(['first'], 'first.txt')], '法务部')
+  await expect(
+    store.create([new File(['second'], 'second.txt')], '法务部'),
+  ).rejects.toThrow('合同正在上传，请稍候')
+  releaseFirst?.(batchFixture)
+  await first
+
+  expect(calls).toBe(1)
 })

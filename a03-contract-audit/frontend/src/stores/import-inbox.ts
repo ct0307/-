@@ -8,6 +8,7 @@ export type { ImportBatch, ImportItem } from '@/api/imports'
 
 export interface ImportApi {
   createImport(files: File[], department?: string, idempotencyKey?: string): Promise<ImportBatch>
+  appendImport(batchId: number, files: File[], idempotencyKey?: string): Promise<ImportBatch>
   getImport(batchId: number): Promise<ImportBatch>
   confirmItem(
     batchId: number,
@@ -33,7 +34,6 @@ export function createImportInboxStore(
     const loading = ref(false)
     const polling = ref(false)
     const error = ref('')
-    const idempotencyKey = ref('')
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const selectableIds = computed(() => new Set(
@@ -109,14 +109,25 @@ export function createImportInboxStore(
     }
 
     async function create(files: File[], department = '') {
+      if (loading.value) {
+        const message = '合同正在上传，请稍候'
+        error.value = message
+        throw new Error(message)
+      }
       loading.value = true
       error.value = ''
-      idempotencyKey.value ||= crypto.randomUUID()
+      const currentBatch = batch.value
+      const actionKey = crypto.randomUUID()
       try {
-        batch.value = await api.createImport(files, department, idempotencyKey.value)
-        selectedIds.value = []
-        if (hasActiveItems(batch.value)) await startPolling(batch.value.id)
-        return batch.value
+        const next = currentBatch
+          ? await api.appendImport(currentBatch.id, files, actionKey)
+          : await api.createImport(files, department, actionKey)
+        batch.value = next
+        error.value = ''
+        if (currentBatch) updateSelection()
+        else selectedIds.value = []
+        if (hasActiveItems(next)) await startPolling(next.id)
+        return next
       } catch (cause) {
         recordError(cause)
         throw cause
@@ -192,7 +203,6 @@ export function createImportInboxStore(
       selectedIds.value = []
       loading.value = false
       error.value = ''
-      idempotencyKey.value = ''
     }
 
     return {

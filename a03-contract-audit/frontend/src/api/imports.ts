@@ -49,6 +49,19 @@ export function createImport(
   })
 }
 
+export function appendImport(
+  batchId: number,
+  files: File[],
+  idempotencyKey = crypto.randomUUID(),
+): Promise<ImportBatch> {
+  const form = new FormData()
+  files.forEach((file) => form.append('files', file))
+  return client.post(`/imports/${batchId}/items`, form, {
+    headers: { 'Idempotency-Key': idempotencyKey },
+    timeout: 300_000,
+  })
+}
+
 export function getImport(batchId: number): Promise<ImportBatch> {
   return client.get(`/imports/${batchId}`)
 }

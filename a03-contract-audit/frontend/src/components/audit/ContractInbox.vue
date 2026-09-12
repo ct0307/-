@@ -62,10 +62,12 @@ const statusMeta: Record<ImportItem['status'], {
 }
 
 function chooseFiles() {
+  if (props.loading) return
   fileInput.value?.click()
 }
 
 function submitFiles(files: FileList | File[]) {
+  if (props.loading) return
   const selected = Array.from(files)
   if (selected.length) emit('upload', selected)
 }
@@ -78,6 +80,7 @@ function onFileChange(event: Event) {
 
 function onDrop(event: DragEvent) {
   dragging.value = false
+  if (props.loading) return
   if (event.dataTransfer?.files) submitFiles(event.dataTransfer.files)
 }
 
@@ -129,9 +132,10 @@ async function deleteDraft(item: ImportItem) {
 
     <div
       class="upload-band"
-      :class="{ dragging }"
+      :class="{ dragging, disabled: loading }"
       role="button"
-      tabindex="0"
+      :tabindex="loading ? -1 : 0"
+      :aria-disabled="loading"
       aria-label="选择或拖拽合同文件"
       @click="chooseFiles"
       @keydown.enter.prevent="chooseFiles"
@@ -327,6 +331,8 @@ async function deleteDraft(item: ImportItem) {
 }
 .upload-band:hover,
 .upload-band.dragging { border-color: var(--brass); background: var(--brass-soft); }
+.upload-band.disabled { cursor: not-allowed; opacity: .65; }
+.upload-band.disabled:hover { border-color: var(--line-strong); background: var(--bg-soft); }
 .upload-band > .el-icon { flex: none; color: var(--brass); font-size: 22px; }
 .file-input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 .upload-primary { flex: none; color: var(--ivory); font-weight: 600; font-size: 13px; }
