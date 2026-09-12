@@ -66,6 +66,158 @@ def test_create_import_is_idempotent_per_owner(monkeypatch, tmp_path):
     assert db.query(Contract).count() == 1
 
 
+def test_append_import_adds_files_to_the_existing_batch(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda item_id: f"task-{item_id}")
+
+    created = imports.create_import(
+        [_file("first.txt", b"first")], "create-key", "法务部", db, legal
+    )
+    appended = imports.append_import_items(
+        created.id,
+        [_file("second.txt", b"second")],
+        "append-key",
+        db,
+        legal,
+    )
+
+    assert appended.id == created.id
+    assert appended.total == 2
+    assert [item.filename for item in appended.items] == ["first.txt", "second.txt"]
+    assert db.query(Contract).count() == 2
+
+
+def test_append_import_replays_the_same_request_without_duplicates(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda item_id: f"task-{item_id}")
+    created = imports.create_import(
+        [_file("first.txt", b"first")], "create-key", "法务部", db, legal
+    )
+
+    first = imports.append_import_items(
+        created.id, [_file("second.txt", b"second")], "append-key", db, legal
+    )
+    replay = imports.append_import_items(
+        created.id, [_file("second.txt", b"second")], "append-key", db, legal
+    )
+
+    assert replay.id == first.id
+    assert replay.total == 2
+    assert db.query(Contract).count() == 2
+
+
+def test_create_import_rejects_reused_key_with_different_payload(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda item_id: f"task-{item_id}")
+    imports.create_import([_file("first.txt", b"first")], "shared-key", "法务部", db, legal)
+
+    with pytest.raises(HTTPException) as error:
+        imports.create_import(
+            [_file("different.txt", b"different")], "shared-key", "法务部", db, legal
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_append_import_rejects_reused_key_with_different_payload(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda item_id: f"task-{item_id}")
+    created = imports.create_import(
+        [_file("first.txt", b"first")], "create-key", "法务部", db, legal
+    )
+    imports.append_import_items(
+        created.id, [_file("second.txt", b"second")], "append-key", db, legal
+    )
+
+    with pytest.raises(HTTPException) as error:
+        imports.append_import_items(
+            created.id, [_file("third.txt", b"third")], "append-key", db, legal
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_append_import_rejects_files_beyond_the_batch_limit(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    batch = ImportBatch(owner_id=legal.id, idempotency_key="full-batch")
+    batch.items.extend(
+        ImportBatchItem(filename=f"existing-{index}.txt", status="failed")
+        for index in range(200)
+    )
+    db.add(batch)
+    db.commit()
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+
+    with pytest.raises(HTTPException) as error:
+        imports.append_import_items(
+            batch.id, [_file("overflow.txt", b"overflow")], "append-overflow", db, legal
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "IMPORT_BATCH_LIMIT_EXCEEDED"
+    assert db.query(ImportBatchItem).filter(ImportBatchItem.batch_id == batch.id).count() == 200
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_append_import_marks_a_cross_request_duplicate_filename(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda item_id: f"task-{item_id}")
+    created = imports.create_import(
+        [_file("same.txt", b"first")], "create-key", "法务部", db, legal
+    )
+
+    appended = imports.append_import_items(
+        created.id, [_file("same.txt", b"second")], "append-duplicate", db, legal
+    )
+
+    assert appended.total == 2
+    assert appended.items[-1].status == "failed"
+    assert appended.items[-1].error_code == "DUPLICATE_FILENAME"
+    assert db.query(Contract).count() == 1
+
+
+def test_append_import_rejects_a_non_owner_in_the_same_department(monkeypatch, tmp_path):
+    db = _session()
+    owner = _user(db, username="owner")
+    peer = _user(db, username="peer")
+    batch = ImportBatch(owner_id=owner.id, idempotency_key="private-batch")
+    batch.items.append(ImportBatchItem(
+        filename="existing.txt",
+        status="ready",
+        contract=Contract(
+            filename="existing.txt",
+            storage_path=str(tmp_path / "existing.txt"),
+            uploaded_by=owner.id,
+            department=owner.department,
+            status="parsed",
+        ),
+    ))
+    db.add(batch)
+    db.commit()
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+
+    with pytest.raises(HTTPException) as error:
+        imports.append_import_items(
+            batch.id, [_file("injected.txt", b"content")], "peer-append", db, peer
+        )
+
+    assert error.value.status_code == 403
+    assert db.query(ImportBatchItem).filter(ImportBatchItem.batch_id == batch.id).count() == 1
+
+
 def test_get_import_rejects_an_unrelated_user():
     db = _session()
     owner = _user(db, username="owner", department="法务部")

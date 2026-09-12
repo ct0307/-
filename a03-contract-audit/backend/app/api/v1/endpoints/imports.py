@@ -1,8 +1,10 @@
 """可恢复合同导入收件箱端点。"""
 
 import hashlib
+import json
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Response, UploadFile, status
@@ -12,7 +14,14 @@ from app.api.deps import get_current_user, require_department_access
 from app.core.config import settings
 from app.core.crypto import encrypt_bytes
 from app.db.session import get_db
-from app.models.models import AuditLog, Contract, ImportBatch, ImportBatchItem, User
+from app.models.models import (
+    AuditLog,
+    Contract,
+    ImportAppendRequest,
+    ImportBatch,
+    ImportBatchItem,
+    User,
+)
 from app.schemas.import_batch import ConfirmImportItem, ImportBatchOut, ImportItemOut
 from app.services.imports.service import summarize_import
 from app.tasks.dispatcher import dispatch_import_item
@@ -22,6 +31,115 @@ router = APIRouter()
 _ALLOWED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
 _MAX_BATCH_FILES = 200
 _MAX_TOTAL_BYTES = 500 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class PreparedUpload:
+    filename: str
+    extension: str
+    content: bytes
+    content_sha256: str
+
+
+def _prepare_uploads(files: list[UploadFile]) -> list[PreparedUpload]:
+    prepared: list[PreparedUpload] = []
+    for file in files:
+        filename = os.path.basename(file.filename or "unknown")
+        content = file.file.read()
+        prepared.append(PreparedUpload(
+            filename=filename,
+            extension=os.path.splitext(filename)[1].lower(),
+            content=content,
+            content_sha256=hashlib.sha256(content).hexdigest(),
+        ))
+    return prepared
+
+
+def _request_fingerprint(department: str, uploads: list[PreparedUpload]) -> str:
+    payload = {
+        "department": department,
+        "files": [
+            {
+                "filename": upload.filename,
+                "size": len(upload.content),
+                "content_sha256": upload.content_sha256,
+            }
+            for upload in uploads
+        ],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _raise_idempotency_conflict() -> None:
+    raise HTTPException(
+        status.HTTP_409_CONFLICT,
+        {"code": "IDEMPOTENCY_CONFLICT", "message": "幂等键已用于其他合同上传请求"},
+    )
+
+
+def _append_prepared_uploads(
+    batch: ImportBatch,
+    uploads: list[PreparedUpload],
+    *,
+    department: str,
+    operation_key: str,
+    created_paths: list[str],
+) -> list[ImportBatchItem]:
+    new_items: list[ImportBatchItem] = []
+    total_bytes = 0
+    filenames = {
+        item.filename
+        for item in batch.items
+        if item.status != "deleted"
+    }
+    for index, upload in enumerate(uploads):
+        total_bytes += len(upload.content)
+        error_code = None
+        error_message = None
+        if upload.filename in filenames:
+            error_code, error_message = "DUPLICATE_FILENAME", "本批次存在同名文件"
+        elif upload.extension not in _ALLOWED_EXTENSIONS:
+            error_code, error_message = "UNSUPPORTED_FILE_TYPE", "不支持的文件类型"
+        elif not upload.content:
+            error_code, error_message = "EMPTY_FILE", "文件为空"
+        elif len(upload.content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
+            error_code, error_message = "FILE_TOO_LARGE", "文件超过大小限制"
+        elif total_bytes > _MAX_TOTAL_BYTES:
+            error_code, error_message = "BATCH_TOO_LARGE", "批次总大小超过 500MB"
+        filenames.add(upload.filename)
+
+        if error_code:
+            item = ImportBatchItem(
+                filename=upload.filename,
+                status="failed",
+                error_code=error_code,
+                error_message=error_message,
+            )
+        else:
+            stored_path = os.path.join(
+                settings.storage_path,
+                f"{uuid.uuid4().hex}{upload.extension}",
+            )
+            with open(stored_path, "wb") as stream:
+                stream.write(encrypt_bytes(upload.content))
+            created_paths.append(stored_path)
+            contract = Contract(
+                filename=upload.filename,
+                storage_path=stored_path,
+                contract_type="",
+                department=department,
+                status="uploaded",
+                uploaded_by=batch.owner_id,
+                upload_idempotency_key=hashlib.sha256(
+                    f"{operation_key}:{index}".encode()
+                ).hexdigest(),
+                content_sha256=upload.content_sha256,
+            )
+            item = ImportBatchItem(filename=upload.filename, contract=contract, status="queued")
+        batch.items.append(item)
+        new_items.append(item)
+    return new_items
 
 
 def _dispatch_import_item(item_id: int) -> str:
@@ -106,67 +224,39 @@ def create_import(
     key = idempotency_key.strip()
     if not 8 <= len(key) <= 128:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Idempotency-Key 长度必须为 8 至 128")
+    if not files or len(files) > _MAX_BATCH_FILES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次必须上传 1 至 200 份合同")
+    target_department = (department or user.department).strip()
+    require_department_access(user, target_department)
+    uploads = _prepare_uploads(files)
+    request_fingerprint = _request_fingerprint(target_department, uploads)
     existing = db.query(ImportBatch).filter(
         ImportBatch.owner_id == user.id,
         ImportBatch.idempotency_key == key,
     ).first()
     if existing:
+        if existing.request_fingerprint and existing.request_fingerprint != request_fingerprint:
+            _raise_idempotency_conflict()
         return _batch_out(existing)
-    if not files or len(files) > _MAX_BATCH_FILES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次必须上传 1 至 200 份合同")
-    target_department = (department or user.department).strip()
-    require_department_access(user, target_department)
 
-    batch = ImportBatch(owner_id=user.id, idempotency_key=key, total=len(files))
+    batch = ImportBatch(
+        owner_id=user.id,
+        idempotency_key=key,
+        request_fingerprint=request_fingerprint,
+        total=len(uploads),
+    )
     db.add(batch)
     db.flush()
     os.makedirs(settings.storage_path, exist_ok=True)
     created_paths: list[str] = []
-    total_bytes = 0
-    filenames: set[str] = set()
     try:
-        for index, file in enumerate(files):
-            filename = os.path.basename(file.filename or "unknown")
-            extension = os.path.splitext(filename)[1].lower()
-            content = file.file.read()
-            total_bytes += len(content)
-            error_code = None
-            error_message = None
-            if filename in filenames:
-                error_code, error_message = "DUPLICATE_FILENAME", "本批次存在同名文件"
-            elif extension not in _ALLOWED_EXTENSIONS:
-                error_code, error_message = "UNSUPPORTED_FILE_TYPE", "不支持的文件类型"
-            elif not content:
-                error_code, error_message = "EMPTY_FILE", "文件为空"
-            elif len(content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
-                error_code, error_message = "FILE_TOO_LARGE", "文件超过大小限制"
-            elif total_bytes > _MAX_TOTAL_BYTES:
-                error_code, error_message = "BATCH_TOO_LARGE", "批次总大小超过 500MB"
-            filenames.add(filename)
-            if error_code:
-                batch.items.append(ImportBatchItem(
-                    filename=filename,
-                    status="failed",
-                    error_code=error_code,
-                    error_message=error_message,
-                ))
-                continue
-
-            stored_path = os.path.join(settings.storage_path, f"{uuid.uuid4().hex}{extension}")
-            with open(stored_path, "wb") as stream:
-                stream.write(encrypt_bytes(content))
-            created_paths.append(stored_path)
-            contract = Contract(
-                filename=filename,
-                storage_path=stored_path,
-                contract_type="",
-                department=target_department,
-                status="uploaded",
-                uploaded_by=user.id,
-                upload_idempotency_key=hashlib.sha256(f"{key}:{index}".encode()).hexdigest(),
-                content_sha256=hashlib.sha256(content).hexdigest(),
-            )
-            batch.items.append(ImportBatchItem(filename=filename, contract=contract, status="queued"))
+        new_items = _append_prepared_uploads(
+            batch,
+            uploads,
+            department=target_department,
+            operation_key=key,
+            created_paths=created_paths,
+        )
         db.add(AuditLog(
             user_id=user.id,
             action="import_create",
@@ -183,7 +273,95 @@ def create_import(
                 os.unlink(path)
         raise
 
-    for item in batch.items:
+    for item in new_items:
+        if item.status != "queued":
+            continue
+        try:
+            _dispatch_import_item(item.id)
+        except Exception:
+            item.error_code = "DISPATCH_PENDING"
+            item.error_message = "文件已保存，正在等待重新解析"
+    db.commit()
+    return _batch_out(batch)
+
+
+@router.post("/{batch_id}/items", response_model=ImportBatchOut, status_code=status.HTTP_202_ACCEPTED)
+def append_import_items(
+    batch_id: int,
+    files: list[UploadFile] = File(...),
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ImportBatchOut:
+    key = idempotency_key.strip()
+    if not 8 <= len(key) <= 128:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Idempotency-Key 长度必须为 8 至 128")
+    if not files or len(files) > _MAX_BATCH_FILES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次必须上传 1 至 200 份合同")
+
+    batch = _get_batch(db, batch_id, user)
+    if user.role != "admin" and batch.owner_id != user.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "只有收件箱所有者可以继续添加合同")
+    departments = {
+        item.contract.department
+        for item in batch.items
+        if item.contract is not None and item.status != "deleted"
+    }
+    target_department = next(iter(departments), user.department).strip()
+    require_department_access(user, target_department)
+    uploads = _prepare_uploads(files)
+    request_fingerprint = _request_fingerprint(target_department, uploads)
+    existing_request = db.query(ImportAppendRequest).filter(
+        ImportAppendRequest.batch_id == batch.id,
+        ImportAppendRequest.idempotency_key == key,
+    ).first()
+    if existing_request:
+        if existing_request.request_fingerprint != request_fingerprint:
+            _raise_idempotency_conflict()
+        return _batch_out(batch)
+    visible_count = sum(item.status != "deleted" for item in batch.items)
+    if visible_count + len(uploads) > _MAX_BATCH_FILES:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "code": "IMPORT_BATCH_LIMIT_EXCEEDED",
+                "message": "单个收件箱最多包含 200 份合同",
+            },
+        )
+
+    os.makedirs(settings.storage_path, exist_ok=True)
+    created_paths: list[str] = []
+    try:
+        db.add(ImportAppendRequest(
+            batch_id=batch.id,
+            idempotency_key=key,
+            request_fingerprint=request_fingerprint,
+        ))
+        new_items = _append_prepared_uploads(
+            batch,
+            uploads,
+            department=target_department,
+            operation_key=key,
+            created_paths=created_paths,
+        )
+
+        db.add(AuditLog(
+            user_id=user.id,
+            action="import_append",
+            target=f"import:{batch.id}",
+            detail=f"files={len(uploads)},department={target_department}",
+        ))
+        _refresh_batch(batch)
+        db.commit()
+        db.refresh(batch)
+    except Exception:
+        db.rollback()
+        for path in created_paths:
+            if os.path.isfile(path):
+                os.unlink(path)
+        raise
+
+    for item in new_items:
         if item.status != "queued":
             continue
         try:
