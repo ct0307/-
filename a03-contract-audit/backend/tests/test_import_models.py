@@ -2,11 +2,19 @@
 
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import Base
-from app.models.models import Contract, ImportBatch, ImportBatchItem, User
+from app.models.models import (
+    Contract,
+    ImportAppendRequest,
+    ImportBatch,
+    ImportBatchItem,
+    User,
+)
 
 
 def test_import_batch_persists_file_level_classification():
@@ -53,3 +61,37 @@ def test_contract_soft_delete_fields_are_nullable_and_recoverable():
 
     assert contract.deleted_at == deleted_at
     assert contract.deleted_by == 1
+
+
+def test_import_request_idempotency_is_persisted_and_unique_per_batch():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(username="owner", password_hash="x", role="legal", department="法务部")
+        db.add(user)
+        db.flush()
+        batch = ImportBatch(
+            owner_id=user.id,
+            idempotency_key="create-key",
+            request_fingerprint="a" * 64,
+        )
+        db.add(batch)
+        db.flush()
+        db.add(ImportAppendRequest(
+            batch_id=batch.id,
+            idempotency_key="append-key",
+            request_fingerprint="b" * 64,
+        ))
+        db.commit()
+
+        saved = db.get(ImportBatch, batch.id)
+        assert saved is not None
+        assert saved.request_fingerprint == "a" * 64
+
+        db.add(ImportAppendRequest(
+            batch_id=batch.id,
+            idempotency_key="append-key",
+            request_fingerprint="b" * 64,
+        ))
+        with pytest.raises(IntegrityError):
+            db.commit()

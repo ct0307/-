@@ -171,6 +171,9 @@ class MergeReadinessTests(unittest.TestCase):
                 connection.exec_driver_sql(
                     "CREATE TABLE audit_batch_items (id INTEGER PRIMARY KEY)"
                 )
+                connection.exec_driver_sql(
+                    "CREATE TABLE import_batches (id INTEGER PRIMARY KEY)"
+                )
 
             with (
                 patch.object(init_db_module, "engine", engine),
@@ -185,6 +188,9 @@ class MergeReadinessTests(unittest.TestCase):
             }
             item_columns = {
                 column["name"] for column in db_inspector.get_columns("audit_batch_items")
+            }
+            import_batch_columns = {
+                column["name"] for column in db_inspector.get_columns("import_batches")
             }
             contract_indexes = {
                 index["name"] for index in db_inspector.get_indexes("contracts")
@@ -207,6 +213,8 @@ class MergeReadinessTests(unittest.TestCase):
                 <= contract_columns
             )
             self.assertIn("import_item_id", item_columns)
+            self.assertIn("request_fingerprint", import_batch_columns)
+            self.assertIn("import_append_requests", Base.metadata.tables)
             self.assertIn("ix_contracts_deleted_at", contract_indexes)
             self.assertIn("ix_audit_batch_items_import_item_id", item_indexes)
         finally:

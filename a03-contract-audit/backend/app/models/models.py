@@ -155,6 +155,7 @@ class ImportBatch(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_fingerprint: Mapped[str] = mapped_column(String(64), default="")
     status: Mapped[str] = mapped_column(String(24), default="processing", index=True)
     total: Mapped[int] = mapped_column(Integer, default=0)
     ready: Mapped[int] = mapped_column(Integer, default=0)
@@ -167,6 +168,23 @@ class ImportBatch(Base):
     items: Mapped[list["ImportBatchItem"]] = relationship(
         back_populates="batch", cascade="all, delete-orphan"
     )
+
+
+class ImportAppendRequest(Base):
+    """导入批次追加操作的幂等记录。"""
+
+    __tablename__ = "import_append_requests"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "idempotency_key", name="uq_import_append_batch_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("import_batches.id", ondelete="CASCADE"), index=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ImportBatchItem(Base):
