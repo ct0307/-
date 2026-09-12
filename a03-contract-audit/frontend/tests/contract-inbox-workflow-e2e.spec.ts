@@ -98,7 +98,7 @@ async function prepare(page: Page) {
 test('uploads mixed contracts, confirms one exception and audits ready items', async ({ page }) => {
   await prepare(page)
   await page.goto(`${baseUrl}/audit`)
-  await page.waitForLoadState('networkidle')
+  await expect(page.getByRole('heading', { name: '待审合同' })).toBeVisible()
 
   await page.locator('input[type="file"]').setInputFiles([
     { name: '采购合同.txt', mimeType: 'text/plain', buffer: Buffer.from('采购服务器设备') },
@@ -127,4 +127,82 @@ test('restores import batch from the url after reload', async ({ page }) => {
   await page.reload()
 
   await expect(page.getByText('采购合同.txt')).toBeVisible()
+})
+
+test('keeps both contracts visible when adding files consecutively', async ({ page }) => {
+  const keys: string[] = []
+  const firstItem = importItem({
+    id: 10,
+    contract_id: 110,
+    filename: '第一份合同.txt',
+  })
+  const secondItem = importItem({
+    id: 11,
+    contract_id: 111,
+    filename: '第二份合同.txt',
+  })
+  const firstBatch = {
+    ...mixedBatch,
+    id: 55,
+    status: 'ready',
+    total: 1,
+    ready: 1,
+    failed: 0,
+    items: [firstItem],
+  }
+  const appendedBatch = {
+    ...firstBatch,
+    total: 2,
+    ready: 2,
+    items: [firstItem, secondItem],
+  }
+  await page.addInitScript(() => {
+    localStorage.setItem('token', 'test-token')
+    localStorage.setItem('role', 'legal')
+    localStorage.setItem('username', 'legal')
+    localStorage.setItem('department', '法务部')
+    localStorage.setItem('authorized_departments', JSON.stringify(['法务部']))
+  })
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    const method = route.request().method()
+    if (path.endsWith('/runtime/status')) {
+      return fulfillJson(route, { status: 'online', checked_at: '2026-09-12T10:00:00Z' })
+    }
+    if (path.includes('/admin/lookups/department')) return fulfillJson(route, [{ value: '法务部' }])
+    if (path.includes('/admin/lookups/contract_type')) {
+      return fulfillJson(route, [{ value: '采购合同' }])
+    }
+    if (path.endsWith('/imports') && method === 'POST') {
+      keys.push(route.request().headers()['idempotency-key'])
+      return fulfillJson(route, firstBatch, 202)
+    }
+    if (path.endsWith('/imports/55/items') && method === 'POST') {
+      keys.push(route.request().headers()['idempotency-key'])
+      return fulfillJson(route, appendedBatch, 202)
+    }
+    if (path.endsWith('/imports/55') && method === 'GET') return fulfillJson(route, appendedBatch)
+    return fulfillJson(route, [])
+  })
+  await page.goto(`${baseUrl}/audit`)
+  const fileInput = page.locator('input[type="file"]')
+
+  await fileInput.setInputFiles({
+    name: '第一份合同.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('first'),
+  })
+  await expect(page.getByText('第一份合同.txt')).toBeVisible()
+  await fileInput.setInputFiles({
+    name: '第二份合同.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('second'),
+  })
+
+  await expect(page.getByText('第一份合同.txt')).toBeVisible()
+  await expect(page.getByText('第二份合同.txt')).toBeVisible()
+  await expect(page.getByLabel('导入状态摘要').getByText('2', { exact: true }).first()).toBeVisible()
+  await expect(page.locator('.el-message').last()).toContainText('已接收 1 份合同')
+  expect(keys).toHaveLength(2)
+  expect(keys[0]).not.toBe(keys[1])
 })
