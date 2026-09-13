@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 合同合规审查（真实接口核心闭环）：上传→解析→审查→复核→生成整改。
 // 闭环逻辑迁移自 WorkbenchView，数据落 audit-session store。
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ArrowRight, RefreshRight, View, WarningFilled } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -199,8 +199,21 @@ async function retryAuditBatch() {
   }
 }
 
-function openBatchResult(contractId: number) {
-  router.push({ path: '/history', query: { contract: `C${String(contractId).padStart(4, '0')}` } })
+const openingContractId = ref<number | null>(null)
+
+async function openBatchResult(contractId: number, filename: string) {
+  openingContractId.value = contractId
+  try {
+    await session.loadCompletedAudit(contractId, filename)
+    await nextTick()
+    document.querySelector<HTMLElement>('[data-audit-detail]')
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  } catch (error) {
+    const detail = error instanceof Error ? `：${error.message}` : ''
+    ElMessage.error(`审查结果加载失败${detail}`)
+  } finally {
+    openingContractId.value = null
+  }
 }
 
 // —— 维度关键词映射：用于判断风险条目属于哪个维度 ——
@@ -359,14 +372,19 @@ const onboardSteps = [
               <el-tag :type="item.status === 'failed' ? 'danger' : item.status === 'done' ? 'success' : 'info'" size="small">
                 {{ batchItemStatusLabel[item.status] }}
               </el-tag>
-              <el-tooltip v-if="item.status === 'done'" content="在审查历史中查看风险结果">
-                <el-button
-                  circle
-                  :icon="View"
-                  :aria-label="`查看 ${item.filename} 的审查结果`"
-                  @click="openBatchResult(item.contract_id)"
-                />
-              </el-tooltip>
+              <el-button
+                v-if="item.status === 'done'"
+                class="batch-result-action"
+                type="primary"
+                plain
+                :icon="View"
+                :loading="openingContractId === item.contract_id"
+                :disabled="openingContractId !== null && openingContractId !== item.contract_id"
+                :aria-label="`查看 ${item.filename} 的审查结果`"
+                @click="openBatchResult(item.contract_id, item.filename)"
+              >
+                查看审查结果
+              </el-button>
             </div>
           </div>
         </section>
@@ -388,7 +406,7 @@ const onboardSteps = [
         </div>
 
         <template v-else>
-          <div class="result-head">
+          <div class="result-head" data-audit-detail>
             <div>
               <span class="eyebrow mono">当前查看</span>
               <h2>{{ session.filename }}</h2>
@@ -423,10 +441,15 @@ const onboardSteps = [
             </div>
           </div>
 
-          <div class="result-two-col">
+          <div class="result-two-col" :class="{ 'single-col': !session.elements }">
             <section class="result-col">
               <div class="col-head"><h2>风险清单</h2><el-tag type="danger" size="small">{{ session.riskCount }} 条</el-tag></div>
               <div class="risk-list">
+                <el-empty
+                  v-if="session.risks.length === 0"
+                  :image-size="72"
+                  description="该合同未检出风险"
+                />
                 <article
                   v-for="r in sortedRisks"
                   :key="r.id"
@@ -458,7 +481,7 @@ const onboardSteps = [
                 </article>
               </div>
             </section>
-            <section class="result-col">
+            <section v-if="session.elements" class="result-col">
               <div class="col-head"><h2>合同关键要素</h2></div>
               <dl class="metadata-list">
                 <template v-for="(label, key) in elementLabels" :key="key">
@@ -555,6 +578,10 @@ const onboardSteps = [
   margin-top: 3px;
   color: var(--seal);
   font-size: 12px;
+}
+.batch-result-action {
+  flex: none;
+  min-width: 118px;
 }
 .upload-panel :deep(.el-upload-dragger) {
   min-height: 156px;
@@ -814,6 +841,9 @@ const onboardSteps = [
   display: grid;
   grid-template-columns: minmax(0, 1.55fr) minmax(260px, 1fr);
   gap: 24px;
+}
+.result-two-col.single-col {
+  grid-template-columns: minmax(0, 1fr);
 }
 .result-col + .result-col {
   padding-left: 24px;
@@ -1121,6 +1151,9 @@ const onboardSteps = [
   .batch-item {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+  .batch-result-action {
+    width: 100%;
   }
   .onboard {
     flex-direction: column;
