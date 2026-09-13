@@ -26,6 +26,7 @@ from evaluation.benchmark_runner import (
 )
 from evaluation.elements import evaluate_dataset
 from evaluation.evidence_metrics import evaluate_evidence_dataset
+from evaluation.retrieval_metrics import evaluate_retrieval_dataset
 from evaluation.evidence import EvidenceWriter, sha256_file
 from evaluation.report import build_report
 
@@ -63,6 +64,19 @@ def _read_predictions(path: Path) -> dict[str, dict[str, Any]]:
         if case_id in predictions:
             raise ValueError(f"预测 case_id 重复: {case_id}")
         predictions[case_id] = prediction
+    return predictions
+
+
+def _read_retrieval_predictions(path: Path) -> dict[str, list[str]]:
+    predictions: dict[str, list[str]] = {}
+    for record in _read_jsonl(path):
+        case_id = str(record.get("case_id", "")).strip()
+        ranked_ids = record.get("ranked_ids")
+        if not case_id or not isinstance(ranked_ids, list):
+            raise ValueError("检索预测记录必须包含 case_id 和 ranked_ids 数组")
+        if case_id in predictions:
+            raise ValueError(f"预测 case_id 重复: {case_id}")
+        predictions[case_id] = [str(value) for value in ranked_ids]
     return predictions
 
 
@@ -174,6 +188,43 @@ def _run_evidence(args: argparse.Namespace) -> int:
     )
     status = "passed" if report["overall"]["macro_f1"] >= args.min_f1 else "failed"
     writer.write_manifest(status=status, modules={"evidence": status})
+    return EXIT_OK if status == "passed" else EXIT_FAILED
+
+
+def _run_retrieval(args: argparse.Namespace) -> int:
+    if not 0 <= args.min_recall <= 1:
+        raise ValueError("--min-recall 必须在 0 到 1 之间")
+    gold_records = _read_jsonl(args.gold)
+    predictions = _read_retrieval_predictions(args.predictions)
+    report = evaluate_retrieval_dataset(
+        gold_records,
+        predictions,
+        k_values=(args.k,),
+    )
+    recall_key = f"recall@{args.k}"
+    run_id = args.run_id or _default_run_id("retrieval")
+    writer = EvidenceWriter.create(
+        args.runs_root,
+        run_id=run_id,
+        command="retrieval",
+        inputs={
+            "gold_sha256": sha256_file(args.gold),
+            "predictions_sha256": sha256_file(args.predictions),
+            "sample_count": report["sample_count"],
+            "k": args.k,
+            "min_recall": args.min_recall,
+        },
+    )
+    for case in report["cases"]:
+        writer.append("retrieval", {"event": "case", **case})
+    writer.append("retrieval", {
+        "event": "summary",
+        "sample_count": report["sample_count"],
+        "missing_prediction_count": report["missing_prediction_count"],
+        "overall": report["overall"],
+    })
+    status = "passed" if report["overall"][recall_key] >= args.min_recall else "failed"
+    writer.write_manifest(status=status, modules={"retrieval": status})
     return EXIT_OK if status == "passed" else EXIT_FAILED
 
 
@@ -366,6 +417,13 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
     evidence.add_argument("--run-id")
     evidence.add_argument("--min-f1", type=float, default=0.90)
+    retrieval = subcommands.add_parser("retrieval", help="评测 RAG 检索召回与排序")
+    retrieval.add_argument("--gold", type=Path, required=True)
+    retrieval.add_argument("--predictions", type=Path, required=True)
+    retrieval.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
+    retrieval.add_argument("--run-id")
+    retrieval.add_argument("--k", type=int, default=5)
+    retrieval.add_argument("--min-recall", type=float, default=0.90)
     batch = subcommands.add_parser("batch", help="执行 50+2 批量验收")
     batch.add_argument("--manifest", type=Path, required=True)
     batch.add_argument("--base-url", required=True)
@@ -396,6 +454,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_elements(args)
         if args.command == "evidence":
             return _run_evidence(args)
+        if args.command == "retrieval":
+            return _run_retrieval(args)
         if args.command == "batch":
             return _run_batch(args)
         if args.command == "benchmark":

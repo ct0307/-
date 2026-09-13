@@ -1,13 +1,17 @@
 # 赛题硬指标证据矩阵
 
-更新时间：2026-09-11
+更新时间：2026-09-13
 
 状态定义：`已验证` 表示存在本轮可重复执行证据；`代码就绪待实测` 表示实现和自动化契约已完成，但缺真实数据或设备；`阻塞` 表示缺少外部前置条件，禁止写成达标。
 
 | 优先级 | 硬指标 | 目标口径 | 当前状态 | 证据/复现 | 剩余条件 |
 |---|---|---|---|---|---|
 | P1 | 风险法规溯源 | 每条风险绑定原文、法规来源和建议 | 已验证 | `pytest tests/test_audit_evidence.py tests/test_rag_hybrid.py -q` | 用比赛演示合同补最终截图 |
+| P1 | 风险证据持久化 | 条款结构、SourceAnchor、Claim、Evidence ID、检索尝试和风险定位随审查结果原子入库 | 后端闭环已验证 | `pytest tests/test_rag_evidence_persistence.py tests/test_audit_runner_quality.py tests/test_contract_quality_api.py -q`；Alembic 升降级由 `test_hard_indicator_smoke.py` 覆盖 | 实现前端 PDF 原页跳转与坐标高亮，并用比赛 PDF 补演示截图 |
 | P1 | 依据支持关系 | 原文核验、来源可信、支持关系三项同时通过才允许自动采信 | 代码就绪待实测 | `pytest tests/test_evidence_support_validation.py tests/test_evidence_metrics.py tests/test_evidence_cli.py -q`；标注与复现口径见 `evidence-support-protocol.md` | 准备双人复核冻结的真实脱敏合同金标，报告三分类 Macro F1 |
+| P1 | RAG 精确检索与召回 | 条号精确路由；BM25/向量 RRF；每路 Top-30；可插拔 Cross-Encoder；Recall@K、Precision@K、MRR、nDCG@K | 代码就绪待实测 | `pytest tests/test_rag_hybrid.py tests/test_rag_legal_retrieval.py tests/test_retrieval_metrics.py tests/test_evaluation_cli.py -q`；`python -m evaluation.cli retrieval ...` 后执行 `report`；口径见 `rag-retrieval-protocol.md` | 双人复核真实查询-依据金标；配置并审计本地 Cross-Encoder 后做消融对比 |
+| P1 | Word/PDF 结构感知解析 | DOCX 段落/表格原序；PDF 页号/行坐标；稳定条款 ID、邻接关系、全文窗口 | 结构与持久化接口已验证，真实准确率待实测 | `pytest tests/test_parser_contracts.py tests/test_contract_structure.py tests/test_rag_evidence_persistence.py -q` | 使用比赛 Word/PDF 标注条款边界、表格、跨页和坐标真值；完成页面高亮消费链路 |
+| P1 | 双 Agent 证据闭环 | 法务 Claim 交接财务；证据不足最多重检一次；跨条款冲突与确定性财务计算 | 协作协议与规则闭环已验证 | `pytest tests/test_audit_evidence.py tests/test_rag_grounding.py tests/test_contract_logic.py -q` | 在真实合同上统计 Unsupported Claim Rate、Claim Correction Rate、Unique Contribution Rate |
 | P1 | 50 份以上异步批次 | 50 有效 + 2 异常；失败隔离、重试、刷新恢复、启动补投、租约去重、幂等 | 代码就绪待实测 | `pytest tests/test_evaluation_batch.py tests/test_evaluation_cli.py tests/test_batch_service.py tests/test_batch_api.py -q`；执行入口为 `python -m evaluation.cli batch ...` | 准备 52 份冻结文件并在 Compose 环境执行，保留 `batch-events.jsonl` |
 | P1 | 部门数据隔离 | business 只读本部门，越权显式 403 | 已验证 | `pytest tests/test_report_scope.py -q` | 在 PostgreSQL 容器补接口实测 |
 | P1 | PostgreSQL 可交付 | 空库迁移、回滚、应用不绕过 Alembic | 代码就绪待实测 | `pytest tests/test_hard_indicator_smoke.py -q` 当前迁移烟雾使用 SQLite，不构成 PostgreSQL 实测证据 | 在 PostgreSQL 16 执行空库迁移、回滚、再升级、旧 SQLite 数据导入核对及备份恢复演练 |
@@ -25,3 +29,4 @@
 - 真实 RapidOCR 图片/PDF 冒烟只证明引擎调用链可用，不等于冻结扫描件字符准确率实测。
 - 未运行 50+2 文件批次时，API 上限 200 不能替代吞吐和成功率验收。
 - 评测执行器、伪网关和伪目标自动化测试通过，只能证明证据工具正确，不能替代真实合同、PostgreSQL、OpenClaw 或 GPU 结果。
+- 未配置并审计真实 Cross-Encoder 时，`deterministic_evidence_v1` 仅是可解释的降级评分，不得宣称已完成模型 reranker 精排。

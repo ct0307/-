@@ -22,12 +22,36 @@ log = get_logger("parser")
 
 
 @dataclass(frozen=True)
+class SourceAnchor:
+    page_number: int | None = None
+    bbox: tuple[float, float, float, float] | None = None
+    paragraph_index: int | None = None
+    table_index: int | None = None
+    row_index: int | None = None
+    char_start: int | None = None
+    char_end: int | None = None
+
+
+@dataclass(frozen=True)
+class DocumentBlock:
+    block_id: str
+    block_type: Literal["paragraph", "table_row", "page_text"]
+    text: str
+    anchor: SourceAnchor
+    cells: tuple[str, ...] = ()
+    style: str = ""
+    confidence: float | None = None
+    parse_source: Literal["native", "ocr"] = "native"
+
+
+@dataclass(frozen=True)
 class DocumentParseResult:
     text: str
     source: Literal["native", "ocr", "mixed"]
     ocr_confidence: float | None = None
     requires_review: bool = False
     review_reason: str | None = None
+    blocks: tuple[DocumentBlock, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -51,7 +75,7 @@ def extract_document(file_path: str) -> DocumentParseResult:
     if lower.endswith(".pdf"):
         return _extract_pdf_result(data)
     if lower.endswith(".docx"):
-        return DocumentParseResult(_extract_docx_bytes(data), "native")
+        return _extract_docx_result(data)
     if lower.endswith(".txt"):
         return DocumentParseResult(data.decode("utf-8", errors="ignore"), "native")
     raise ValueError(f"不支持的文件类型: {file_path}")
@@ -145,10 +169,15 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
 
     # 第一步：pdfplumber
     parts: list[str] = []
+    native_blocks: list[DocumentBlock] = []
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
-            for page in pdf.pages:
-                parts.append(page.extract_text() or "")
+            for page_number, page in enumerate(pdf.pages, start=1):
+                page_text = page.extract_text() or ""
+                parts.append(page_text)
+                native_blocks.extend(
+                    _extract_native_pdf_page_blocks(page, page_number, page_text)
+                )
     except Exception as e:
         log.warning("parser.pdfplumber_error", error=str(e))
     text = "\n".join(parts).strip()
@@ -166,8 +195,25 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
                 _candidate_preserves_nonempty_pages(parts, alternate)
                 and _prefer_pymupdf_text(text, alternate.text)
             ):
-                return DocumentParseResult(alternate.text, "native")
+                return DocumentParseResult(
+                    alternate.text,
+                    "native",
+                    blocks=_page_text_blocks(alternate.page_texts),
+                )
         parts = [_normalize_compatibility_radicals(part) for part in parts]
+        native_blocks = [
+            DocumentBlock(
+                block_id=block.block_id,
+                block_type=block.block_type,
+                text=_normalize_compatibility_radicals(block.text),
+                anchor=block.anchor,
+                cells=block.cells,
+                style=block.style,
+                confidence=block.confidence,
+                parse_source=block.parse_source,
+            )
+            for block in native_blocks
+        ]
         text = "\n".join(parts).strip()
 
     # 第二步：乱码检测 → PyMuPDF 降级
@@ -175,16 +221,27 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
         log.info("parser.pdf_garbled", hint="检测到字体编码异常，切换 PyMuPDF 重新提取")
         text = _extract_pdf_pymupdf(data)
         if text and not _is_garbled(text):
-            return DocumentParseResult(text, "native")
+            return DocumentParseResult(text, "native", blocks=tuple(native_blocks))
         parts = []
 
     if text and not empty_pages:
-        return DocumentParseResult(text, "native")
+        return DocumentParseResult(text, "native", blocks=tuple(native_blocks))
 
     if not text:
         pymupdf_text = _extract_pdf_pymupdf(data)
         if pymupdf_text and not _is_garbled(pymupdf_text):
-            return DocumentParseResult(pymupdf_text, "native")
+            return DocumentParseResult(
+                pymupdf_text,
+                "native",
+                blocks=(
+                    DocumentBlock(
+                        block_id="pdf-page-1",
+                        block_type="page_text",
+                        text=pymupdf_text,
+                        anchor=SourceAnchor(page_number=1),
+                    ),
+                ),
+            )
         log.warning("parser.pdf_empty", hint="文本层为空，进入离线 OCR")
 
     page_indices = empty_pages or None
@@ -225,12 +282,40 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
             if result.text
             else "OCR 未识别出有效文本"
         )
+    if parts and empty_pages and len(result.page_texts) == len(empty_pages):
+        ocr_page_set = set(empty_pages)
+        blocks_list: list[DocumentBlock] = []
+        for index, page_text in enumerate(merged):
+            page_number = index + 1
+            if index in ocr_page_set:
+                if page_text.strip():
+                    blocks_list.append(DocumentBlock(
+                        block_id=f"pdf-page-{page_number}",
+                        block_type="page_text",
+                        text=page_text,
+                        anchor=SourceAnchor(page_number=page_number),
+                        confidence=result.mean_confidence,
+                        parse_source="ocr",
+                    ))
+            else:
+                blocks_list.extend(
+                    block for block in native_blocks
+                    if block.anchor.page_number == page_number
+                )
+        blocks = tuple(blocks_list)
+    else:
+        blocks = _page_text_blocks(
+            result.page_texts or ((result.text,) if result.text else ()),
+            parse_source="ocr",
+            confidence=result.mean_confidence,
+        )
     return DocumentParseResult(
         text=merged_text,
         source=source,
         ocr_confidence=result.mean_confidence,
         requires_review=result.requires_review,
         review_reason=review_reason,
+        blocks=blocks,
     )
 
 
@@ -278,30 +363,143 @@ def _extract_pdf_pymupdf(data: bytes, expected_pages: int | None = None) -> str:
     return _extract_pdf_pymupdf_candidate(data, expected_pages=expected_pages).text
 
 
-def _extract_docx_bytes(data: bytes) -> str:
+def _page_text_blocks(
+    page_texts: tuple[str, ...],
+    *,
+    parse_source: Literal["native", "ocr"] = "native",
+    confidence: float | None = None,
+) -> tuple[DocumentBlock, ...]:
+    return tuple(
+        DocumentBlock(
+            block_id=f"pdf-page-{page_number}",
+            block_type="page_text",
+            text=text,
+            anchor=SourceAnchor(page_number=page_number),
+            confidence=confidence,
+            parse_source=parse_source,
+        )
+        for page_number, text in enumerate(page_texts, start=1)
+        if text.strip()
+    )
+
+
+def _extract_native_pdf_page_blocks(
+    page: object,
+    page_number: int,
+    fallback_text: str,
+) -> tuple[DocumentBlock, ...]:
+    """优先把带坐标的 PDF 词聚合为行块；无坐标接口时降级为页块。"""
+    extract_words = getattr(page, "extract_words", None)
+    words: list[dict] = []
+    if callable(extract_words):
+        try:
+            words = list(extract_words(keep_blank_chars=False, use_text_flow=True) or ())
+        except Exception as exc:
+            log.warning(
+                "parser.pdf_word_positions_unavailable",
+                page_number=page_number,
+                exception_type=type(exc).__name__,
+            )
+    positioned = [
+        word for word in words
+        if str(word.get("text", "")).strip()
+        and all(key in word for key in ("x0", "top", "x1", "bottom"))
+    ]
+    if positioned:
+        lines: list[list[dict]] = []
+        for word in sorted(positioned, key=lambda item: (float(item["top"]), float(item["x0"]))):
+            if not lines or abs(float(word["top"]) - float(lines[-1][0]["top"])) > 3.0:
+                lines.append([word])
+            else:
+                lines[-1].append(word)
+        return tuple(
+            DocumentBlock(
+                block_id=f"pdf-page-{page_number}-line-{line_index}",
+                block_type="page_text",
+                text=" ".join(str(word["text"]).strip() for word in line),
+                anchor=SourceAnchor(
+                    page_number=page_number,
+                    bbox=(
+                        min(float(word["x0"]) for word in line),
+                        min(float(word["top"]) for word in line),
+                        max(float(word["x1"]) for word in line),
+                        max(float(word["bottom"]) for word in line),
+                    ),
+                ),
+            )
+            for line_index, line in enumerate(lines, start=1)
+        )
+    if not fallback_text.strip():
+        return ()
+    width = getattr(page, "width", None)
+    height = getattr(page, "height", None)
+    bbox = (
+        (0.0, 0.0, float(width), float(height))
+        if width is not None and height is not None
+        else None
+    )
+    return (
+        DocumentBlock(
+            block_id=f"pdf-page-{page_number}",
+            block_type="page_text",
+            text=fallback_text,
+            anchor=SourceAnchor(page_number=page_number, bbox=bbox),
+        ),
+    )
+
+
+def _extract_docx_result(data: bytes) -> DocumentParseResult:
     """提取 docx 文本：段落 + 表格内容均读取。
 
-    纯段落抽取会漏掉表格（基金合同/采购合同大量内容在表格中），
-    必须遍历 doc.tables 补全，否则合同主体内容丢失。
+    按正文 XML 顺序遍历段落和表格，保留可回溯的段落/表格行锚点。
     """
     from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
 
     doc = Document(io.BytesIO(data))
     parts: list[str] = []
+    blocks: list[DocumentBlock] = []
+    paragraph_index = 0
+    table_index = 0
+    for item in doc.iter_inner_content():
+        if isinstance(item, Paragraph):
+            text = item.text.strip()
+            current_index = paragraph_index
+            paragraph_index += 1
+            if not text:
+                continue
+            parts.append(text)
+            blocks.append(DocumentBlock(
+                block_id=f"docx-paragraph-{current_index}",
+                block_type="paragraph",
+                text=text,
+                anchor=SourceAnchor(paragraph_index=current_index),
+                style=str(item.style.name or "") if item.style else "",
+            ))
+            continue
+        if isinstance(item, Table):
+            current_table = table_index
+            table_index += 1
+            for row_index, row in enumerate(item.rows):
+                cells = tuple(cell.text.strip() for cell in row.cells if cell.text.strip())
+                if not cells:
+                    continue
+                text = "  ".join(cells)
+                parts.append(text)
+                blocks.append(DocumentBlock(
+                    block_id=f"docx-table-{current_table}-row-{row_index}",
+                    block_type="table_row",
+                    text=text,
+                    anchor=SourceAnchor(table_index=current_table, row_index=row_index),
+                    cells=cells,
+                ))
+    return DocumentParseResult("\n".join(parts).strip(), "native", blocks=tuple(blocks))
 
-    # 1. 段落文本
-    for p in doc.paragraphs:
-        if p.text.strip():
-            parts.append(p.text)
 
-    # 2. 表格文本（行列拼接，单元格间用空格分隔，行间用换行）
-    for table in doc.tables:
-        for row in table.rows:
-            cells = [c.text.strip() for c in row.cells if c.text.strip()]
-            if cells:
-                parts.append("  ".join(cells))
-
-    return "\n".join(parts).strip()
+def _extract_docx_bytes(data: bytes) -> str:
+    """兼容旧调用方，仅返回 DOCX 纯文本。"""
+    return _extract_docx_result(data).text
 
 
 

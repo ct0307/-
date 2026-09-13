@@ -16,8 +16,11 @@ BM25 索引带正文内容指纹缓存，知识正文或 ID 变化时自动重�
 """
 import hashlib
 import json
+import math
 import re
+from dataclasses import dataclass
 from datetime import date
+from typing import Callable, Sequence
 
 import numpy as np
 from sqlalchemy.orm import Session
@@ -35,7 +38,7 @@ log = get_logger("rag")
 # RRF 融合常数：排名靠后的贡献快速衰减，k=60 为检索领域经验值。
 _RRF_K = 60
 # 单路召回深度：每路取 Top-N 进入融合，N 略大于最终 top_k 以保证融合质量。
-_PER_ROUTE_N = 10
+_PER_ROUTE_N = 30
 # 向量候选最低余弦相似度。低于阈值的“最近邻”不构成可靠依据。
 _MIN_VECTOR_SIMILARITY = 0.35
 _CONTRACT_QUERY_TERMS = (
@@ -43,6 +46,27 @@ _CONTRACT_QUERY_TERMS = (
     "价款", "租赁", "买卖", "承揽", "委托", "定金",
 )
 _CONTRACT_DOMAIN_SORT_BOOST = 0.002
+_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("付款", "支付", "账期", "回款"), ("付款期限", "支付条件", "验收", "逾期付款")),
+    (("验收", "交付"), ("验收标准", "验收期限", "验收合格", "交付条件")),
+    (("违约金", "违约"), ("违约责任", "损失赔偿", "过分高于", "适当减少")),
+    (("争议", "管辖", "仲裁"), ("争议解决", "管辖法院", "仲裁机构")),
+    (("解除", "终止"), ("合同解除", "终止条件", "通知期限")),
+)
+
+
+@dataclass(frozen=True)
+class QueryPlan:
+    original_query: str
+    article_number: str | None
+    expanded_terms: tuple[str, ...]
+
+    @property
+    def expanded_query(self) -> str:
+        return " ".join((self.original_query, *self.expanded_terms)).strip()
+
+
+RerankScorer = Callable[[str, Sequence[str]], Sequence[float]]
 
 # 内置最小规则库（降级兜底）：知识库无数据时用关键词命中。
 # 每条 = {content: 依据内容, source: 来源, keywords: 命中关键词}
@@ -86,6 +110,7 @@ def retrieve(
 
     混合检索（向量 + BM25 RRF 融合）；embedding 不可用降级仅 BM25；库空降级关键词。
     """
+    plan = build_query_plan(query)
     db = SessionLocal()
     try:
         # 一次取全量切片（BM25 需全部；向量路只用非空向量）
@@ -106,7 +131,7 @@ def retrieve(
         db.close()
 
     if not rows:
-        results = _keyword_search(query, top_k)
+        results = _keyword_search(plan.expanded_query, top_k)
         log.info("rag.retrieve", mode="keyword", matched=len(results))
         return results
 
@@ -124,7 +149,7 @@ def retrieve(
         log.info("rag.retrieve", mode="filtered_empty", matched=0)
         return []
 
-    article_number = parse_article_reference(query)
+    article_number = plan.article_number
     if article_number:
         exact_docs = [
             doc for doc in docs
@@ -142,7 +167,7 @@ def retrieve(
         return [result]
 
     # —— BM25 路（全部切片参与）——
-    bm25_rank = _bm25_search(query, docs)
+    bm25_rank = _bm25_search(plan.expanded_query, docs)
 
     # —— 向量路（仅非空向量参与）——
     vec_rank: dict[int, int] = {}
@@ -160,7 +185,7 @@ def retrieve(
     fused = _rrf_fuse([vec_rank, bm25_rank])
     if not fused:
         # 两路都空（极端：query 无分词命中且无向量），回退关键词
-        results = _keyword_search(query, top_k)
+        results = _keyword_search(plan.expanded_query, top_k)
         log.info("rag.retrieve", mode="keyword", matched=len(results))
         return results
 
@@ -169,11 +194,102 @@ def retrieve(
         _result_from_doc(id_to_doc[doc_id], score=score, retrieval_mode=mode)
         for doc_id, score in fused
     ]
-    results = collapse_by_article(
-        apply_contract_domain_boost(ranked_results, query)
-    )[:top_k]
+    route_ranks = {
+        doc_id: {
+            "bm25_rank": bm25_rank.get(doc_id),
+            "vector_rank": vec_rank.get(doc_id),
+        }
+        for doc_id, _score in fused
+    }
+    reranked = rerank_results(
+        query,
+        apply_contract_domain_boost(ranked_results, query),
+        route_ranks=route_ranks,
+        top_k=len(ranked_results),
+        expanded_query=plan.expanded_query,
+    )
+    results = collapse_by_article(reranked)[:top_k]
     log.info("rag.retrieve", mode=mode, matched=len(results))
     return results
+
+
+def build_query_plan(query: str) -> QueryPlan:
+    """确定性生成检索计划，保留精确条号并补充有限领域同义词。"""
+    normalized = re.sub(r"\s+", " ", str(query or "")).strip()
+    expanded: list[str] = []
+    for triggers, terms in _QUERY_EXPANSIONS:
+        if any(trigger in normalized for trigger in triggers):
+            for term in terms:
+                if term not in normalized and term not in expanded:
+                    expanded.append(term)
+    return QueryPlan(
+        original_query=normalized,
+        article_number=parse_article_reference(normalized),
+        expanded_terms=tuple(expanded),
+    )
+
+
+def rerank_results(
+    query: str,
+    candidates: list[dict],
+    *,
+    route_ranks: dict[int, dict[str, int | None]],
+    top_k: int,
+    scorer: RerankScorer | None = None,
+    expanded_query: str | None = None,
+) -> list[dict]:
+    """对融合候选精排并附加可重放轨迹。
+
+    scorer 用于接入本地 Cross-Encoder；未配置时采用确定性的查询覆盖度精排，
+    返回值会明确记录模式，避免把降级结果伪装成模型精排。
+    """
+    if top_k < 1 or not candidates:
+        return []
+    documents = [
+        str(candidate.get("matched_content") or candidate.get("content") or "")
+        for candidate in candidates
+    ]
+    mode = "cross_encoder" if scorer is not None else "deterministic_evidence_v1"
+    if scorer is not None:
+        raw_scores = [float(value) for value in scorer(query, documents)]
+        if len(raw_scores) != len(candidates) or not all(math.isfinite(value) for value in raw_scores):
+            raise ValueError("reranker 返回分数数量或数值无效")
+    else:
+        query_tokens = set(_tokenize(query))
+        max_rrf = max(float(candidate.get("score") or 0.0) for candidate in candidates) or 1.0
+        raw_scores = []
+        for candidate, document in zip(candidates, documents):
+            document_tokens = set(_tokenize(document))
+            coverage = (
+                len(query_tokens.intersection(document_tokens)) / len(query_tokens)
+                if query_tokens else 0.0
+            )
+            exact_bonus = 1.0 if query.strip() and query.strip() in document else 0.0
+            normalized_rrf = float(candidate.get("score") or 0.0) / max_rrf
+            raw_scores.append(coverage * 0.85 + exact_bonus * 0.10 + normalized_rrf * 0.05)
+
+    ranked: list[dict] = []
+    for candidate, rerank_score in zip(candidates, raw_scores):
+        item = dict(candidate)
+        chunk_id = item.get("chunk_id")
+        item["retrieval_trace"] = {
+            "query": query,
+            "expanded_query": expanded_query or query,
+            "routes": dict(route_ranks.get(chunk_id, {})),
+            "rrf_score": float(item.get("score") or 0.0),
+            "rerank_score": round(rerank_score, 6),
+            "rerank_mode": mode,
+        }
+        ranked.append(item)
+    if scorer is not None:
+        ranked.sort(
+            key=lambda item: (
+                item["retrieval_trace"]["rerank_score"],
+                float(item.get("score") or 0.0),
+            ),
+            reverse=True,
+        )
+    return ranked[:top_k]
 
 
 def _result_from_doc(doc: tuple, *, score: float, retrieval_mode: str) -> dict:

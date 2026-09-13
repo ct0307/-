@@ -426,3 +426,34 @@ def test_report_command_returns_invalid_for_missing_event_stream(tmp_path):
 
     assert code == EXIT_INVALID
     assert not (run_dir / "report.md").exists()
+
+
+def test_retrieval_command_writes_metrics_and_builds_report(tmp_path):
+    gold = _write_jsonl(
+        tmp_path / "retrieval-gold.jsonl",
+        [{"case_id": "q1", "relevant_ids": ["LAW-585"]}],
+    )
+    predictions = _write_jsonl(
+        tmp_path / "retrieval-predictions.jsonl",
+        [{"case_id": "q1", "ranked_ids": ["LAW-585", "LAW-577"]}],
+    )
+
+    code = main([
+        "retrieval",
+        "--gold", str(gold),
+        "--predictions", str(predictions),
+        "--runs-root", str(tmp_path / "runs"),
+        "--run-id", "retrieval-pass",
+        "--k", "5",
+        "--min-recall", "0.90",
+    ])
+    run_dir = tmp_path / "runs" / "retrieval-pass"
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    evidence = (run_dir / "retrieval.jsonl").read_text(encoding="utf-8")
+
+    assert code == EXIT_OK
+    assert manifest["modules"] == {"retrieval": "passed"}
+    assert manifest["inputs"]["min_recall"] == 0.90
+    assert '"recall@5": 1.0' in evidence
+    assert main(["report", "--run-dir", str(run_dir)]) == EXIT_OK
+    assert "Recall@5" in (run_dir / "report.md").read_text(encoding="utf-8")

@@ -301,6 +301,31 @@ def test_top_k_counts_distinct_legal_articles_not_child_chunks(retrieval_db):
     assert [item["chunk_id"] for item in results] == [11, 20]
 
 
+def test_many_child_chunks_do_not_exhaust_distinct_article_top_k(retrieval_db):
+    _add_legal_article(retrieval_db)
+    for offset in range(7):
+        _add_chunk(
+            retrieval_db,
+            id=11 + offset,
+            content=f"第五百八十五条 子切片{offset}违约责任。",
+            chunk_index=offset,
+            chunk_count=7,
+        )
+    _add_chunk(
+        retrieval_db,
+        id=30,
+        legal_article_id=None,
+        article_number="第五百七十七条",
+        content="第五百七十七条 另一项违约责任依据。",
+    )
+    ranks = {**{11 + offset: offset for offset in range(7)}, 30: 7}
+
+    with patch.object(retriever, "_bm25_search", return_value=ranks):
+        results = retriever.retrieve("违约责任", top_k=2)
+
+    assert [item["chunk_id"] for item in results] == [11, 30]
+
+
 def test_embedding_failure_marks_natural_language_result_as_bm25(retrieval_db):
     _add_legal_article(retrieval_db)
     _add_chunk(retrieval_db, id=11, embedding="[1.0, 0.0]")

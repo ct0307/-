@@ -13,6 +13,7 @@ from evaluation.evidence import RUN_STATUSES, SCHEMA_VERSION
 _STREAMS = {
     "elements": "elements.jsonl",
     "evidence": "evidence.jsonl",
+    "retrieval": "retrieval.jsonl",
     "batch": "batch-events.jsonl",
     "benchmark": "benchmark.jsonl",
 }
@@ -200,6 +201,32 @@ def _validate_evidence(
     return summaries[0]
 
 
+def _validate_retrieval(
+    status: str,
+    inputs: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    if status in {"blocked", "error"}:
+        return None
+    summaries = _events_of(events, "summary")
+    cases = _events_of(events, "case")
+    sample_count = inputs.get("sample_count")
+    k = inputs.get("k")
+    min_recall = inputs.get("min_recall")
+    if len(summaries) != 1:
+        raise InvalidEvidence("retrieval 必须且只能包含一个 summary 事件")
+    if not isinstance(sample_count, int) or sample_count <= 0 or len(cases) != sample_count:
+        raise InvalidEvidence("retrieval case 事件数量与 sample_count 不一致")
+    recall_key = f"recall@{k}"
+    overall = summaries[0].get("overall")
+    if not isinstance(overall, Mapping) or not isinstance(overall.get(recall_key), (int, float)):
+        raise InvalidEvidence(f"retrieval summary 缺少 {recall_key}")
+    expected_status = "passed" if overall[recall_key] >= min_recall else "failed"
+    if status != expected_status:
+        raise InvalidEvidence("retrieval 状态与 Recall 阈值矛盾")
+    return summaries[0]
+
+
 def _validate_benchmark(
     status: str,
     inputs: Mapping[str, Any],
@@ -320,6 +347,22 @@ def _render_report(
                 f"- 缺失预测：{evidence.get('missing_prediction_count')}",
             ]
         )
+    retrieval = summaries.get("retrieval")
+    if retrieval is not None:
+        overall = retrieval["overall"]
+        lines.extend(
+            [
+                "",
+                "## RAG 检索评测",
+                "",
+                f"- 样本数：{retrieval.get('sample_count')}",
+                *[
+                    f"- {name.replace('recall', 'Recall').replace('precision', 'Precision').replace('ndcg', 'nDCG').replace('mrr', 'MRR')}：{_format_value(value)}"
+                    for name, value in overall.items()
+                ],
+                f"- 缺失预测：{retrieval.get('missing_prediction_count')}",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -339,6 +382,7 @@ def build_report(run_dir: Path) -> ReportResult:
     validators = {
         "elements": _validate_elements,
         "evidence": _validate_evidence,
+        "retrieval": _validate_retrieval,
         "batch": _validate_batch,
         "benchmark": _validate_benchmark,
     }

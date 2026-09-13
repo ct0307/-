@@ -120,3 +120,74 @@ def test_auditor_reports_agent_and_grounding_timings(monkeypatch):
         "grounding_ms",
     }
     assert all(isinstance(value, int) and value >= 0 for value in result["timings"].values())
+
+
+def test_long_contract_is_audited_in_clause_windows_without_tail_truncation(monkeypatch):
+    prompts: list[str] = []
+
+    class Adapter:
+        def chat(self, _system: str, user: str) -> LLMResponse:
+            prompts.append(user)
+            return LLMResponse(text="[]", model="test")
+
+    contract_text = "\n".join(
+        f"第{index}条 " + (f"条款{index}内容" * 90)
+        for index in range(1, 31)
+    )
+    monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
+    monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
+
+    auditor._agent_audit("legal", {}, contract_text, {"elements": {}})
+
+    assert len(prompts) > 1
+    assert any("第30条" in prompt for prompt in prompts)
+    assert all("审查窗口" in prompt for prompt in prompts)
+
+
+def test_finance_agent_receives_structured_legal_claims(monkeypatch):
+    prompts: list[str] = []
+
+    class Adapter:
+        def chat(self, _system: str, user: str) -> LLMResponse:
+            prompts.append(user)
+            return LLMResponse(text="[]", model="test")
+
+    legal_risks = [{
+        "claim_id": "C-LEGAL-001",
+        "category": "付款条件不明确",
+        "level": "high",
+        "original_text": "验收后付款",
+        "risk_reason": "未约定验收期限",
+        "evidence_ids": ["LAW-585", "DOC-8.2"],
+        "evidence_status": "supported",
+    }]
+    shared_context = {
+        "elements": {},
+        "legal": auditor._summarize_for_context("legal", legal_risks, {}),
+    }
+    monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
+    monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
+
+    auditor._agent_audit("finance", {}, "第一条 验收后付款。", shared_context)
+
+    assert '"claim_id": "C-LEGAL-001"' in prompts[0]
+    assert '"evidence_ids": ["LAW-585", "DOC-8.2"]' in prompts[0]
+
+
+def test_normalized_claim_id_is_stable_and_role_scoped():
+    risk = {
+        "level": "medium",
+        "category": "付款条件不明确",
+        "original_text": "验收后付款",
+        "risk_reason": "未约定验收期限",
+        "suggestion": "补充验收期限",
+    }
+
+    first = auditor._normalize(risk, "legal")
+    second = auditor._normalize(risk, "legal")
+    finance = auditor._normalize(risk, "finance")
+
+    assert first["claim_id"] == second["claim_id"]
+    assert first["claim_id"].startswith("C-")
+    assert first["claim_id"] != finance["claim_id"]
+    assert first["claim_status"] == "pending_evidence"

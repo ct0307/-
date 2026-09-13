@@ -12,6 +12,10 @@ from sqlalchemy.orm import Session
 from app.core.logging import get_logger
 from app.models.models import AuditBatchItem, Contract, Risk
 from app.services.audit.auditor import audit_contract
+from app.services.audit.evidence_persistence import (
+    build_contract_evidence,
+    replace_contract_clauses,
+)
 from app.services.parser.extractor import (
     DocumentParseResult,
     extract_document,
@@ -132,8 +136,19 @@ def run_audit(
             Risk.contract_id == contract_id,
             Risk.review_status == "pending",
         ).delete(synchronize_session=False)
+        clauses = replace_contract_clauses(
+            db,
+            contract_id=contract_id,
+            audit_generation=claimed_generation,
+            parsed=parsed,
+        )
         db.add_all([
-            _risk_model(contract_id, risk, audit_job_id=batch_item_id)
+            _risk_model(
+                contract_id,
+                risk,
+                audit_job_id=batch_item_id,
+                contract_evidence=build_contract_evidence(risk, clauses),
+            )
             for risk in risk_payloads
         ])
         publishing.status = "review_required" if publishing.requires_review else "done"
@@ -306,6 +321,7 @@ def _risk_model(
     risk: dict,
     *,
     audit_job_id: int | None = None,
+    contract_evidence: list[dict] | None = None,
 ) -> Risk:
     return Risk(
         contract_id=contract_id,
@@ -327,6 +343,19 @@ def _risk_model(
         support_relation_status=risk.get("support_relation_status", "unclear"),
         support_validation_reason=risk.get("support_validation_reason", ""),
         support_validator_version=risk.get("support_validator_version", "unvalidated"),
+        claim_id=risk.get("claim_id"),
+        claim_status=risk.get("claim_status", "pending_evidence"),
+        source_window_id=risk.get("source_window_id"),
+        source_clause_ids_json=json.dumps(
+            risk.get("source_clause_ids", []), ensure_ascii=False
+        ),
+        evidence_ids_json=json.dumps(risk.get("evidence_ids", []), ensure_ascii=False),
+        retrieval_attempts_json=json.dumps(
+            risk.get("retrieval_attempts", []), ensure_ascii=False
+        ),
+        contract_evidence_json=json.dumps(
+            contract_evidence or [], ensure_ascii=False
+        ),
     )
 
 

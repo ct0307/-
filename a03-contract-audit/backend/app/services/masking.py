@@ -12,6 +12,27 @@
 import json
 
 
+def _json_list(value: object) -> list:
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, str):
+        return []
+    try:
+        parsed = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _public_retrieval_attempts(value: object) -> list[dict]:
+    allowed = {"attempt", "support_status", "source_ids"}
+    return [
+        {key: item[key] for key in allowed if key in item}
+        for item in _json_list(value)
+        if isinstance(item, dict)
+    ]
+
+
 def is_full_access(role: str) -> bool:
     """admin / legal / finance 拥有完整字段访问权，business 受限。"""
     return role in {"admin", "legal", "finance"}
@@ -70,15 +91,27 @@ def apply_risk_masking(risk: dict | object, role: str) -> dict:
             "review_status": risk.review_status,
             # rag_sources 是公开法条来源、非敏感数据，business 也应可见。
             # DB 里存 JSON 字符串，此处反序列化为 list，与全访问路（RiskOut validator）输出一致。
-            "rag_sources": json.loads(risk.rag_sources or "[]"),
+            "rag_sources": _json_list(risk.rag_sources),
             "evidence_status": risk.evidence_status,
             "original_text_verified": risk.original_text_verified,
             "requires_manual_review": risk.requires_manual_review,
             "support_relation_status": risk.support_relation_status,
             "support_validation_reason": risk.support_validation_reason,
             "support_validator_version": risk.support_validator_version,
+            "claim_id": risk.claim_id,
+            "claim_status": risk.claim_status,
+            "source_window_id": risk.source_window_id,
+            "source_clause_ids": _json_list(risk.source_clause_ids_json),
+            "evidence_ids": _json_list(risk.evidence_ids_json),
+            "retrieval_attempts": _public_retrieval_attempts(
+                risk.retrieval_attempts_json
+            ),
+            "contract_evidence": _json_list(risk.contract_evidence_json),
         }
     else:
         d = dict(risk)
         d["original_text"] = mask_original_text(d.get("original_text", ""))
+        d["retrieval_attempts"] = _public_retrieval_attempts(
+            d.get("retrieval_attempts", [])
+        )
     return d

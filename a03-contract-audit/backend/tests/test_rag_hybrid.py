@@ -92,3 +92,77 @@ def test_bm25_search_no_hit():
     rank = retriever._bm25_search("xyzabc", docs)  # 无中文词命中
     assert rank == {}
     retriever._bm25_cache = None
+
+
+def test_query_plan_expands_payment_and_acceptance_terms_deterministically():
+    plan = retriever.build_query_plan("验收后付款期限是否明确")
+
+    assert plan.original_query == "验收后付款期限是否明确"
+    assert "支付条件" in plan.expanded_terms
+    assert "验收标准" in plan.expanded_terms
+    assert plan.article_number is None
+    assert retriever.build_query_plan("验收后付款期限是否明确") == plan
+
+
+def test_query_plan_keeps_exact_article_route():
+    plan = retriever.build_query_plan("民法典第585条对违约金如何规定")
+
+    assert plan.article_number == "第五百八十五条"
+    assert "违约责任" in plan.expanded_terms
+
+
+def test_evidence_rerank_fallback_scores_coverage_without_overriding_rrf_order():
+    candidates = [
+        {
+            "chunk_id": 1,
+            "content": "合同当事人应当全面履行义务。",
+            "matched_content": "合同当事人应当全面履行义务。",
+            "source": "通用规则",
+            "score": 0.04,
+        },
+        {
+            "chunk_id": 2,
+            "content": "付款条件应明确验收标准、验收期限和支付时间。",
+            "matched_content": "付款条件应明确验收标准、验收期限和支付时间。",
+            "source": "付款审查规则",
+            "score": 0.03,
+        },
+    ]
+    route_ranks = {
+        1: {"bm25_rank": 0, "vector_rank": 0},
+        2: {"bm25_rank": 1, "vector_rank": 1},
+    }
+
+    ranked = retriever.rerank_results(
+        "验收后付款期限",
+        candidates,
+        route_ranks=route_ranks,
+        top_k=2,
+    )
+
+    assert [item["chunk_id"] for item in ranked] == [1, 2]
+    assert ranked[0]["retrieval_trace"]["routes"] == route_ranks[1]
+    assert ranked[0]["retrieval_trace"]["rerank_mode"] == "deterministic_evidence_v1"
+    assert ranked[0]["retrieval_trace"]["rrf_score"] == 0.04
+    assert (
+        ranked[1]["retrieval_trace"]["rerank_score"]
+        > ranked[0]["retrieval_trace"]["rerank_score"]
+    )
+
+
+def test_evidence_rerank_accepts_cross_encoder_scorer_without_changing_contract():
+    candidates = [
+        {"chunk_id": 1, "content": "候选甲", "matched_content": "候选甲", "score": 0.2},
+        {"chunk_id": 2, "content": "候选乙", "matched_content": "候选乙", "score": 0.1},
+    ]
+
+    ranked = retriever.rerank_results(
+        "查询",
+        candidates,
+        route_ranks={},
+        top_k=2,
+        scorer=lambda _query, documents: [0.1 if text == "候选甲" else 0.9 for text in documents],
+    )
+
+    assert [item["chunk_id"] for item in ranked] == [2, 1]
+    assert ranked[0]["retrieval_trace"]["rerank_mode"] == "cross_encoder"

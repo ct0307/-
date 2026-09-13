@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.endpoints import auth, contracts, lookup
 from app.core.security import hash_password
 from app.db.session import Base
-from app.models.models import AuditLog, Contract, LookupItem, User
+from app.models.models import AuditLog, Contract, LookupItem, Risk, User
 from app.schemas.contract import LookupItemCreate
 from app.schemas.contract import AuditRequest
 from app.schemas.contract import ParseErrorResponse
@@ -53,6 +53,66 @@ def _upload(filename: str, content: bytes) -> object:
     from fastapi import UploadFile
 
     return UploadFile(filename=filename, file=BytesIO(content))
+
+
+def test_risk_api_returns_trace_and_redacts_business_retrieval_query(tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        legal, contract = _create_uploaded_contract(db, tmp_path)
+        business = User(
+            username="business-trace",
+            password_hash="hash",
+            role="business",
+            department=contract.department,
+        )
+        db.add(business)
+        db.add(Risk(
+            contract_id=contract.id,
+            agent="legal",
+            level="medium",
+            category="付款期限风险",
+            original_text="验收后十日内付款",
+            risk_reason="需核验付款条件",
+            basis="民法典第五百八十五条",
+            suggestion="明确付款期限",
+            confidence=88,
+            tier="green",
+            review_status="pending",
+            rag_sources="[]",
+            claim_id="C-PAYMENT-001",
+            claim_status="accepted",
+            source_window_id="window-payment",
+            source_clause_ids_json='["第二条"]',
+            evidence_ids_json='["LAW-585"]',
+            retrieval_attempts_json=(
+                '[{"attempt": 1, "query": "付款期限 验收后十日内付款", '
+                '"support_status": "supported", "source_ids": ["LAW-585"]}]'
+            ),
+            contract_evidence_json=(
+                '[{"chunk_id": "clause-payment", "clause_id": "第二条", '
+                '"anchors": [{"page_number": 2}], "match_type": "exact_quote", '
+                '"score": 1.0}]'
+            ),
+        ))
+        db.commit()
+
+        legal_risk = contracts.get_contract_risks(
+            contract.id, db=db, user=legal
+        )[0]
+        business_risk = contracts.get_contract_risks(
+            contract.id, db=db, user=business
+        )[0]
+
+        assert legal_risk.claim_id == "C-PAYMENT-001"
+        assert legal_risk.evidence_ids == ["LAW-585"]
+        assert legal_risk.retrieval_attempts[0]["query"] == "付款期限 验收后十日内付款"
+        assert legal_risk.contract_evidence[0]["anchors"][0]["page_number"] == 2
+        assert business_risk["claim_id"] == "C-PAYMENT-001"
+        assert business_risk["contract_evidence"][0]["clause_id"] == "第二条"
+        assert "query" not in business_risk["retrieval_attempts"][0]
+
+    engine.dispose()
 
 
 def test_single_upload_is_idempotent_and_rejects_payload_mismatch(monkeypatch, tmp_path):

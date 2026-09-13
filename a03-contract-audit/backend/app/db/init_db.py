@@ -54,6 +54,13 @@ _DEV_COLUMNS = {
         ("support_relation_status", "VARCHAR(16) DEFAULT 'unclear' NOT NULL"),
         ("support_validation_reason", "TEXT DEFAULT '' NOT NULL"),
         ("support_validator_version", "VARCHAR(32) DEFAULT 'unvalidated' NOT NULL"),
+        ("claim_id", "VARCHAR(64)"),
+        ("claim_status", "VARCHAR(24) DEFAULT 'pending_evidence' NOT NULL"),
+        ("source_window_id", "VARCHAR(64)"),
+        ("source_clause_ids_json", "TEXT DEFAULT '[]' NOT NULL"),
+        ("evidence_ids_json", "TEXT DEFAULT '[]' NOT NULL"),
+        ("retrieval_attempts_json", "TEXT DEFAULT '[]' NOT NULL"),
+        ("contract_evidence_json", "TEXT DEFAULT '[]' NOT NULL"),
     ],
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
     "contracts": [
@@ -129,6 +136,9 @@ _DEV_INDEXES = {
     "risks": ((
         "ix_risks_audit_job_id",
         "CREATE INDEX IF NOT EXISTS ix_risks_audit_job_id ON risks(audit_job_id)",
+    ), (
+        "ix_risks_claim_id",
+        "CREATE INDEX IF NOT EXISTS ix_risks_claim_id ON risks(claim_id)",
     ),),
     "llm_call_logs": ((
         "ix_llm_call_logs_audit_job_id",
@@ -171,6 +181,7 @@ def _migrate_dev_columns() -> None:
                     "ix_contracts_deleted_at": {"deleted_at"},
                     "ix_audit_batch_items_import_item_id": {"import_item_id"},
                     "ix_risks_audit_job_id": {"audit_job_id"},
+                    "ix_risks_claim_id": {"claim_id"},
                     "ix_llm_call_logs_audit_job_id": {"audit_job_id"},
                 }[name]
                 if required_columns <= table_columns and name not in existing_indexes:

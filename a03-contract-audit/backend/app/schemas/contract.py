@@ -2,7 +2,7 @@
 import json
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 
 class RiskOut(BaseModel):
@@ -24,6 +24,25 @@ class RiskOut(BaseModel):
     support_relation_status: str = "unclear"
     support_validation_reason: str = ""
     support_validator_version: str = "unvalidated"
+    claim_id: str | None = None
+    claim_status: str = "pending_evidence"
+    source_window_id: str | None = None
+    source_clause_ids: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("source_clause_ids", "source_clause_ids_json"),
+    )
+    evidence_ids: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("evidence_ids", "evidence_ids_json"),
+    )
+    retrieval_attempts: list[dict] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("retrieval_attempts", "retrieval_attempts_json"),
+    )
+    contract_evidence: list[dict] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("contract_evidence", "contract_evidence_json"),
+    )
 
     model_config = {"from_attributes": True}
 
@@ -40,6 +59,23 @@ class RiskOut(BaseModel):
         if v is None:
             return []
         return v if isinstance(v, list) else []
+
+    @field_validator(
+        "source_clause_ids",
+        "evidence_ids",
+        "retrieval_attempts",
+        "contract_evidence",
+        mode="before",
+    )
+    @classmethod
+    def _parse_trace_lists(cls, value):
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value) if value else []
+            except (TypeError, ValueError):
+                return []
+            return parsed if isinstance(parsed, list) else []
+        return value if isinstance(value, list) else []
 
 
 class CrossCheckOut(BaseModel):

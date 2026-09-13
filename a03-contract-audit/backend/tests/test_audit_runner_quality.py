@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from types import SimpleNamespace
 from sqlalchemy import create_engine
@@ -5,11 +7,11 @@ from sqlalchemy.orm import Query, Session
 
 from app.db.session import Base
 from app.llm.base import LLMError
-from app.models.models import AuditBatch, AuditBatchItem, Contract, Risk, User
+from app.models.models import AuditBatch, AuditBatchItem, Contract, ContractClause, Risk, User
 from app.services.audit import runner
 from app.services.audit.auditor import _record_llm_call
 from app.services.audit.runner import run_audit
-from app.services.parser.extractor import DocumentParseResult
+from app.services.parser.extractor import DocumentBlock, DocumentParseResult, SourceAnchor
 
 
 @pytest.fixture
@@ -85,6 +87,86 @@ def test_native_high_quality_contract_finishes_without_quality_risk(
     assert contract.requires_review is False
     assert result["requires_review"] is False
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
+
+
+def test_run_audit_persists_clauses_claims_and_contract_evidence(monkeypatch, db: Session):
+    contract = _contract(db, "traceable.pdf")
+    first_clause = "第一条 项目内容为企业合同审查系统开发，并包括部署、培训和验收支持。" * 3
+    second_clause = "第二条 甲方应在验收后十日内支付全部款项，并按约定提供验收确认文件。" * 3
+    parsed = DocumentParseResult(
+        text=f"{first_clause}\n{second_clause}",
+        source="native",
+        blocks=(
+            DocumentBlock(
+                block_id="pdf-page-1-line-1",
+                block_type="page_text",
+                text=first_clause,
+                anchor=SourceAnchor(page_number=1, bbox=(10.0, 20.0, 500.0, 40.0)),
+            ),
+            DocumentBlock(
+                block_id="pdf-page-2-line-1",
+                block_type="page_text",
+                text=second_clause,
+                anchor=SourceAnchor(page_number=2, bbox=(10.0, 24.0, 510.0, 44.0)),
+            ),
+        ),
+    )
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    monkeypatch.setattr(
+        runner,
+        "audit_contract",
+        lambda *_args, **_kwargs: {
+            "risks": [{
+                "claim_id": "C-PAYMENT-001",
+                "claim_status": "accepted",
+                "source_window_id": "window-payment",
+                "source_clause_ids": ["第二条"],
+                "evidence_ids": ["LAW-585"],
+                "retrieval_attempts": [{
+                    "attempt": 1,
+                    "query": "付款期限",
+                    "support_status": "supported",
+                    "source_ids": ["LAW-585"],
+                }],
+                "agent": "legal",
+                "level": "medium",
+                "category": "付款期限风险",
+                "original_text": "验收后十日内支付全部款项",
+                "risk_reason": "付款条件需要核验",
+                "basis": "民法典第五百八十五条",
+                "suggestion": "明确验收文件送达时间",
+                "confidence": 88,
+                "tier": "green",
+                "evidence_status": "supported",
+                "original_text_verified": True,
+                "requires_manual_review": False,
+                "rag_sources": [],
+            }],
+            "cross_checks": [],
+        },
+    )
+
+    run_audit(db, contract)
+
+    clauses = (
+        db.query(ContractClause)
+        .filter(ContractClause.contract_id == contract.id)
+        .order_by(ContractClause.char_start)
+        .all()
+    )
+    risk = db.query(Risk).filter(Risk.contract_id == contract.id).one()
+
+    assert [clause.clause_id for clause in clauses] == ["第一条", "第二条"]
+    assert json.loads(clauses[1].source_anchors_json)[0]["page_number"] == 2
+    assert risk.claim_id == "C-PAYMENT-001"
+    assert risk.claim_status == "accepted"
+    assert json.loads(risk.source_clause_ids_json) == ["第二条"]
+    assert json.loads(risk.evidence_ids_json) == ["LAW-585"]
+    assert json.loads(risk.retrieval_attempts_json)[0]["attempt"] == 1
+    contract_evidence = json.loads(risk.contract_evidence_json)
+    assert contract_evidence[0]["clause_id"] == "第二条"
+    assert contract_evidence[0]["match_type"] == "exact_quote"
+    assert contract_evidence[0]["anchors"][0]["page_number"] == 2
 
 
 def test_evidence_gap_promotes_contract_to_manual_review(monkeypatch, db: Session):

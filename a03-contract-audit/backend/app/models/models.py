@@ -71,6 +71,43 @@ class Contract(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     risks: Mapped[list["Risk"]] = relationship(back_populates="contract")
+    clauses: Mapped[list["ContractClause"]] = relationship(
+        back_populates="contract", cascade="all, delete-orphan"
+    )
+
+
+class ContractClause(Base):
+    """一次合同审查生成的结构化条款及其原文定位锚点。"""
+
+    __tablename__ = "contract_clauses"
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_id",
+            "audit_generation",
+            "chunk_id",
+            name="uq_contract_clauses_generation_chunk",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("contracts.id", ondelete="CASCADE"), index=True
+    )
+    audit_generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    chunk_id: Mapped[str] = mapped_column(String(64), index=True)
+    clause_id: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    clause_path_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    content: Mapped[str] = mapped_column(Text)
+    block_type: Mapped[str] = mapped_column(String(32), default="clause", server_default="clause")
+    char_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    char_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parent_chunk_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    previous_chunk_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    next_chunk_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_anchors_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    contract: Mapped["Contract"] = relationship(back_populates="clauses")
 
 
 class AuditBatch(Base):
@@ -236,6 +273,15 @@ class Risk(Base):
     support_relation_status: Mapped[str] = mapped_column(String(16), default="unclear")
     support_validation_reason: Mapped[str] = mapped_column(Text, default="")
     support_validator_version: Mapped[str] = mapped_column(String(32), default="unvalidated")
+    claim_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    claim_status: Mapped[str] = mapped_column(
+        String(24), default="pending_evidence", server_default="pending_evidence"
+    )
+    source_window_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_clause_ids_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    evidence_ids_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    retrieval_attempts_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    contract_evidence_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     contract: Mapped["Contract"] = relationship(back_populates="risks")

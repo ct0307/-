@@ -1,5 +1,6 @@
 """合同解析器的企业级降级契约。"""
 from contextlib import nullcontext
+from io import BytesIO
 import time
 
 import pdfplumber
@@ -8,6 +9,20 @@ import pytest
 from app.services.parser import extractor
 from app.services.parser.extractor import DocumentParseResult
 from app.services.parser.ocr import OCRLimitExceeded, OCRResult, OCRTimeout, ocr_pdf_bytes
+
+
+def _docx_bytes_with_interleaved_content() -> bytes:
+    from docx import Document
+
+    document = Document()
+    document.add_paragraph("第一条 合同主体")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "甲方"
+    table.cell(0, 1).text = "测试公司"
+    document.add_paragraph("第二条 付款安排")
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
 
 
 class _EmptyPage:
@@ -25,6 +40,66 @@ class _TextPage:
 
     def extract_text(self) -> str:
         return self.text
+
+
+def test_docx_preserves_paragraph_and_table_order_with_blocks():
+    result = extractor._extract_docx_result(_docx_bytes_with_interleaved_content())
+
+    assert result.text.splitlines() == [
+        "第一条 合同主体",
+        "甲方  测试公司",
+        "第二条 付款安排",
+    ]
+    assert [block.block_type for block in result.blocks] == [
+        "paragraph",
+        "table_row",
+        "paragraph",
+    ]
+    assert result.blocks[0].anchor.paragraph_index == 0
+    assert result.blocks[1].anchor.table_index == 0
+    assert result.blocks[1].anchor.row_index == 0
+
+
+def test_pdf_exposes_page_numbered_blocks(monkeypatch):
+    monkeypatch.setattr(
+        pdfplumber,
+        "open",
+        lambda _: _pdf_with_pages("第一页付款条款", "第二页违约责任"),
+    )
+
+    result = extractor._extract_pdf_result(b"text-pdf")
+
+    assert [block.text for block in result.blocks] == ["第一页付款条款", "第二页违约责任"]
+    assert [block.anchor.page_number for block in result.blocks] == [1, 2]
+    assert all(block.block_type == "page_text" for block in result.blocks)
+
+
+def test_pdf_uses_word_coordinates_for_precise_line_blocks(monkeypatch):
+    class PositionedPage:
+        width = 600
+        height = 800
+
+        def extract_text(self) -> str:
+            return "第一条 付款安排\n验收后十日付款"
+
+        def extract_words(self, **_kwargs):
+            return [
+                {"text": "第一条", "x0": 72, "top": 100, "x1": 112, "bottom": 115},
+                {"text": "付款安排", "x0": 120, "top": 100, "x1": 180, "bottom": 115},
+                {"text": "验收后十日付款", "x0": 72, "top": 130, "x1": 180, "bottom": 145},
+            ]
+
+    monkeypatch.setattr(
+        pdfplumber,
+        "open",
+        lambda _: nullcontext(type("Pdf", (), {"pages": [PositionedPage()]})()),
+    )
+
+    result = extractor._extract_pdf_result(b"positioned-pdf")
+
+    assert [block.text for block in result.blocks] == ["第一条 付款安排", "验收后十日付款"]
+    assert result.blocks[0].anchor.page_number == 1
+    assert result.blocks[0].anchor.bbox == (72.0, 100.0, 180.0, 115.0)
 
 
 def _pdf_with_pages(*texts: str):

@@ -1,0 +1,64 @@
+from decimal import Decimal
+
+from app.services.audit import auditor
+
+
+def test_detects_conflicting_payment_deadlines_for_same_trigger():
+    from app.services.audit.contract_logic import detect_clause_conflicts
+
+    text = """第一条 甲方应在验收合格后10日内支付合同款。
+第二条 甲方应在验收合格后30日内完成付款。
+第三条 乙方应在合同签订后5日内进场。"""
+
+    conflicts = detect_clause_conflicts(text)
+
+    assert len(conflicts) == 1
+    assert conflicts[0].category == "付款期限冲突"
+    assert conflicts[0].clause_ids == ("第一条", "第二条")
+    assert set(conflicts[0].values) == {"10日", "30日"}
+
+
+def test_different_payment_triggers_are_not_reported_as_direct_conflict():
+    from app.services.audit.contract_logic import detect_clause_conflicts
+
+    text = """第一条 甲方应在合同签订后10日内支付预付款。
+第二条 甲方应在验收合格后30日内支付尾款。"""
+
+    assert detect_clause_conflicts(text) == []
+
+
+def test_payment_schedule_calculates_percentage_total():
+    from app.services.audit.contract_logic import analyze_payment_schedule
+
+    balanced = analyze_payment_schedule(
+        "第一条 合同签订后支付30%预付款。\n第二条 验收后支付70%尾款。"
+    )
+    incomplete = analyze_payment_schedule(
+        "第一条 合同签订后支付30%预付款。\n第二条 验收后支付60%尾款。"
+    )
+
+    assert balanced.status == "balanced"
+    assert balanced.total_percentage == Decimal("100")
+    assert incomplete.status == "incomplete"
+    assert incomplete.total_percentage == Decimal("90")
+    assert incomplete.clause_ids == ("第一条", "第二条")
+
+
+def test_penalty_calculation_is_decimal_and_cap_aware():
+    from app.services.audit.contract_logic import calculate_penalty
+
+    assert calculate_penalty("100000", "0.001", 10) == Decimal("1000.00")
+    assert calculate_penalty("100000", "0.01", 50, cap_rate="0.2") == Decimal("20000.00")
+
+
+def test_audit_contract_surfaces_deterministic_logic_conflicts(monkeypatch):
+    monkeypatch.setattr(auditor, "_agent_audit", lambda *_args, **_kwargs: [])
+    text = """第一条 甲方应在验收合格后10日内支付合同款。
+第二条 甲方应在验收合格后30日内完成付款。"""
+
+    result = auditor.audit_contract({}, text)
+
+    logic_checks = [item for item in result["cross_checks"] if item["id"].startswith("LC-")]
+    assert len(logic_checks) == 1
+    assert logic_checks[0]["verdict"] == "conflict"
+    assert logic_checks[0]["evidence_clause_ids"] == ["第一条", "第二条"]

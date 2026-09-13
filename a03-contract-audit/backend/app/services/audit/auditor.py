@@ -19,6 +19,7 @@
 对应 Mock 规则（另一角色不受影响），保证审查链路始终可用 —— 企业可用性刚需。
 所有结论统一标注"仅供参考，以人工复核为准"。
 """
+import hashlib
 import json
 import re
 import time
@@ -32,6 +33,11 @@ from app.services.audit.evidence_validation import (
     SUPPORT_VALIDATOR_VERSION,
     validate_support_relation,
 )
+from app.services.audit.contract_logic import (
+    analyze_payment_schedule,
+    build_logic_cross_checks,
+)
+from app.services.rag.contract_structure import build_contract_windows
 from app.services.rag.retriever import retrieve
 
 if TYPE_CHECKING:
@@ -132,7 +138,19 @@ def audit_contract(
     """多智能体主从协同审查。dimensions 为空/None 时全量审查。"""
     all_risks: list[dict] = []
     canonical_dimensions = _canonical_dimensions(dimensions)
-    shared_context: dict = {"elements": elements}
+    payment_schedule = analyze_payment_schedule(contract_text)
+    shared_context: dict = {
+        "elements": elements,
+        "payment_schedule": {
+            "status": payment_schedule.status,
+            "total_percentage": (
+                str(payment_schedule.total_percentage)
+                if payment_schedule.total_percentage is not None else None
+            ),
+            "clause_ids": list(payment_schedule.clause_ids),
+            "calculation": payment_schedule.calculation,
+        },
+    }
     timings = {
         "legal_agent_ms": 0,
         "finance_agent_ms": 0,
@@ -190,6 +208,7 @@ def audit_contract(
         shared_context[role] = _summarize_for_context(role, risks, elements)
 
     cross_checks = detect_conflicts(shared_context, elements)
+    cross_checks.extend(build_logic_cross_checks(contract_text))
     conflict_categories = {c["category"] for c in cross_checks if c["verdict"] == "conflict"}
     for r in all_risks:
         r["tier"] = classify_tier(r, conflict_categories)
@@ -211,6 +230,19 @@ def _summarize_for_context(role: str, risks: list[dict], elements: dict) -> dict
         "categories": categories,
         "related_party": related_party,
         "high_count": sum(1 for r in risks if r["level"] == "high"),
+        "claims": [
+            {
+                "claim_id": risk.get("claim_id"),
+                "category": risk.get("category"),
+                "level": risk.get("level"),
+                "original_text": risk.get("original_text"),
+                "risk_reason": risk.get("risk_reason"),
+                "evidence_ids": list(risk.get("evidence_ids") or ()),
+                "evidence_status": risk.get("evidence_status", "unsupported"),
+            }
+            for risk in risks[:50]
+            if risk.get("claim_id")
+        ],
     }
 
 
@@ -308,35 +340,50 @@ def _agent_audit(
     upstream_block = ""
     if role == "finance" and "legal" in shared_context:
         legal_ctx = shared_context["legal"]
+        legal_claims = json.dumps(
+            legal_ctx.get("claims", []), ensure_ascii=False
+        )
         upstream_block = (
             f"\n【法务 Agent 已完成的前置审查（共享上下文，请勿重复解析法律条款）】\n"
             f"- 法务已检出风险类别：{('、'.join(legal_ctx['categories']) or '无')}\n"
             f"- 是否识别为关联交易：{'是（请重点复查交易价格公允性）' if legal_ctx['related_party'] else '否'}\n"
+            f"- 待财务验证的结构化 Claims：{legal_claims}\n"
+            f"- 确定性付款比例核算：{json.dumps(shared_context.get('payment_schedule', {}), ensure_ascii=False)}\n"
             f"请在此基础上，专注金额、付款、现金流与价格公允性维度做二次加工审查。\n"
         )
 
-    user_prompt = (
-        f"<knowledge>\n{basis_block}\n</knowledge>\n{upstream_block}\n"
-        f"【合同基本信息】\n合同类型：{contract_type or '未指定'}\n"
-        f"【已抽取的合同要素】\n{json.dumps({k: v for k, v in elements.items() if not k.startswith('has_')}, ensure_ascii=False)}\n\n"
-        f"<contract>\n{contract_text[:8000]}\n</contract>\n\n"
-        f"请以{cfg['name']}的视角，输出 JSON 数组形式的风险清单。"
-    )
-
     adapter = get_llm_adapter()
-    resp = adapter.chat(system_prompt, user_prompt)
-    # 记录本次 LLM 调用（provider/model/token/latency），供可解释性溯源与算力对比
-    _record_llm_call(
-        contract_id,
-        agent=role,
-        resp=resp,
-        mode="llm",
-        audit_job_id=audit_job_id,
-    )
-    if resp.finish_reason == "length":
-        raise ValueError("模型输出被截断，无法形成完整风险清单")
-    raw = _parse_risk_json(resp.text)
-    normalized = [_normalize(r, role) for r in raw]
+    windows = build_contract_windows(contract_text, max_chars=8000)
+    normalized: list[dict] = []
+    seen_claims: set[str] = set()
+    for window_index, window in enumerate(windows, start=1):
+        user_prompt = (
+            f"<knowledge>\n{basis_block}\n</knowledge>\n{upstream_block}\n"
+            f"【合同基本信息】\n合同类型：{contract_type or '未指定'}\n"
+            f"【已抽取的合同要素】\n{json.dumps({k: v for k, v in elements.items() if not k.startswith('has_')}, ensure_ascii=False)}\n\n"
+            f"【审查窗口 {window_index}/{len(windows)}】\n"
+            f"条款范围：{('、'.join(window.clause_ids) or '未编号段落')}\n"
+            f"<contract>\n{window.text}\n</contract>\n\n"
+            f"请以{cfg['name']}的视角，输出 JSON 数组形式的风险清单。"
+        )
+        resp = adapter.chat(system_prompt, user_prompt)
+        _record_llm_call(
+            contract_id,
+            agent=role,
+            resp=resp,
+            mode="llm",
+            audit_job_id=audit_job_id,
+        )
+        if resp.finish_reason == "length":
+            raise ValueError("模型输出被截断，无法形成完整风险清单")
+        for item in _parse_risk_json(resp.text):
+            risk = _normalize(item, role)
+            if risk["claim_id"] in seen_claims:
+                continue
+            seen_claims.add(risk["claim_id"])
+            risk["source_window_id"] = window.window_id
+            risk["source_clause_ids"] = list(window.clause_ids)
+            normalized.append(risk)
     if timings is not None:
         timings[f"{role}_agent_ms"] = round(
             (time.perf_counter() - agent_started) * 1000
@@ -369,34 +416,62 @@ def _ground_risks(
             str(risk.get("original_text", ""))[:500].strip(),
             str(risk.get("risk_reason", ""))[:300].strip(),
         ]))
-        sources = retrieve(
-            query,
-            top_k=3,
-            contract_type=contract_type,
-            dimensions=dimensions or [],
-        ) if query else []
-        reliable_sources = [source for source in sources if source.get("reliable", False)]
+        attempts: list[dict] = []
+        selected_sources: list[dict] = []
+        selected_validation = validate_support_relation(risk, [])
+        queries = [query, _rewrite_evidence_query(risk)] if query else []
+        best_rank = -1
+        for attempt_number, attempt_query in enumerate(queries, start=1):
+            sources = retrieve(
+                attempt_query,
+                top_k=3,
+                contract_type=contract_type,
+                dimensions=dimensions or [],
+            )
+            validation = validate_support_relation(risk, sources)
+            reliable = [source for source in sources if source.get("reliable", False)]
+            attempts.append({
+                "attempt": attempt_number,
+                "query": attempt_query,
+                "support_status": validation.status,
+                "source_ids": [_evidence_id(source) for source in sources],
+            })
+            rank = 2 if reliable and validation.status == "supported" else 1 if reliable else 0
+            if rank > best_rank:
+                best_rank = rank
+                selected_sources = sources
+                selected_validation = validation
+            if rank == 2:
+                break
+        risk["retrieval_attempts"] = attempts
+        reliable_sources = [
+            source for source in selected_sources if source.get("reliable", False)
+        ]
         risk["rag_sources"] = reliable_sources
+        risk["evidence_ids"] = [_evidence_id(source) for source in reliable_sources]
         original_verified = _verify_original_text(
             risk.get("original_text", ""), contract_text
         )
         risk["original_text_verified"] = original_verified
-        validation = validate_support_relation(risk, sources)
+        validation = selected_validation
         risk["support_relation_status"] = validation.status
         risk["support_validation_reason"] = validation.reason
         risk["support_validator_version"] = validation.version
         if reliable_sources and original_verified is True and validation.status == "supported":
             risk["basis"] = "；".join(_format_source(source) for source in reliable_sources)
             risk["evidence_status"] = "supported"
+            risk["claim_status"] = "accepted"
             risk["requires_manual_review"] = False
         elif reliable_sources:
             risk["basis"] = "；".join(_format_source(source) for source in reliable_sources)
             risk["evidence_status"] = "partially_supported"
+            risk["claim_status"] = "manual_review"
             risk["confidence"] = min(int(risk.get("confidence", 0)), 70)
             risk["requires_manual_review"] = True
         else:
             risk["basis"] = NO_RELIABLE_BASIS
             risk["evidence_status"] = "unsupported"
+            risk["claim_status"] = "manual_review"
             risk["confidence"] = min(int(risk.get("confidence", 0)), 50)
             risk["requires_manual_review"] = True
     return risks
@@ -411,6 +486,23 @@ def _verify_original_text(original_text: object, contract_text: str | None) -> b
     if not candidate or "全文未检出" in candidate:
         return False
     return candidate in source
+
+
+def _rewrite_evidence_query(risk: dict) -> str:
+    """Critic 首轮未找到支持证据时使用的有限、可重放查询改写。"""
+    return " ".join(filter(None, [
+        str(risk.get("category", "")).strip(),
+        "认定标准 适用条件 法律后果",
+        str(risk.get("risk_reason", ""))[:300].strip(),
+    ]))
+
+
+def _evidence_id(source: dict) -> str:
+    chunk_id = source.get("chunk_id")
+    if chunk_id is not None:
+        return f"KC-{chunk_id}"
+    payload = f"{source.get('source', '')}\0{source.get('content', '')}"
+    return "EV-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _format_source(source: dict) -> str:
@@ -441,11 +533,17 @@ def _normalize(r: dict, agent: str) -> dict:
         level = "medium"
     # 置信度不再由模型自报；旧字段保留为兼容字段，正式可信度由证据状态表达。
     confidence = 0
+    category = str(r.get("category", "合规风险"))[:64]
+    original_text = str(r.get("original_text", ""))
+    claim_payload = re.sub(r"\s+", "", f"{agent}\0{category}\0{original_text}")
+    claim_id = "C-" + hashlib.sha256(claim_payload.encode("utf-8")).hexdigest()[:16].upper()
     return {
+        "claim_id": claim_id,
+        "claim_status": "pending_evidence",
         "agent": agent,
         "level": level,
-        "category": str(r.get("category", "合规风险"))[:64],
-        "original_text": str(r.get("original_text", "")),
+        "category": category,
+        "original_text": original_text,
         "risk_reason": str(r.get("risk_reason", ""))[:500],
         "basis": NO_RELIABLE_BASIS,
         "suggestion": str(r.get("suggestion", "")),
