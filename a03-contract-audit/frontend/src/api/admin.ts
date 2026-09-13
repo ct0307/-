@@ -28,6 +28,26 @@ export interface DepartmentScopeUser {
   authorized_departments: string[]
 }
 
+export interface ContractTrashItem {
+  batch_id: number
+  item_id: number
+  contract_id: number
+  filename: string
+  contract_type: string
+  department: string
+  deleted_at: string
+  expires_at: string
+  recoverable: boolean
+}
+
+export function getContractTrash(): Promise<ContractTrashItem[]> {
+  return client.get('/admin/contract-trash')
+}
+
+export function restoreContractDraft(batchId: number, itemId: number): Promise<void> {
+  return client.post(`/imports/${batchId}/items/${itemId}/restore`)
+}
+
 export function getDepartmentScopeUsers(): Promise<DepartmentScopeUser[]> {
   return client.get('/admin/users/department-scopes')
 }

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_roles
+from app.api.deps import require_department_access, require_roles
 from app.db.session import get_db
 from app.models.models import Contract, Risk, User
 from app.schemas.contract import RiskStatusUpdate
@@ -25,6 +25,13 @@ def update_risk_status(
     risk = db.query(Risk).filter(Risk.id == risk_id).first()
     if not risk:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "风险项不存在")
+    contract = db.query(Contract).filter(
+        Contract.id == risk.contract_id,
+        Contract.deleted_at.is_(None),
+    ).first()
+    if not contract:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "合同不存在")
+    require_department_access(user, contract.department)
     old = risk.review_status
     risk.review_status = payload.review_status
     pending_count = (
@@ -37,7 +44,6 @@ def update_risk_status(
         .count()
     )
     if payload.review_status not in {"pending", "to_modify"} and pending_count == 0:
-        contract = db.query(Contract).filter(Contract.id == risk.contract_id).first()
         if contract and contract.requires_review:
             contract.requires_review = False
             contract.review_reason = None

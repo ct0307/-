@@ -35,6 +35,7 @@ export function createBatchStore(
     const polling = ref(false)
     const error = ref('')
     const idempotencyKey = ref('')
+    const idempotencySignature = ref('')
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const progress = computed(() => {
@@ -49,6 +50,18 @@ export function createBatchStore(
         clearTimeout(timer)
         timer = null
       }
+    }
+
+    function prepareIdempotency(signature: string) {
+      if (!idempotencyKey.value || idempotencySignature.value !== signature) {
+        idempotencyKey.value = crypto.randomUUID()
+        idempotencySignature.value = signature
+      }
+    }
+
+    function clearIdempotency() {
+      idempotencyKey.value = ''
+      idempotencySignature.value = ''
     }
 
     async function pollOnce(batchId = batch.value?.id): Promise<AuditBatch | null> {
@@ -84,11 +97,17 @@ export function createBatchStore(
     async function create(files: File[], contractType = '', dimensions: string[] = []) {
       loading.value = true
       error.value = ''
-      idempotencyKey.value ||= crypto.randomUUID()
+      prepareIdempotency(JSON.stringify({
+        action: 'files',
+        contractType,
+        dimensions,
+        files: files.map((file) => [file.name, file.size, file.type]),
+      }))
       try {
         batch.value = await api.createBatch(files, contractType, dimensions, idempotencyKey.value)
         if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
         else await startPolling(batch.value.id)
+        clearIdempotency()
         return batch.value
       } catch (cause) {
         error.value = cause instanceof Error ? cause.message : '批次创建失败'
@@ -101,7 +120,7 @@ export function createBatchStore(
     async function createFromImport(importItemIds: number[], dimensions: string[] = []) {
       loading.value = true
       error.value = ''
-      idempotencyKey.value ||= crypto.randomUUID()
+      prepareIdempotency(JSON.stringify({ action: 'import', importItemIds, dimensions }))
       try {
         batch.value = await api.createBatchFromImport(
           importItemIds,
@@ -110,6 +129,7 @@ export function createBatchStore(
         )
         if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
         else await startPolling(batch.value.id)
+        clearIdempotency()
         return batch.value
       } catch (cause) {
         error.value = cause instanceof Error ? cause.message : '批次创建失败'
@@ -144,7 +164,7 @@ export function createBatchStore(
       stopPolling()
       batch.value = null
       error.value = ''
-      idempotencyKey.value = ''
+      clearIdempotency()
     }
 
     return {

@@ -34,6 +34,7 @@ export function createImportInboxStore(
     const polling = ref(false)
     const error = ref('')
     const idempotencyKey = ref('')
+    const idempotencySignature = ref('')
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const selectableIds = computed(() => new Set(
@@ -78,6 +79,17 @@ export function createImportInboxStore(
       error.value = importRequests.importErrorMessage(cause)
     }
 
+    function prepareIdempotency(files: File[], department: string) {
+      const signature = JSON.stringify({
+        department,
+        files: files.map((file) => [file.name, file.size, file.type]),
+      })
+      if (!idempotencyKey.value || idempotencySignature.value !== signature) {
+        idempotencyKey.value = crypto.randomUUID()
+        idempotencySignature.value = signature
+      }
+    }
+
     async function pollOnce(batchId = batch.value?.id): Promise<ImportBatch | null> {
       if (!batchId) return null
       try {
@@ -111,11 +123,13 @@ export function createImportInboxStore(
     async function create(files: File[], department = '') {
       loading.value = true
       error.value = ''
-      idempotencyKey.value ||= crypto.randomUUID()
+      prepareIdempotency(files, department)
       try {
         batch.value = await api.createImport(files, department, idempotencyKey.value)
         selectedIds.value = []
         if (hasActiveItems(batch.value)) await startPolling(batch.value.id)
+        idempotencyKey.value = ''
+        idempotencySignature.value = ''
         return batch.value
       } catch (cause) {
         recordError(cause)
@@ -193,6 +207,7 @@ export function createImportInboxStore(
       loading.value = false
       error.value = ''
       idempotencyKey.value = ''
+      idempotencySignature.value = ''
     }
 
     return {

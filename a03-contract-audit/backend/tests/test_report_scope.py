@@ -1,4 +1,5 @@
 """报表查询和导出的部门数据隔离。"""
+import json
 from io import BytesIO
 
 import pytest
@@ -7,6 +8,7 @@ from openpyxl import load_workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.api.v1.endpoints.dashboard import dashboard_summary
 from app.api.v1.endpoints.reports import department_scope_for, export_report
 from app.db.session import Base
 from app.models.models import Contract, Risk, User
@@ -96,3 +98,24 @@ def test_business_export_rejects_explicit_other_department_contract():
         export_report(contract_ids=[other.id], db=db, user=business)
 
     assert exc_info.value.status_code == 403
+
+
+def test_legal_report_scope_contains_only_authorized_departments():
+    legal = User(
+        username="legal",
+        password_hash="not-used",
+        role="legal",
+        department="法务部",
+        authorized_departments_json=json.dumps(["采购中心"], ensure_ascii=False),
+    )
+
+    assert department_scope_for(legal) == {"法务部", "采购中心"}
+
+
+def test_dashboard_summary_uses_authorized_department_scope():
+    db, business, _own, _other = _seed()
+
+    result = dashboard_summary(db=db, user=business)
+
+    assert result["total_contracts"] == 1
+    assert result["total_risks"] == 1

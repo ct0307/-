@@ -24,11 +24,25 @@ def upgrade() -> None:
     op.add_column("contracts", sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("contracts", sa.Column("deleted_by", sa.Integer(), nullable=True))
     op.create_index("ix_contracts_deleted_at", "contracts", ["deleted_at"])
+    with op.batch_alter_table("contracts") as batch_op:
+        batch_op.create_foreign_key(
+            "fk_contracts_type_confirmed_by_users",
+            "users",
+            ["type_confirmed_by"],
+            ["id"],
+        )
+        batch_op.create_foreign_key(
+            "fk_contracts_deleted_by_users",
+            "users",
+            ["deleted_by"],
+            ["id"],
+        )
     op.create_table(
         "import_batches",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("owner_id", sa.Integer(), sa.ForeignKey("users.id"), nullable=False),
         sa.Column("idempotency_key", sa.String(128), nullable=False),
+        sa.Column("request_fingerprint", sa.String(64), nullable=False, server_default=""),
         sa.Column("status", sa.String(24), nullable=False, server_default="processing"),
         sa.Column("total", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("ready", sa.Integer(), nullable=False, server_default="0"),
@@ -79,6 +93,9 @@ def downgrade() -> None:
     op.drop_index("ix_import_batches_status", table_name="import_batches")
     op.drop_index("ix_import_batches_owner_id", table_name="import_batches")
     op.drop_table("import_batches")
+    with op.batch_alter_table("contracts") as batch_op:
+        batch_op.drop_constraint("fk_contracts_deleted_by_users", type_="foreignkey")
+        batch_op.drop_constraint("fk_contracts_type_confirmed_by_users", type_="foreignkey")
     op.drop_index("ix_contracts_deleted_at", table_name="contracts")
     for column in ("deleted_by", "deleted_at", "type_confirmed_at", "type_confirmed_by", "type_evidence_json", "type_confidence", "suggested_type"):
         op.drop_column("contracts", column)

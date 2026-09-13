@@ -6,13 +6,15 @@
 固定 7 模块顺序：['工作台','合同审查','整改跟踪','多维报表','法规知识库','规则与模板','权限与审计']
 """
 import json
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import allowed_departments, require_roles
+from app.core.config import settings
 from app.db.session import get_db
-from app.models.models import AccessRole, AuditLog, LLMCallLog, LookupItem, User
+from app.models.models import AccessRole, AuditLog, Contract, ImportBatchItem, LLMCallLog, LookupItem, User
 from app.schemas.contract import (
     AccessMatrixOut,
     AccessRoleOut,
@@ -21,6 +23,7 @@ from app.schemas.contract import (
     DepartmentScopeUserOut,
     LLMCallLogOut,
 )
+from app.schemas.import_batch import ContractTrashItemOut
 
 router = APIRouter()
 
@@ -81,6 +84,39 @@ def update_user_departments(
     db.commit()
     db.refresh(target)
     return _scope_user_out(target)
+
+
+@router.get("/contract-trash", response_model=list[ContractTrashItemOut])
+def get_contract_trash(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("admin")),
+) -> list[ContractTrashItemOut]:
+    now = datetime.now(timezone.utc)
+    rows = (
+        db.query(ImportBatchItem, Contract)
+        .join(Contract, ImportBatchItem.contract_id == Contract.id)
+        .filter(Contract.deleted_at.is_not(None))
+        .order_by(Contract.deleted_at.desc())
+        .all()
+    )
+    result: list[ContractTrashItemOut] = []
+    for item, contract in rows:
+        deleted_at = contract.deleted_at
+        if deleted_at.tzinfo is None:
+            deleted_at = deleted_at.replace(tzinfo=timezone.utc)
+        expires_at = deleted_at + timedelta(days=settings.CONTRACT_TRASH_RETENTION_DAYS)
+        result.append(ContractTrashItemOut(
+            batch_id=item.batch_id,
+            item_id=item.id,
+            contract_id=contract.id,
+            filename=contract.filename,
+            contract_type=contract.contract_type,
+            department=contract.department,
+            deleted_at=deleted_at,
+            expires_at=expires_at,
+            recoverable=now <= expires_at and contract.status != "purged" and bool(contract.storage_path),
+        ))
+    return result
 
 
 @router.get("/llm-calls", response_model=list[LLMCallLogOut])

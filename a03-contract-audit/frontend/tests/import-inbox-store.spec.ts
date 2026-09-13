@@ -103,3 +103,81 @@ test('replaces one item with the server-confirmed state', async () => {
 
   expect(store.batch?.items[0]).toEqual(confirmed)
 })
+
+test('generates a new idempotency key for each successful import operation', async () => {
+  const keys: string[] = []
+  const store = createImportInboxStore(api({
+    createImport: async (_files, _department, key) => {
+      keys.push(key ?? '')
+      return { ...batchFixture, id: keys.length }
+    },
+  }), 'import-idempotency-success')()
+
+  await store.create([new File(['a'], 'a.pdf')])
+  await store.create([new File(['b'], 'b.pdf')])
+
+  expect(keys).toHaveLength(2)
+  expect(keys[0]).toBeTruthy()
+  expect(keys[1]).toBeTruthy()
+  expect(keys[1]).not.toBe(keys[0])
+})
+
+test('reuses the idempotency key when the import request fails', async () => {
+  const keys: string[] = []
+  let attempts = 0
+  const store = createImportInboxStore(api({
+    createImport: async (_files, _department, key) => {
+      keys.push(key ?? '')
+      attempts += 1
+      if (attempts === 1) throw new Error('network unavailable')
+      return batchFixture
+    },
+  }), 'import-idempotency-retry')()
+
+  await expect(store.create([new File(['a'], 'a.pdf')])).rejects.toThrow('network unavailable')
+  await store.create([new File(['a'], 'a.pdf')])
+
+  expect(keys[1]).toBe(keys[0])
+})
+
+test('keeps the import key when initial polling fails after creation', async () => {
+  const keys: string[] = []
+  let pollingAttempts = 0
+  const processing = {
+    ...batchFixture,
+    status: 'processing' as const,
+    items: [{ ...readyItem, status: 'parsing' as const }],
+  }
+  const store = createImportInboxStore(api({
+    createImport: async (_files, _department, key) => {
+      keys.push(key ?? '')
+      return processing
+    },
+    getImport: async () => {
+      pollingAttempts += 1
+      if (pollingAttempts === 1) throw new Error('polling unavailable')
+      return batchFixture
+    },
+  }), 'import-idempotency-polling')()
+
+  await expect(store.create([new File(['a'], 'a.pdf')])).rejects.toThrow('polling unavailable')
+  await store.create([new File(['a'], 'a.pdf')])
+
+  expect(keys[1]).toBe(keys[0])
+})
+
+test('starts a new import operation when files change after a failure', async () => {
+  const keys: string[] = []
+  const store = createImportInboxStore(api({
+    createImport: async (_files, _department, key) => {
+      keys.push(key ?? '')
+      if (keys.length === 1) throw new Error('network unavailable')
+      return batchFixture
+    },
+  }), 'import-idempotency-changed-input')()
+
+  await expect(store.create([new File(['a'], 'a.pdf')])).rejects.toThrow('network unavailable')
+  await store.create([new File(['b'], 'b.pdf')])
+
+  expect(keys[1]).not.toBe(keys[0])
+})

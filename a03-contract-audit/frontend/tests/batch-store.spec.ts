@@ -77,3 +77,82 @@ test('creates an audit batch from selected import items', async () => {
   expect(calls[0].dimensions).toEqual(['legal', 'payment'])
   expect(calls[0].key).toBeTruthy()
 })
+
+test('generates a new idempotency key for each successful batch operation', async () => {
+  const keys: string[] = []
+  const useStore = createBatchStore({
+    ...fakeApi([batch('done', ['done'])]),
+    createBatch: async (_files, _type, _dimensions, key) => {
+      keys.push(key ?? '')
+      return batch('done', ['done'])
+    },
+  }, 'batch-idempotency-success')
+  const store = useStore()
+
+  await store.create([new File(['a'], 'a.pdf')])
+  await store.create([new File(['b'], 'b.pdf')])
+
+  expect(keys).toHaveLength(2)
+  expect(keys[1]).not.toBe(keys[0])
+})
+
+test('reuses the idempotency key when batch creation fails', async () => {
+  const keys: string[] = []
+  let attempts = 0
+  const useStore = createBatchStore({
+    ...fakeApi([batch('done', ['done'])]),
+    createBatch: async (_files, _type, _dimensions, key) => {
+      keys.push(key ?? '')
+      attempts += 1
+      if (attempts === 1) throw new Error('network unavailable')
+      return batch('done', ['done'])
+    },
+  }, 'batch-idempotency-retry')
+  const store = useStore()
+
+  await expect(store.create([new File(['a'], 'a.pdf')])).rejects.toThrow('network unavailable')
+  await store.create([new File(['a'], 'a.pdf')])
+
+  expect(keys[1]).toBe(keys[0])
+})
+
+test('keeps the batch key when initial polling fails after creation', async () => {
+  const keys: string[] = []
+  let pollingAttempts = 0
+  const useStore = createBatchStore({
+    ...fakeApi([batch('running', ['auditing'])]),
+    createBatch: async (_files, _type, _dimensions, key) => {
+      keys.push(key ?? '')
+      return batch('running', ['auditing'])
+    },
+    getBatch: async () => {
+      pollingAttempts += 1
+      if (pollingAttempts === 1) throw new Error('polling unavailable')
+      return batch('done', ['done'])
+    },
+  }, 'batch-idempotency-polling')
+  const store = useStore()
+
+  await expect(store.create([new File(['a'], 'a.pdf')])).rejects.toThrow('polling unavailable')
+  await store.create([new File(['a'], 'a.pdf')])
+
+  expect(keys[1]).toBe(keys[0])
+})
+
+test('starts a new batch operation when selected import items change after a failure', async () => {
+  const keys: string[] = []
+  const useStore = createBatchStore({
+    ...fakeApi([batch('done', ['done'])]),
+    createBatchFromImport: async (_itemIds, _dimensions, key) => {
+      keys.push(key ?? '')
+      if (keys.length === 1) throw new Error('network unavailable')
+      return batch('done', ['done'])
+    },
+  }, 'batch-idempotency-changed-input')
+  const store = useStore()
+
+  await expect(store.createFromImport([1])).rejects.toThrow('network unavailable')
+  await store.createFromImport([2])
+
+  expect(keys[1]).not.toBe(keys[0])
+})

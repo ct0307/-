@@ -66,6 +66,37 @@ def test_create_import_is_idempotent_per_owner(monkeypatch, tmp_path):
     assert db.query(Contract).count() == 1
 
 
+@pytest.mark.parametrize(
+    ("filename", "content", "department"),
+    [
+        ("其他合同.txt", b"body", "法务部"),
+        ("合同.txt", b"different body", "法务部"),
+        ("合同.txt", b"body", "采购中心"),
+    ],
+)
+def test_create_import_rejects_reused_key_with_different_request(
+    monkeypatch,
+    tmp_path,
+    filename,
+    content,
+    department,
+):
+    db = _session()
+    legal = _user(db)
+    legal.authorized_departments_json = '["采购中心"]'
+    db.commit()
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda _item_id: "task-1")
+
+    imports.create_import([_file("合同.txt", b"body")], "stable-key", "法务部", db, legal)
+
+    with pytest.raises(HTTPException) as error:
+        imports.create_import([_file(filename, content)], "stable-key", department, db, legal)
+
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "IDEMPOTENCY_CONFLICT"
+
+
 def test_get_import_rejects_an_unrelated_user():
     db = _session()
     owner = _user(db, username="owner", department="法务部")

@@ -7,13 +7,15 @@ import {
   deleteLookup,
   getAccessMatrix,
   getAuditLogs,
+  getContractTrash,
   getDepartmentScopeUsers,
   getLlmCalls,
   getLookups,
+  restoreContractDraft,
   updateUserDepartments,
 } from '@/api/admin'
 import type { AccessRole, AuditLogRow, LlmCallRow, Perm } from '@/mock/admin'
-import type { DepartmentScopeUser, LookupItem } from '@/api/admin'
+import type { ContractTrashItem, DepartmentScopeUser, LookupItem } from '@/api/admin'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
 const modules = ref<string[]>([])
@@ -45,7 +47,7 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(() => { load(); loadLookups(); loadDepartmentScopes() })
+onMounted(() => { load(); loadLookups(); loadDepartmentScopes(); loadTrash() })
 
 const filteredLogs = computed(() => {
   const kw = keyword.value.trim()
@@ -114,6 +116,37 @@ const lookupLoading = ref(false)
 const scopeUsers = ref<DepartmentScopeUser[]>([])
 const scopeDrafts = ref<Record<number, string[]>>({})
 const scopeSavingId = ref<number | null>(null)
+const trashRows = ref<ContractTrashItem[]>([])
+const trashLoading = ref(false)
+const restoringItemId = ref<number | null>(null)
+
+async function loadTrash() {
+  trashLoading.value = true
+  try {
+    trashRows.value = await getContractTrash()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '合同回收站加载失败')
+  } finally {
+    trashLoading.value = false
+  }
+}
+
+async function restoreTrashItem(item: ContractTrashItem) {
+  restoringItemId.value = item.item_id
+  try {
+    await restoreContractDraft(item.batch_id, item.item_id)
+    ElMessage.success('合同草稿已恢复')
+    await loadTrash()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '合同草稿恢复失败')
+  } finally {
+    restoringItemId.value = null
+  }
+}
+
+function formatTrashTime(value: string) {
+  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
 
 async function loadDepartmentScopes() {
   try {
@@ -482,6 +515,40 @@ function exportCsv() {
           </el-card>
         </div>
       </el-tab-pane>
+      <el-tab-pane label="合同回收站" name="trash">
+        <div v-loading="trashLoading" class="trash-pane">
+          <el-empty v-if="!trashLoading && !trashRows.length" description="回收站为空" />
+          <el-table v-else :data="trashRows" style="width: 100%" empty-text="回收站为空">
+            <el-table-column prop="filename" label="合同名称" min-width="200" />
+            <el-table-column prop="contract_type" label="合同类型" width="150" />
+            <el-table-column prop="department" label="归属部门" width="130" />
+            <el-table-column label="删除时间" width="180">
+              <template #default="{ row }"><span class="mono">{{ formatTrashTime(row.deleted_at) }}</span></template>
+            </el-table-column>
+            <el-table-column label="到期时间" width="180">
+              <template #default="{ row }"><span class="mono">{{ formatTrashTime(row.expires_at) }}</span></template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" align="right">
+              <template #default="{ row }">
+                <el-tooltip :content="row.recoverable ? '恢复到合同收件箱' : '已超过恢复期限'">
+                  <span>
+                    <el-button
+                      type="primary"
+                      plain
+                      size="small"
+                      :icon="'RefreshLeft'"
+                      :disabled="!row.recoverable"
+                      :loading="restoringItemId === row.item_id"
+                      :aria-label="`恢复 ${row.filename}`"
+                      @click="restoreTrashItem(row)"
+                    >恢复</el-button>
+                  </span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -641,5 +708,8 @@ function exportCsv() {
   .llm-stats { grid-template-columns: 1fr 1fr; }
   .config-grid { grid-template-columns: 1fr; }
   .scope-row { grid-template-columns: 1fr; }
+}
+.trash-pane {
+  min-height: 180px;
 }
 </style>

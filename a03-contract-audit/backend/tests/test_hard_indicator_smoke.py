@@ -45,8 +45,17 @@ def test_fresh_database_migration_matches_orm_metadata(tmp_path: Path):
     _run_alembic(backend_dir, database, "upgrade", "head")
 
     engine = create_engine(f"sqlite:///{database.as_posix()}")
-    migrated_tables = set(inspect(engine).get_table_names()) - {"alembic_version"}
+    inspector = inspect(engine)
+    migrated_tables = set(inspector.get_table_names()) - {"alembic_version"}
     assert migrated_tables == set(Base.metadata.tables)
+    import_batch_columns = {column["name"] for column in inspector.get_columns("import_batches")}
+    assert "request_fingerprint" in import_batch_columns
+    contract_foreign_keys = {
+        (tuple(key["constrained_columns"]), key["referred_table"], tuple(key["referred_columns"]))
+        for key in inspector.get_foreign_keys("contracts")
+    }
+    assert (("type_confirmed_by",), "users", ("id",)) in contract_foreign_keys
+    assert (("deleted_by",), "users", ("id",)) in contract_foreign_keys
 
     _run_alembic(backend_dir, database, "downgrade", "base")
     remaining_tables = set(inspect(engine).get_table_names()) - {"alembic_version"}

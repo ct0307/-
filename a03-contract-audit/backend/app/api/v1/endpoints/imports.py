@@ -1,6 +1,7 @@
 """可恢复合同导入收件箱端点。"""
 
 import hashlib
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,23 @@ _MAX_TOTAL_BYTES = 500 * 1024 * 1024
 
 def _dispatch_import_item(item_id: int) -> str:
     return dispatch_import_item(item_id)
+
+
+def _request_fingerprint(files: list[UploadFile], department: str) -> str:
+    payload = []
+    for file in files:
+        content = file.file.read()
+        file.file.seek(0)
+        payload.append({
+            "filename": os.path.basename(file.filename or "unknown"),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        })
+    encoded = json.dumps(
+        {"department": department, "files": payload},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _item_out(item: ImportBatchItem) -> ImportItemOut:
@@ -71,7 +89,7 @@ def _get_batch(db: Session, batch_id: int, user: User) -> ImportBatch:
     batch = db.query(ImportBatch).filter(ImportBatch.id == batch_id).first()
     if not batch:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "导入批次不存在")
-    if user.role == "admin" or batch.owner_id == user.id:
+    if user.role == "admin":
         return batch
     departments = {
         item.contract.department
@@ -79,6 +97,8 @@ def _get_batch(db: Session, batch_id: int, user: User) -> ImportBatch:
         if item.contract is not None and item.status != "deleted"
     }
     if not departments:
+        if batch.owner_id == user.id:
+            return batch
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该导入批次")
     for department in departments:
         require_department_access(user, department)
@@ -106,18 +126,29 @@ def create_import(
     key = idempotency_key.strip()
     if not 8 <= len(key) <= 128:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Idempotency-Key 长度必须为 8 至 128")
+    if not files or len(files) > _MAX_BATCH_FILES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次必须上传 1 至 200 份合同")
+    target_department = (department or user.department).strip()
+    require_department_access(user, target_department)
+    fingerprint = _request_fingerprint(files, target_department)
     existing = db.query(ImportBatch).filter(
         ImportBatch.owner_id == user.id,
         ImportBatch.idempotency_key == key,
     ).first()
     if existing:
+        if existing.request_fingerprint and existing.request_fingerprint != fingerprint:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {"code": "IDEMPOTENCY_CONFLICT", "message": "幂等键已用于其他导入请求"},
+            )
         return _batch_out(existing)
-    if not files or len(files) > _MAX_BATCH_FILES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次必须上传 1 至 200 份合同")
-    target_department = (department or user.department).strip()
-    require_department_access(user, target_department)
 
-    batch = ImportBatch(owner_id=user.id, idempotency_key=key, total=len(files))
+    batch = ImportBatch(
+        owner_id=user.id,
+        idempotency_key=key,
+        request_fingerprint=fingerprint,
+        total=len(files),
+    )
     db.add(batch)
     db.flush()
     os.makedirs(settings.storage_path, exist_ok=True)

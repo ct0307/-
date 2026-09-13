@@ -2,7 +2,7 @@
 // 合同合规审查（真实接口核心闭环）：上传→解析→审查→复核→生成整改。
 // 闭环逻辑迁移自 WorkbenchView，数据落 audit-session store。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ArrowRight, WarningFilled } from '@element-plus/icons-vue'
+import { ArrowRight, RefreshRight, View, WarningFilled } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getLookups } from '@/api/admin'
@@ -166,6 +166,37 @@ async function auditReadyItems() {
   }
 }
 
+const batchStatusLabel = {
+  queued: '等待审查',
+  running: '审查中',
+  done: '已完成',
+  partial_failed: '部分失败',
+  failed: '审查失败',
+} as const
+
+const batchItemStatusLabel = {
+  queued: '等待中',
+  parsing: '解析中',
+  auditing: '审查中',
+  done: '已完成',
+  failed: '失败',
+} as const
+
+async function retryAuditBatch() {
+  try {
+    const result = await batchStore.retry(
+      dimensions.value.filter((item) => item.on).map((item) => item.key),
+    )
+    ElMessage.success(`已重新提交 ${result?.retried ?? 0} 个失败项`)
+  } catch {
+    ElMessage.error(batchStore.error || '失败项重试失败')
+  }
+}
+
+function openBatchResult(contractId: number) {
+  router.push({ path: '/history', query: { contract: `C${String(contractId).padStart(4, '0')}` } })
+}
+
 // —— 维度关键词映射：用于判断风险条目属于哪个维度 ——
 const _DIM_KEYWORDS: Record<string, string[]> = {
   legal:       ['合规', '法律', '主体', '资格', '效力', '合同主体'],
@@ -291,6 +322,48 @@ const onboardSteps = [
     <div class="right-stack">
       <el-card shadow="never" class="result-panel">
         <template #header><span class="panel-title">智能审查结果</span></template>
+        <section
+          v-if="batchStore.batch"
+          class="batch-result"
+          role="region"
+          :aria-label="`审查批次 ${batchStore.batch.id}`"
+        >
+          <div class="batch-result-head">
+            <div>
+              <span class="eyebrow mono">批次 #{{ batchStore.batch.id }}</span>
+              <h2>{{ batchStatusLabel[batchStore.batch.status] }}</h2>
+            </div>
+            <el-button
+              v-if="batchStore.batch.failed"
+              :icon="RefreshRight"
+              :loading="batchStore.loading"
+              @click="retryAuditBatch"
+            >重试失败项</el-button>
+          </div>
+          <el-progress :percentage="batchStore.progress" :status="batchStore.batch.failed ? 'exception' : 'success'" />
+          <p class="batch-summary mono">
+            已处理 {{ batchStore.batch.completed }} / {{ batchStore.batch.total }}，失败 {{ batchStore.batch.failed }}
+          </p>
+          <div class="batch-items">
+            <div v-for="item in batchStore.batch.items" :key="item.id" class="batch-item">
+              <div class="batch-item-main">
+                <strong>{{ item.filename }}</strong>
+                <span v-if="item.error" class="batch-item-error">{{ item.error }}</span>
+              </div>
+              <el-tag :type="item.status === 'failed' ? 'danger' : item.status === 'done' ? 'success' : 'info'" size="small">
+                {{ batchItemStatusLabel[item.status] }}
+              </el-tag>
+              <el-tooltip v-if="item.status === 'done'" content="在审查历史中查看风险结果">
+                <el-button
+                  circle
+                  :icon="View"
+                  :aria-label="`查看 ${item.filename} 的审查结果`"
+                  @click="openBatchResult(item.contract_id)"
+                />
+              </el-tooltip>
+            </div>
+          </div>
+        </section>
         <!-- 3 步引导：未上传 / 已上传未审查时显示，代替纯文字空状态 -->
         <div v-if="session.step < 2" class="onboard">
           <div
@@ -433,6 +506,51 @@ const onboardSteps = [
 }
 .result-panel {
   min-height: calc(100vh - 124px);
+}
+.batch-result {
+  margin: -4px 0 20px;
+  padding: 14px 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+.batch-result-head,
+.batch-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.batch-result-head {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.batch-result-head h2 {
+  margin: 3px 0 0;
+  font-size: 18px;
+}
+.batch-items {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.batch-item {
+  min-height: 52px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.batch-item-main {
+  flex: 1;
+  min-width: 0;
+}
+.batch-item-main strong,
+.batch-item-error {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.batch-item-main strong {
+  font-size: 13px;
+}
+.batch-item-error {
+  margin-top: 3px;
+  color: var(--seal);
+  font-size: 12px;
 }
 .upload-panel :deep(.el-upload-dragger) {
   min-height: 156px;
@@ -993,6 +1111,13 @@ const onboardSteps = [
   padding-top: 4px;
 }
 @media (max-width: 640px) {
+  .batch-result-head {
+    align-items: flex-start;
+  }
+  .batch-item {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
   .onboard {
     flex-direction: column;
     min-height: 0;

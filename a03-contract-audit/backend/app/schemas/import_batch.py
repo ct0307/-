@@ -46,3 +46,15 @@ class ImportBatchOut(BaseModel):
 class ConfirmImportItem(BaseModel):
     contract_type: str = Field(min_length=1, max_length=64)
     department: str = Field(min_length=1, max_length=64)
+
+
+class ContractTrashItemOut(BaseModel):
+    batch_id: int
+    item_id: int
+    contract_id: int
+    filename: str
+    contract_type: str
+    department: str
+    deleted_at: datetime
+    expires_at: datetime
+    recoverable: bool
