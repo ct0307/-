@@ -135,6 +135,31 @@ test('reuses the idempotency key when retrying the same failed audit action', as
   expect(keys[1]).toBe(keys[0])
 })
 
+test('reuses the direct file audit key when only file metadata timestamp changes', async () => {
+  const keys: string[] = []
+  let attempts = 0
+  const useStore = createBatchStore({
+    ...fakeApi([batch('done', ['done'])]),
+    createBatch: async (_files, _contractType, _dimensions, key) => {
+      keys.push(key ?? '')
+      attempts += 1
+      if (attempts === 1) throw new Error('网络超时')
+      return batch('done', ['done'])
+    },
+  }, 'retry-file-audit-key')
+  const store = useStore()
+
+  await expect(store.create([
+    new File(['same'], 'same.txt', { lastModified: 1 }),
+  ])).rejects.toThrow('网络超时')
+  await store.create([
+    new File(['same'], 'same.txt', { lastModified: 2 }),
+  ])
+
+  expect(keys).toHaveLength(2)
+  expect(keys[1]).toBe(keys[0])
+})
+
 test('keeps the idempotency key when initial polling fails after creation', async () => {
   const keys: string[] = []
   let pollingAttempts = 0

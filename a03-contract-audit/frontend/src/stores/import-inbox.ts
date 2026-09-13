@@ -37,7 +37,6 @@ function uploadSignature(batchId: number | null, department: string, files: File
       name: file.name,
       size: file.size,
       type: file.type,
-      lastModified: file.lastModified,
     })),
   })
 }

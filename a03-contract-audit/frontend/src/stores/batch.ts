@@ -39,7 +39,6 @@ function fileActionSignature(files: File[], contractType: string, dimensions: st
       name: file.name,
       size: file.size,
       type: file.type,
-      lastModified: file.lastModified,
     })),
   })
 }

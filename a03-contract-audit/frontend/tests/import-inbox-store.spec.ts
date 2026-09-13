@@ -161,10 +161,11 @@ test('reuses the action key when retrying the same failed upload', async () => {
       return batchFixture
     },
   }), 'retry-import-key')()
-  const files = [new File(['same'], 'same.txt', { lastModified: 1 })]
+  const firstAttempt = [new File(['same'], 'same.txt', { lastModified: 1 })]
+  const retryAttempt = [new File(['same'], 'same.txt', { lastModified: 2 })]
 
-  await expect(store.create(files, '法务部')).rejects.toThrow('网络超时')
-  await store.create(files, '法务部')
+  await expect(store.create(firstAttempt, '法务部')).rejects.toThrow('网络超时')
+  await store.create(retryAttempt, '法务部')
 
   expect(keys).toHaveLength(2)
   expect(keys[1]).toBe(keys[0])
