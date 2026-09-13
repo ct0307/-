@@ -14,7 +14,7 @@ import time
 from functools import lru_cache
 
 from app.core.logging import get_logger
-from app.llm.base import LLMAdapter, LLMError, LLMResponse
+from app.llm.base import ChatOptions, LLMAdapter, LLMError, LLMResponse
 
 log = get_logger("embed.local")
 
@@ -31,22 +31,38 @@ class LocalEmbeddingAdapter(LLMAdapter):
         """加载模型（线程安全依赖 GIL，FastAPI 单进程模式下足够）。"""
         if self._model is not None:
             return self._model
+        safe_error: LLMError | None = None
         try:
             from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
-            raise LLMError(
+        except ImportError:
+            safe_error = LLMError(
                 "sentence-transformers 未安装，请执行：pip install sentence-transformers"
-            ) from exc
+            )
+        if safe_error is not None:
+            raise safe_error
         log.info("embed.load_model", model=self.model_name)
         try:
             self._model = SentenceTransformer(self.model_name, local_files_only=True)
         except Exception as exc:
-            log.error("embed.load_model_failed", model=self.model_name, error=str(exc)[:200])
-            raise LLMError(f"本地 embedding 模型加载失败：{exc}") from exc
+            log.error(
+                "embed.load_model_failed",
+                model=self.model_name,
+                exception_type=type(exc).__name__,
+            )
+            safe_error = LLMError("本地 embedding 模型加载失败")
+        if safe_error is not None:
+            raise safe_error
         log.info("embed.model_ready", model=self.model_name, dim=self._model.get_sentence_embedding_dimension())
         return self._model
 
-    def chat(self, system: str, user: str, *, temperature: float = 0.2) -> LLMResponse:
+    def chat(
+        self,
+        system: str,
+        user: str,
+        *,
+        temperature: float = 0.2,
+        options: ChatOptions | None = None,
+    ) -> LLMResponse:
         """本地 adapter 只负责 embedding，chat 不支持。业务层用 get_llm_adapter()。"""
         raise NotImplementedError(
             "LocalEmbeddingAdapter 不支持 chat()，请通过 get_llm_adapter() 获取 chat 适配器"
@@ -57,12 +73,15 @@ class LocalEmbeddingAdapter(LLMAdapter):
             return []
         model = self._load()
         start = time.perf_counter()
+        safe_error: LLMError | None = None
         try:
             # encode() 返回 numpy ndarray，shape=(len(texts), dim)
             vectors = model.encode(texts, normalize_embeddings=self.normalize, show_progress_bar=False)
         except Exception as exc:
-            log.error("embed.local_failed", error=str(exc)[:200])
-            raise LLMError(f"本地 embedding 失败：{exc}") from exc
+            log.error("embed.local_failed", exception_type=type(exc).__name__)
+            safe_error = LLMError("本地 embedding 失败")
+        if safe_error is not None:
+            raise safe_error
         latency_ms = int((time.perf_counter() - start) * 1000)
         log.info("embed.local_done", model=self.model_name, count=len(texts), latency_ms=latency_ms)
         return [v.tolist() for v in vectors]
