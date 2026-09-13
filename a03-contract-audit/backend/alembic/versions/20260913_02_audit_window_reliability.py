@@ -49,9 +49,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # 旧代码只认识 auditing，先恢复状态，再按升级的逆序回退结构。
-    op.execute("UPDATE audit_batch_items SET status = 'auditing' WHERE status = 'reviewing'")
-    op.execute("UPDATE contracts SET status = 'auditing' WHERE status = 'reviewing'")
+    # 旧代码只认识 auditing，且没有 review_required；后者已有可读结果，
+    # 因此映射为 done，并保留合同复核标记及任务 result_json，而不是伪装成失败。
+    op.execute(
+        "UPDATE audit_batch_items SET status = 'auditing' "
+        "WHERE status IN ('reviewing', 'validating')"
+    )
+    op.execute("UPDATE audit_batch_items SET status = 'done' WHERE status = 'review_required'")
+    op.execute(
+        "UPDATE contracts SET status = 'auditing' "
+        "WHERE status IN ('reviewing', 'validating')"
+    )
+    op.execute("UPDATE contracts SET status = 'done' WHERE status = 'review_required'")
+    op.execute("UPDATE audit_batches SET status = 'done' WHERE status = 'review_required'")
     with op.batch_alter_table("risks") as batch:
         batch.drop_column("secondary_review_reason")
         batch.drop_column("secondary_review_status")

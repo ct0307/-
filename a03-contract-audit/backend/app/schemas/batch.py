@@ -2,7 +2,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.services.audit.result_snapshot import quality_snapshot
 
 BatchStatus = Literal[
     "queued", "running", "done", "review_required", "partial_failed", "failed",
@@ -25,6 +27,24 @@ class BatchItemOut(BaseModel):
     requires_review: bool = False
     ocr_confidence: float | None = None
     review_reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_historical_quality_snapshot(cls, value):
+        if isinstance(value, dict):
+            return value
+        quality = quality_snapshot(value, getattr(value, "contract", None))
+        return {
+            field: getattr(value, field)
+            for field in (
+                "id", "contract_id", "filename", "status", "error", "error_code",
+                "attempts", "started_at", "finished_at",
+            )
+        } | {
+            "requires_review": quality.requires_review,
+            "ocr_confidence": quality.ocr_confidence,
+            "review_reason": quality.review_reason,
+        }
 
     model_config = {"from_attributes": True}
 

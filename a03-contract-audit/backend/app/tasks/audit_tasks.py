@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.models.models import AuditBatchItem, Contract, ImportBatchItem
 from app.llm.base import LLMError
 from app.services.audit.runner import StaleAuditRun, run_audit
+from app.services.audit.window_repository import TransientPersistenceError
 from app.services.batch.service import (
     ACTIVE_AUDIT_ITEM_STATUSES,
     retry_failed_item,
@@ -40,6 +41,12 @@ def classify_task_error(exc: Exception) -> TaskErrorInfo:
     """把内部异常映射成可持久化、可展示的安全错误。"""
     if isinstance(exc, StaleAuditRun):
         return TaskErrorInfo("STALE_AUDIT_RUN", "审查任务已被更新的运行取代", False)
+    if isinstance(exc, TransientPersistenceError):
+        return TaskErrorInfo(
+            "AUDIT_PERSISTENCE_UNAVAILABLE",
+            "审查检查点暂时不可用，请稍后重试",
+            True,
+        )
     if isinstance(exc, LLMError):
         messages = {
             "MODEL_TIMEOUT": "模型调用超时，请稍后重试",
@@ -163,6 +170,22 @@ def run_contract_audit(
         )
         if item and item.status in {"done", "review_required"}:
             return {"contract_id": contract_id, "status": f"already_{item.status}"}
+        contract = (
+            db.query(Contract)
+            .filter(Contract.id == contract_id)
+            .with_for_update()
+            .first()
+        )
+        if not contract:
+            if item:
+                item.status = "failed"
+                item.error = "合同不存在"
+                item.finished_at = datetime.now(timezone.utc)
+                item.lease_expires_at = None
+                item.execution_token = None
+                _return_import_item_to_ready(db, item)
+                db.commit()
+            return {"contract_id": contract_id, "error": "not_found"}
         if item:
             now = datetime.now(timezone.utc)
             if item.status in ACTIVE_AUDIT_ITEM_STATUSES and _lease_is_active(
@@ -173,26 +196,57 @@ def run_contract_audit(
             if item.status == "failed":
                 db.commit()
                 return {"contract_id": contract_id, "status": "already_failed"}
+            audit_generation = item.audit_generation
+            if contract.audit_generation != audit_generation:
+                _finalize_stale_item(
+                    db,
+                    item_id=item.id,
+                    contract_id=contract_id,
+                    audit_generation=audit_generation,
+                )
+                return {"contract_id": contract_id, "status": "stale"}
             item.status = transition_item(item.status, "parsing") if item.status == "queued" else "parsing"
             item.started_at = item.started_at or now
             item.lease_expires_at = now + timedelta(minutes=30)
             execution_token = uuid.uuid4().hex
             item.execution_token = execution_token
-            audit_generation = item.audit_generation
+            db.flush()
+            item_fence = exists().where(
+                AuditBatchItem.id == item.id,
+                AuditBatchItem.contract_id == contract_id,
+                AuditBatchItem.audit_generation == audit_generation,
+                AuditBatchItem.execution_token == execution_token,
+            )
+            activated = db.query(Contract).filter(
+                Contract.id == contract_id,
+                Contract.audit_generation == audit_generation,
+                item_fence,
+            ).update({Contract.status: "reviewing"}, synchronize_session=False)
+            if activated != 1:
+                db.rollback()
+                _finalize_stale_item(
+                    db,
+                    item_id=item.id,
+                    contract_id=contract_id,
+                    audit_generation=audit_generation,
+                )
+                return {"contract_id": contract_id, "status": "stale"}
             db.commit()
 
-        contract = db.query(Contract).filter(Contract.id == contract_id).first()
-        if not contract:
-            if item:
-                item.status = "failed"
-                item.error = "合同不存在"
-                item.finished_at = datetime.now(timezone.utc)
-                _return_import_item_to_ready(db, item)
-                db.commit()
-            return {"contract_id": contract_id, "error": "not_found"}
         if item:
-            item.status = transition_item(item.status, "reviewing")
-            contract.status = "reviewing"
+            promoted = db.query(AuditBatchItem).filter(
+                AuditBatchItem.id == item.id,
+                AuditBatchItem.contract_id == contract_id,
+                AuditBatchItem.audit_generation == audit_generation,
+                AuditBatchItem.execution_token == execution_token,
+                AuditBatchItem.status == "parsing",
+            ).update(
+                {AuditBatchItem.status: "reviewing"},
+                synchronize_session=False,
+            )
+            if promoted != 1:
+                db.rollback()
+                raise StaleAuditRun("审查任务 execution token 已失效")
             db.commit()
         result = run_audit(
             db,
@@ -311,6 +365,51 @@ def run_contract_audit(
         raise
     finally:
         db.close()
+
+
+def _finalize_stale_item(
+    db: Session,
+    *,
+    item_id: int,
+    contract_id: int,
+    audit_generation: int,
+) -> None:
+    """用一次性 token 终结陈旧任务，不触碰合同当前代次。"""
+    db.rollback()
+    stale_token = uuid.uuid4().hex
+    claimed = db.query(AuditBatchItem).filter(
+        AuditBatchItem.id == item_id,
+        AuditBatchItem.contract_id == contract_id,
+        AuditBatchItem.audit_generation == audit_generation,
+        AuditBatchItem.status.notin_({"done", "review_required", "failed"}),
+    ).update(
+        {
+            AuditBatchItem.execution_token: stale_token,
+            AuditBatchItem.lease_expires_at: None,
+        },
+        synchronize_session=False,
+    )
+    if claimed != 1:
+        db.rollback()
+        return
+    finalized = db.query(AuditBatchItem).filter(
+        AuditBatchItem.id == item_id,
+        AuditBatchItem.execution_token == stale_token,
+    ).update(
+        {
+            AuditBatchItem.status: "failed",
+            AuditBatchItem.error_code: "STALE_AUDIT_RUN",
+            AuditBatchItem.error: "审查任务已被更新的运行取代",
+            AuditBatchItem.execution_token: None,
+            AuditBatchItem.lease_expires_at: None,
+            AuditBatchItem.finished_at: datetime.now(timezone.utc),
+        },
+        synchronize_session=False,
+    )
+    if finalized != 1:
+        db.rollback()
+        return
+    db.commit()
 
 
 def _complete_import_item(db: Session, item: AuditBatchItem) -> None:

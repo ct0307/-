@@ -146,7 +146,7 @@ def test_create_batch_keeps_dispatch_failure_recoverable_and_safe(monkeypatch, t
     assert "secret" not in repr(result.model_dump())
 
 
-def test_completed_batch_item_exposes_contract_review_quality(tmp_path):
+def test_completed_batch_item_uses_its_snapshot_instead_of_newer_contract_quality(tmp_path):
     db = _session()
     user = _user(db)
     contract = Contract(
@@ -154,9 +154,9 @@ def test_completed_batch_item_exposes_contract_review_quality(tmp_path):
         storage_path=str(tmp_path / "scan.pdf"),
         department=user.department,
         uploaded_by=user.id,
-        requires_review=True,
-        ocr_confidence=0.42,
-        review_reason="OCR 平均置信度低于 75%",
+        requires_review=False,
+        ocr_confidence=0.99,
+        review_reason="新一代合同状态",
     )
     batch = AuditBatch(
         owner_id=user.id,
@@ -172,7 +172,12 @@ def test_completed_batch_item_exposes_contract_review_quality(tmp_path):
         AuditBatchItem(
             contract_id=contract.id,
             filename=contract.filename,
-            status="done",
+            status="review_required",
+            result_json=json.dumps({
+                "requires_review": True,
+                "ocr_confidence": 0.42,
+                "review_reason": "旧任务 OCR 平均置信度低于 75%",
+            }, ensure_ascii=False),
         )
     )
     db.commit()
@@ -180,10 +185,51 @@ def test_completed_batch_item_exposes_contract_review_quality(tmp_path):
     payload = BatchOut.model_validate(batch).model_dump()
     item = payload["items"][0]
 
-    assert item["status"] == "done"
+    assert item["status"] == "review_required"
     assert item["requires_review"] is True
     assert item["ocr_confidence"] == 0.42
-    assert item["review_reason"] == "OCR 平均置信度低于 75%"
+    assert item["review_reason"] == "旧任务 OCR 平均置信度低于 75%"
+
+
+def test_terminal_batch_item_defensively_ignores_corrupt_quality_snapshot(tmp_path):
+    db = _session()
+    user = _user(db)
+    contract = Contract(
+        filename="scan.pdf",
+        storage_path=str(tmp_path / "scan.pdf"),
+        department=user.department,
+        uploaded_by=user.id,
+        requires_review=True,
+        ocr_confidence=0.45,
+        review_reason="当前合同属于更新代次",
+    )
+    batch = AuditBatch(
+        owner_id=user.id,
+        department=user.department,
+        idempotency_key="corrupt-quality-snapshot",
+        status="done",
+        total=1,
+        completed=1,
+    )
+    db.add_all([contract, batch])
+    db.flush()
+    batch.items.append(AuditBatchItem(
+        contract_id=contract.id,
+        filename=contract.filename,
+        status="done",
+        result_json=json.dumps({
+            "requires_review": "yes",
+            "ocr_confidence": {"secret": "bad"},
+            "review_reason": ["bad"],
+        }),
+    ))
+    db.commit()
+
+    item = BatchOut.model_validate(batch).model_dump()["items"][0]
+
+    assert item["requires_review"] is False
+    assert item["ocr_confidence"] is None
+    assert item["review_reason"] is None
 
 
 def test_create_batch_rejects_more_than_two_hundred_files(tmp_path):
@@ -525,6 +571,65 @@ def test_old_generation_failure_cannot_overwrite_new_generation(monkeypatch, tmp
         assert saved_item.status == "validating"
         assert saved_item.execution_token is not None
         assert saved_item.error_code is None
+
+
+def test_stale_generation_worker_never_reopens_newer_completed_contract(monkeypatch, tmp_path):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'stale-start.db').as_posix()}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as setup:
+        user = _user(setup)
+        contract = Contract(
+            filename="stale.txt",
+            storage_path=str(tmp_path / "stale.txt"),
+            department=user.department,
+            uploaded_by=user.id,
+            status="reviewing",
+            audit_generation=1,
+        )
+        batch = AuditBatch(
+            owner_id=user.id,
+            department=user.department,
+            idempotency_key="stale-start",
+        )
+        setup.add_all([contract, batch])
+        setup.flush()
+        stale_item = AuditBatchItem(
+            batch_id=batch.id,
+            contract_id=contract.id,
+            filename=contract.filename,
+            status="queued",
+            audit_generation=1,
+        )
+        setup.add(stale_item)
+        setup.commit()
+        contract_id, stale_item_id = contract.id, stale_item.id
+
+    # 另一会话已完整发布更新代次，随后旧 worker 才真正启动。
+    with Session(engine) as newer:
+        current = newer.get(Contract, contract_id)
+        current.audit_generation = 2
+        current.status = "done"
+        current.requires_review = False
+        newer.commit()
+
+    monkeypatch.setattr(audit_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(
+        audit_tasks,
+        "run_audit",
+        lambda *_args, **_kwargs: pytest.fail("陈旧 worker 不得进入审查计算"),
+    )
+
+    result = run_contract_audit.run(contract_id, ["legal"], stale_item_id)
+
+    assert result == {"contract_id": contract_id, "status": "stale"}
+    with Session(engine) as verify:
+        saved_contract = verify.get(Contract, contract_id)
+        saved_item = verify.get(AuditBatchItem, stale_item_id)
+        assert (saved_contract.audit_generation, saved_contract.status) == (2, "done")
+        assert saved_item.status == "failed"
+        assert saved_item.error_code == "STALE_AUDIT_RUN"
+        assert saved_item.execution_token is None
+        assert saved_item.lease_expires_at is None
 
 
 def test_worker_failure_rechecks_token_inside_publish_transaction(monkeypatch, tmp_path):

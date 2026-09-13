@@ -162,7 +162,9 @@ def test_dimensions_are_sorted_deduplicated_and_sha256_hashed(store):
         assert row.dimensions_hash == hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def test_corrupt_valid_result_and_database_errors_propagate(store):
+def test_corrupt_valid_result_propagates_but_transient_database_errors_are_typed(store):
+    from app.services.audit.window_repository import TransientPersistenceError
+
     repo = repository(store)
     repo.save_valid(request(), result())
     with store.begin() as db:
@@ -170,10 +172,21 @@ def test_corrupt_valid_result_and_database_errors_propagate(store):
     with pytest.raises(ValidationError):
         repo.load_valid(request())
     with patch.object(Session, "execute", side_effect=OperationalError("查询", {}, Exception("数据库不可用"))):
-        with pytest.raises(OperationalError):
+        with pytest.raises(TransientPersistenceError):
             repo.load_valid(request())
-        with pytest.raises(OperationalError):
+        with pytest.raises(TransientPersistenceError):
             repo.save_valid(request(), result())
+
+
+def test_transient_checkpoint_failure_is_retryable_but_programming_errors_are_not():
+    from app.services.audit.window_repository import TransientPersistenceError
+    from app.tasks.audit_tasks import classify_task_error
+
+    transient = classify_task_error(TransientPersistenceError("checkpoint unavailable"))
+    programming = classify_task_error(ValueError("checkpoint contract mismatch"))
+
+    assert (transient.code, transient.retryable) == ("AUDIT_PERSISTENCE_UNAVAILABLE", True)
+    assert (programming.code, programming.retryable) == ("AUDIT_INTERNAL_ERROR", False)
 
 
 def test_only_valid_complete_checkpoints_are_reused(store):
@@ -377,13 +390,18 @@ def test_migration_revision_and_sqlite_round_trip(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'migration.db'}")
     with engine.begin() as connection:
         connection.exec_driver_sql("CREATE TABLE contracts (id INTEGER PRIMARY KEY, status VARCHAR(32))")
-        connection.exec_driver_sql("CREATE TABLE audit_batch_items (id INTEGER PRIMARY KEY, status VARCHAR(32))")
+        connection.exec_driver_sql("CREATE TABLE audit_batches (id INTEGER PRIMARY KEY, status VARCHAR(32))")
+        connection.exec_driver_sql("CREATE TABLE audit_batch_items (id INTEGER PRIMARY KEY, status VARCHAR(32), result_json TEXT)")
         connection.exec_driver_sql("CREATE TABLE risks (id INTEGER PRIMARY KEY)")
         connection.exec_driver_sql("CREATE TABLE llm_call_logs (id INTEGER PRIMARY KEY, audit_job_id INTEGER, finish_reason VARCHAR(32))")
         connection.exec_driver_sql("INSERT INTO risks (id) VALUES (9)")
         connection.exec_driver_sql("INSERT INTO llm_call_logs (id, audit_job_id, finish_reason) VALUES (8, 10, 'stop')")
-        for table in ("contracts", "audit_batch_items"):
-            connection.exec_driver_sql(f"INSERT INTO {table} (id, status) VALUES (1, 'auditing'), (2, 'done')")
+        connection.exec_driver_sql("INSERT INTO contracts (id, status) VALUES (1, 'auditing'), (2, 'done')")
+        connection.exec_driver_sql(
+            "INSERT INTO audit_batch_items (id, status, result_json) VALUES "
+            "(1, 'auditing', '{}'), (2, 'done', '{}')"
+        )
+        connection.exec_driver_sql("INSERT INTO audit_batches (id, status) VALUES (1, 'running'), (2, 'done')")
         with Operations.context(MigrationContext.configure(connection)):
             migration.upgrade()
             assert inspect(connection).has_table("audit_window_runs")
@@ -395,13 +413,61 @@ def test_migration_revision_and_sqlite_round_trip(tmp_path):
             ).one() == ("all", 1, "unknown")
             for table in ("contracts", "audit_batch_items"):
                 assert connection.execute(text(f"SELECT status FROM {table} ORDER BY id")).scalars().all() == ["reviewing", "done"]
+            connection.exec_driver_sql(
+                "INSERT INTO contracts (id, status) VALUES "
+                "(3, 'validating'), (4, 'review_required')"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO audit_batch_items (id, status, result_json) VALUES "
+                "(3, 'validating', '{}'), "
+                "(4, 'review_required', '{\"requires_review\": true}')"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO audit_batches (id, status) VALUES (3, 'review_required')"
+            )
             migration.downgrade()
             assert not inspect(connection).has_table("audit_window_runs")
             assert {c["name"] for c in inspect(connection).get_columns("llm_call_logs")} == {"id", "audit_job_id", "finish_reason"}
             assert {c["name"] for c in inspect(connection).get_columns("risks")} == {"id"}
             assert connection.exec_driver_sql("SELECT id FROM risks").scalar_one() == 9
             assert connection.exec_driver_sql("SELECT id, audit_job_id, finish_reason FROM llm_call_logs").one() == (8, 10, "stop")
-            for table in ("contracts", "audit_batch_items"):
-                assert connection.execute(text(f"SELECT status FROM {table} ORDER BY id")).scalars().all() == ["auditing", "done"]
+            assert connection.execute(text("SELECT status FROM contracts ORDER BY id")).scalars().all() == [
+                "auditing", "done", "auditing", "done",
+            ]
+            assert connection.execute(text("SELECT status FROM audit_batch_items ORDER BY id")).scalars().all() == [
+                "auditing", "done", "auditing", "done",
+            ]
+            assert connection.exec_driver_sql(
+                "SELECT result_json FROM audit_batch_items WHERE id = 4"
+            ).scalar_one() == '{"requires_review": true}'
+            assert connection.execute(text("SELECT status FROM audit_batches ORDER BY id")).scalars().all() == [
+                "running", "done", "done",
+            ]
             migration.upgrade()
+    engine.dispose()
+
+
+def test_sqlite_dev_migration_rewrites_legacy_auditing_statuses_idempotently(
+    monkeypatch, tmp_path
+):
+    from app.db import init_db
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-dev.db'}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE contracts (id INTEGER PRIMARY KEY, status VARCHAR(32))")
+        connection.exec_driver_sql("CREATE TABLE audit_batch_items (id INTEGER PRIMARY KEY, status VARCHAR(32))")
+        connection.exec_driver_sql("INSERT INTO contracts VALUES (1, 'auditing'), (2, 'done')")
+        connection.exec_driver_sql("INSERT INTO audit_batch_items VALUES (1, 'auditing'), (2, 'done')")
+
+    monkeypatch.setattr(init_db, "engine", engine)
+    monkeypatch.setattr(init_db.settings, "DB_BACKEND", "sqlite")
+
+    init_db._migrate_dev_columns()
+    init_db._migrate_dev_columns()
+
+    with engine.connect() as connection:
+        for table in ("contracts", "audit_batch_items"):
+            assert connection.execute(text(f"SELECT status FROM {table} ORDER BY id")).scalars().all() == [
+                "reviewing", "done",
+            ]
     engine.dispose()

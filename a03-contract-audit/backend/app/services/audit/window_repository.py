@@ -6,7 +6,7 @@ import json
 from typing import Callable
 
 from sqlalchemy import case, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -19,6 +19,15 @@ from app.services.audit.review_pipeline import WindowReviewRequest
 
 
 log = get_logger("audit.window_repository")
+
+
+class TransientPersistenceError(RuntimeError):
+    """检查点存储暂时不可用，任务级重试可能恢复。"""
+
+
+def _raise_if_transient(error: DBAPIError) -> None:
+    if isinstance(error, OperationalError) or error.connection_invalidated:
+        raise TransientPersistenceError("audit checkpoint unavailable") from None
 
 
 def dimensions_hash(dimensions: tuple[str, ...]) -> str:
@@ -61,12 +70,16 @@ class SqlAlchemyWindowCheckpoint:
         if request.audit_job_id is None:
             return None
         identity = self._identity(request)
-        with self._session_factory() as db:
-            row = db.execute(select(AuditWindowRun).filter_by(**identity, status="valid")).scalar_one_or_none()
-            if row is None:
-                return None
-            self._check_contract(row, request)
-            return AgentReviewResult.model_validate_json(row.result_json)
+        try:
+            with self._session_factory() as db:
+                row = db.execute(select(AuditWindowRun).filter_by(**identity, status="valid")).scalar_one_or_none()
+                if row is None:
+                    return None
+                self._check_contract(row, request)
+                return AgentReviewResult.model_validate_json(row.result_json)
+        except DBAPIError as error:
+            _raise_if_transient(error)
+            raise
 
     def save_valid(self, request: WindowReviewRequest, result: AgentReviewResult) -> None:
         if request.audit_job_id is None:
@@ -83,11 +96,18 @@ class SqlAlchemyWindowCheckpoint:
                 self._update(row, request, result)
         except IntegrityError:
             # 另一任务可能在首次查询后抢先插入；原事务已回滚，重新打开事务再读。
-            with self._session_factory() as db, db.begin():
-                row = db.execute(select(AuditWindowRun).filter_by(**identity)).scalar_one_or_none()
-                if row is None:
-                    raise
-                self._update(row, request, result)
+            try:
+                with self._session_factory() as db, db.begin():
+                    row = db.execute(select(AuditWindowRun).filter_by(**identity)).scalar_one_or_none()
+                    if row is None:
+                        raise
+                    self._update(row, request, result)
+            except DBAPIError as error:
+                _raise_if_transient(error)
+                raise
+        except DBAPIError as error:
+            _raise_if_transient(error)
+            raise
 
     @staticmethod
     def _check_contract(row: AuditWindowRun, request: WindowReviewRequest) -> None:

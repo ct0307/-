@@ -211,6 +211,13 @@ def _migrate_dev_columns() -> None:
                 if required_columns <= table_columns and name not in existing_indexes:
                     conn.execute(text(ddl))
                     log.info("db.migrate_index", table=table, index=name)
+        for table in ("contracts", "audit_batch_items"):
+            if inspector.has_table(table) and "status" in {
+                column["name"] for column in inspect(conn).get_columns(table)
+            }:
+                conn.execute(text(
+                    f"UPDATE {table} SET status = 'reviewing' WHERE status = 'auditing'"
+                ))
 
 
 def _seed_users() -> None:

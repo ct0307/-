@@ -1,7 +1,6 @@
 """合同端点：上传、解析、触发审查、查询。"""
 import hashlib
 import json
-import math
 import os
 import uuid
 from datetime import timezone
@@ -28,6 +27,7 @@ from app.schemas.contract import (
 from app.services import audit_log
 from app.services import masking
 from app.services.audit.jobs import AuditJobConflict, create_single_audit_job
+from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
 from app.services.audit.runner import apply_parse_quality, run_audit
 from app.services.parser.extractor import (
     extract_document,
@@ -483,7 +483,8 @@ def _audit_response_from_item(
     fallback_risk_count: int | None = None,
 ) -> AuditResponse:
     """从选定任务快照构造响应；任务存在时不读取合同当前代次质量。"""
-    result = _audit_result_snapshot(item)
+    quality = quality_snapshot(item, contract) if item is not None else None
+    result = quality.result if quality is not None else {}
     raw_status = item.status if item is not None else contract.status
     response_status = {
         "failed": "audit_failed",
@@ -514,17 +515,15 @@ def _audit_response_from_item(
             except (KeyError, TypeError, ValueError):
                 continue
 
-    requires_review = response_status == "review_required"
-    raw_ocr_confidence = (
-        result.get("ocr_confidence") if item is not None else contract.ocr_confidence
+    requires_review = (
+        quality.requires_review
+        if quality is not None
+        else response_status == "review_required" or bool(contract.requires_review)
     )
-    ocr_confidence = _safe_ocr_confidence(raw_ocr_confidence)
-    review_reason = None
-    if requires_review:
-        candidate_reason = (
-            result.get("review_reason") if item is not None else contract.review_reason
-        )
-        review_reason = candidate_reason if isinstance(candidate_reason, str) else None
+    ocr_confidence = quality.ocr_confidence if quality is not None else contract.ocr_confidence
+    review_reason = quality.review_reason if quality is not None else (
+        contract.review_reason if requires_review else None
+    )
 
     quality_reasons = result.get("quality_reasons", [])
     if not isinstance(quality_reasons, list) or not all(
@@ -535,7 +534,7 @@ def _audit_response_from_item(
     if not isinstance(issues, list):
         issues = []
     issues = [value for value in issues if isinstance(value, dict)]
-    coverage = _safe_coverage(result.get("coverage"))
+    coverage = safe_coverage(result.get("coverage"))
     retryable_codes = {
         "DISPATCH_PENDING",
         "MODEL_TIMEOUT",
@@ -560,46 +559,6 @@ def _audit_response_from_item(
         issues=issues,
         coverage=coverage,
     )
-
-
-def _audit_result_snapshot(item: AuditBatchItem | None) -> dict:
-    if item is None:
-        return {}
-    try:
-        candidate = json.loads(item.result_json or "{}")
-    except (TypeError, ValueError):
-        return {}
-    return candidate if isinstance(candidate, dict) else {}
-
-
-def _safe_coverage(value: object) -> dict[str, int] | None:
-    if not isinstance(value, dict):
-        return None
-    planned = value.get("planned")
-    completed = value.get("completed")
-    if (
-        not isinstance(planned, int)
-        or isinstance(planned, bool)
-        or not isinstance(completed, int)
-        or isinstance(completed, bool)
-        or planned < 0
-        or completed < 0
-        or completed > planned
-    ):
-        return None
-    return {"planned": planned, "completed": completed}
-
-
-def _safe_ocr_confidence(value: object) -> float | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    try:
-        normalized = float(value)
-    except (OverflowError, ValueError):
-        return None
-    if not math.isfinite(normalized) or not 0 <= normalized <= 1:
-        return None
-    return normalized
 
 
 def _to_cross_out(c: dict) -> CrossCheckOut:
