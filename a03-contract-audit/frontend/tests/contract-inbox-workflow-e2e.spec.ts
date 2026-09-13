@@ -56,7 +56,11 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 }
 
-async function prepare(page: Page) {
+interface PrepareOptions {
+  failContract11Result?: boolean
+}
+
+async function prepare(page: Page, options: PrepareOptions = {}) {
   await page.addInitScript(() => {
     localStorage.setItem('token', 'test-token')
     localStorage.setItem('role', 'legal')
@@ -131,6 +135,9 @@ async function prepare(page: Page) {
       })
     }
     if (path.endsWith('/contracts/11/audit-status')) {
+      if (options.failContract11Result) {
+        return fulfillJson(route, { detail: '审查结果暂时不可用' }, 500)
+      }
       return fulfillJson(route, {
         contract_id: 11,
         status: 'done',
@@ -164,12 +171,24 @@ async function prepare(page: Page) {
         support_validator_version: 'test',
       }])
     }
+    if (path.endsWith('/contracts/12/audit-status')) {
+      return fulfillJson(route, {
+        contract_id: 12,
+        status: 'done',
+        job_id: 502,
+        risk_count: 0,
+        cross_checks: [],
+        requires_review: false,
+        ocr_confidence: 0.98,
+        review_reason: null,
+      })
+    }
+    if (path.endsWith('/contracts/12/risks')) return fulfillJson(route, [])
     return fulfillJson(route, [])
   })
 }
 
-test('uploads mixed contracts, confirms one exception and audits ready items', async ({ page }) => {
-  await prepare(page)
+async function submitAndCompleteBatch(page: Page) {
   await page.goto(`${baseUrl}/audit`)
   await expect(page.getByRole('heading', { name: '待审合同' })).toBeVisible()
 
@@ -195,6 +214,11 @@ test('uploads mixed contracts, confirms one exception and audits ready items', a
 
   await page.getByRole('button', { name: '重试失败项' }).click()
   await expect(page.getByRole('region', { name: '审查批次 88' })).toContainText('已完成')
+}
+
+test('uploads mixed contracts, confirms one exception and audits ready items', async ({ page }) => {
+  await prepare(page)
+  await submitAndCompleteBatch(page)
 
   await page.getByRole('button', { name: '查看 采购合同.txt 的审查结果' }).click()
   await expect(page).toHaveURL(/\/audit/)
@@ -202,6 +226,31 @@ test('uploads mixed contracts, confirms one exception and audits ready items', a
   await expect(page.getByRole('heading', { name: '采购合同.txt' })).toBeVisible()
   await expect(page.getByText('付款条款', { exact: true })).toBeVisible()
   await expect(page.getByText('进入复核', { exact: true })).toBeVisible()
+})
+
+test('switches completed contracts and shows a truthful empty result', async ({ page }) => {
+  await prepare(page)
+  await submitAndCompleteBatch(page)
+
+  await page.getByRole('button', { name: '查看 采购合同.txt 的审查结果' }).click()
+  await expect(page.getByText('付款条款', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '查看 开发协议.txt 的审查结果' }).click()
+
+  await expect(page.getByRole('heading', { name: '开发协议.txt' })).toBeVisible()
+  await expect(page.getByText('该合同未检出风险')).toBeVisible()
+  await expect(page.getByText('付款条款', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: '合同关键要素' })).toHaveCount(0)
+})
+
+test('keeps the batch summary when loading a completed result fails', async ({ page }) => {
+  await prepare(page, { failContract11Result: true })
+  await submitAndCompleteBatch(page)
+
+  await page.getByRole('button', { name: '查看 采购合同.txt 的审查结果' }).click()
+
+  await expect(page.locator('.el-message').last()).toContainText('审查结果加载失败')
+  await expect(page.getByRole('region', { name: '审查批次 88' })).toBeVisible()
+  await expect(page.getByText('当前查看')).toHaveCount(0)
 })
 
 test('restores import batch from the url after reload', async ({ page }) => {
