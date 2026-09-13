@@ -1,0 +1,110 @@
+from typing import Any, Literal, Self
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+AUDIT_PROTOCOL_VERSION = "candidate-v1"
+AUDIT_JSON_FORMAT = {"type": "json_object"}
+
+
+def _strip_string(value: object) -> object:
+    return value.strip() if isinstance(value, str) else value
+
+
+class RiskCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+    level: Literal["high", "medium", "low"]
+    category: str = Field(min_length=2, max_length=64)
+    quote: str = Field(min_length=2, max_length=500)
+    reason: str = Field(min_length=4, max_length=800)
+    suggestion: str = Field(min_length=4, max_length=800)
+
+    _strip_level = field_validator("level", mode="before")(_strip_string)
+
+
+class RiskEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+    risks: list[RiskCandidate] = Field(default_factory=list, max_length=5)
+    has_more: bool = False
+
+
+def parse_risk_envelope(text: str) -> RiskEnvelope:
+    stripped = text.strip()
+    if not stripped.startswith("{") or not stripped.endswith("}"):
+        raise ValueError("风险输出必须是 JSON 对象")
+    return RiskEnvelope.model_validate_json(stripped)
+
+
+ReviewIssueCode = Literal[
+    "OUTPUT_TRUNCATED",
+    "INVALID_MODEL_OUTPUT",
+    "MODEL_TIMEOUT",
+    "MODEL_UNAVAILABLE",
+    "PAGINATION_EXHAUSTED",
+    "EVIDENCE_UNRESOLVED",
+    "ORIGINAL_TEXT_UNRESOLVED",
+    "PARSE_QUALITY_LOW",
+    "CONTRACT_TEXT_INCOMPLETE",
+    "SECONDARY_REVIEW_CONFLICT",
+]
+
+
+class ReviewIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+    code: ReviewIssueCode
+    agent: str = Field(min_length=1, max_length=16)
+    window_id: str | None = Field(default=None, max_length=64)
+    detail: str = Field(min_length=1, max_length=255)
+
+    _strip_code = field_validator("code", mode="before")(_strip_string)
+
+
+class AgentReviewResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+    candidates: list[RiskCandidate] = Field(default_factory=list)
+    issues: list[ReviewIssue] = Field(default_factory=list)
+    complete: bool
+    planned_windows: int = Field(default=1, ge=1)
+    completed_windows: int = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_completed_windows_for_complete_result(cls, value: Any) -> Any:
+        if (
+            not isinstance(value, dict)
+            or value.get("complete") is not True
+            or "completed_windows" in value
+        ):
+            return value
+        normalized = value.copy()
+        normalized["completed_windows"] = normalized.get("planned_windows", 1)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_window_progress(self) -> Self:
+        if self.completed_windows > self.planned_windows:
+            raise ValueError("completed_windows 不能大于 planned_windows")
+        if self.complete and self.completed_windows != self.planned_windows:
+            raise ValueError("complete=True 时必须完成所有窗口")
+        return self
+
+
+class SecondaryDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+    claim_id: str = Field(min_length=8, max_length=64)
+    verdict: Literal["confirm", "reject", "conflict"]
+    reason: str = Field(min_length=4, max_length=500)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=8)
+
+    _strip_verdict = field_validator("verdict", mode="before")(_strip_string)
+
+
+class SecondaryEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+    decisions: list[SecondaryDecision] = Field(default_factory=list, max_length=5)
