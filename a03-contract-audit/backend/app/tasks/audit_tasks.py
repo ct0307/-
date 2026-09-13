@@ -3,11 +3,13 @@
 批量场景下 API 层为每份合同派发一个此任务，前端轮询任务状态。
 本地无 Redis 时可将 config.AUDIT_ASYNC=False，端点改走同步执行（共用 run_audit）。
 """
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import time
 import uuid
 from typing import Callable
 
@@ -156,6 +158,7 @@ def run_contract_audit(
     batch_item_id: int | None = None,
 ) -> dict:
     """单份合同审查任务：解析 → 审查 → 落库。worker 进程内自建 DB 会话。"""
+    audit_deadline = time.monotonic() + settings.AUDIT_DEADLINE_SECONDS
     db = SessionLocal()
     execution_token: str | None = None
     audit_generation: int | None = None
@@ -255,6 +258,7 @@ def run_contract_audit(
             generation=item.audit_generation if item else None,
             batch_item_id=item.id if item else None,
             execution_token=execution_token,
+            deadline=audit_deadline,
         )
         if item:
             if result["status"] in {"done", "review_required"}:

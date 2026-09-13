@@ -6,9 +6,11 @@
 import json
 import time
 from datetime import datetime, timezone
+from typing import Callable
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.models import AuditBatchItem, Contract, Risk
 from app.services.audit.auditor import audit_contract
@@ -40,6 +42,9 @@ _QUALITY_REASON_MESSAGES = {
     "SECONDARY_REVIEW_CONFLICT": "二次复核存在冲突",
     "SECONDARY_REVIEW_PENDING": "二次复核尚未完成",
     "UNBOUND_CONFLICT": "冲突项无法关联到具体风险，需人工复核",
+    "AUDIT_DEADLINE_EXCEEDED": "审查达到整体时限，需人工复核",
+    "DIMENSION_MISMATCH": "模型返回了本次范围外的风险",
+    "FACT_VALIDATION_FAILED": "候选风险的结构化事实校验失败",
 }
 
 
@@ -62,9 +67,12 @@ def run_audit(
     generation: int | None = None,
     batch_item_id: int | None = None,
     execution_token: str | None = None,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict:
     """领取 generation 后计算，并以短事务原子发布审查结果。"""
     total_started = time.perf_counter()
+    deadline = deadline if deadline is not None else clock() + settings.AUDIT_DEADLINE_SECONDS
     contract_id = contract.id
     claimed_generation = generation or 0
     owns_generation = generation is None
@@ -104,6 +112,8 @@ def run_audit(
             dimensions=dimensions,
             audit_job_id=batch_item_id,
             audit_generation=claimed_generation,
+            deadline=deadline,
+            clock=clock,
         )
         # 计算阶段不持有合同锁；完成候选计算后先单独发布 validating 阶段。
         if db.in_transaction():
@@ -271,6 +281,8 @@ def _compute_audit(
     dimensions: list[str] | None = None,
     audit_job_id: int | None = None,
     audit_generation: int = 0,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict:
     """计算审查结果，不修改合同或风险表。"""
     parse_started = time.perf_counter()
@@ -311,6 +323,8 @@ def _compute_audit(
             contract_type=contract_type,
             audit_job_id=audit_job_id,
             audit_generation=audit_generation,
+            deadline=deadline,
+            clock=clock,
         )
         risk_payloads.extend(result["risks"])
         cross_checks = result["cross_checks"]

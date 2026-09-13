@@ -62,3 +62,53 @@ def test_audit_contract_surfaces_deterministic_logic_conflicts(monkeypatch):
     assert len(logic_checks) == 1
     assert logic_checks[0]["verdict"] == "conflict"
     assert logic_checks[0]["evidence_clause_ids"] == ["第一条", "第二条"]
+
+
+def test_candidate_dimension_validation_rejects_cross_dimension_and_unknown_categories():
+    from app.services.audit.contract_logic import candidate_dimensions
+
+    payment = {
+        "category": "付款金额风险",
+        "original_text": "合同金额为100万元。",
+        "risk_reason": "付款金额约定不清。",
+        "suggestion": "明确金额及权利义务。",
+    }
+    unknown = {
+        "category": "其他事项",
+        "original_text": "其他事项。",
+        "risk_reason": "需要关注。",
+        "suggestion": "请复核。",
+    }
+
+    assert candidate_dimensions(payment) == {"payment"}
+    assert candidate_dimensions(unknown) == set()
+    assert auditor._candidate_matches_dimensions(payment, "legal", ["legal"]) is False
+    assert auditor._candidate_matches_dimensions(unknown, "legal", []) is False
+
+
+def test_deterministic_fact_validation_rejects_false_amount_mismatch_and_invented_date():
+    from app.services.audit.contract_logic import validate_candidate_facts
+
+    text = (
+        "第一条 合同金额为人民币100万元（大写：人民币壹佰万元整）。\n"
+        "第二条 签订日期：2026年9月14日。"
+    )
+    false_mismatch = {
+        "category": "大小写金额不一致",
+        "original_text": "合同金额为人民币100万元（大写：人民币壹佰万元整）。",
+        "risk_reason": "小写100万元与大写壹佰万元不一致。",
+    }
+    invented_date = {
+        "category": "签订日期风险",
+        "original_text": "签订日期：2026年9月14日。",
+        "risk_reason": "合同签订日期为2026年9月15日。",
+    }
+    invented_amount = {
+        "category": "合同金额风险",
+        "original_text": "合同金额为人民币100万元。",
+        "risk_reason": "合同金额为人民币200万元。",
+    }
+
+    assert validate_candidate_facts(false_mismatch, text).valid is False
+    assert validate_candidate_facts(invented_date, text).valid is False
+    assert validate_candidate_facts(invented_amount, text).valid is False

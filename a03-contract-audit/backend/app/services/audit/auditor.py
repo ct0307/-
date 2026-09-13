@@ -23,7 +23,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from app.core.logging import get_logger
 from app.llm.factory import get_llm_adapter
@@ -34,6 +34,8 @@ from app.services.audit.evidence_validation import (
 from app.services.audit.contract_logic import (
     analyze_payment_schedule,
     build_logic_cross_checks,
+    candidate_dimensions,
+    validate_candidate_facts,
 )
 from app.services.audit.protocol import ReviewIssue
 from app.services.audit.review_pipeline import (
@@ -118,6 +120,8 @@ def audit_contract(
     contract_type: str = "",
     audit_job_id: int | None = None,
     audit_generation: int = 0,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict:
     """多智能体主从协同审查。dimensions 为空/None 时全量审查。"""
     all_risks: list[dict] = []
@@ -156,6 +160,8 @@ def audit_contract(
             timings=timings,
             audit_job_id=audit_job_id,
             audit_generation=audit_generation,
+            deadline=deadline,
+            clock=clock,
         )
         log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(result.risks))
         all_risks.extend(result.risks)
@@ -175,10 +181,11 @@ def audit_contract(
         if contract_id is not None else None
     )
     secondary_result = SecondaryReviewer(
-        get_llm_adapter(), recorder=recorder
+        get_llm_adapter(), recorder=recorder, clock=clock
     ).review(
         risks=all_risks,
         conflict_claim_ids=exact_conflict_claim_ids,
+        deadline=deadline,
     )
     all_risks, secondary_issues = apply_secondary_decisions(
         all_risks, secondary_result
@@ -335,6 +342,8 @@ def _agent_audit(
     timings: dict[str, int] | None = None,
     audit_job_id: int | None = None,
     audit_generation: int = 0,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> AgentAuditResult:
     """单个 Agent 的窗口审查、原文核验和逐项 RAG 依据校验。"""
     agent_started = time.perf_counter()
@@ -420,7 +429,7 @@ def _agent_audit(
         SqlAlchemyWindowCheckpoint()
         if contract_id is not None else NullWindowCheckpoint()
     )
-    reviewer = WindowReviewer(get_llm_adapter(), checkpoint=checkpoint)
+    reviewer = WindowReviewer(get_llm_adapter(), checkpoint=checkpoint, clock=clock)
     windows = build_contract_windows(contract_text, max_chars=8000)
     normalized: list[dict] = []
     issues: list[ReviewIssue] = []
@@ -435,6 +444,7 @@ def _agent_audit(
             review_window=ReviewWindow(window),
             system_prompt=system_prompt,
             build_user_prompt=build_user_prompt,
+            deadline=deadline,
         ))
         planned += result.planned_windows
         completed += result.completed_windows
@@ -447,6 +457,14 @@ def _agent_audit(
                 "risk_reason": candidate.reason,
                 "suggestion": candidate.suggestion,
             }, role)
+            if not _candidate_matches_dimensions(risk, role, selected_dimensions):
+                issues.append(ReviewIssue(
+                    code="DIMENSION_MISMATCH",
+                    agent=role,
+                    window_id=candidate.source_window_id,
+                    detail="候选风险不属于本次选择的审查维度",
+                ))
+                continue
             risk["source_window_id"] = candidate.source_window_id
             risk["source_clause_ids"] = list(candidate.source_clause_ids)
             normalized.append(risk)
@@ -485,6 +503,16 @@ def _agent_audit(
             (time.perf_counter() - grounding_started) * 1000
         )
     for risk in grounded:
+        fact_validation = validate_candidate_facts(risk, contract_text)
+        if not fact_validation.valid:
+            risk["requires_manual_review"] = True
+            risk["claim_status"] = "manual_review"
+            issues.append(ReviewIssue(
+                code="FACT_VALIDATION_FAILED",
+                agent=role,
+                window_id=risk["source_window_id"],
+                detail=fact_validation.reason,
+            ))
         if risk["original_text_verified"] is not True:
             issues.append(ReviewIssue(
                 code="ORIGINAL_TEXT_UNRESOLVED", agent=role,
@@ -501,6 +529,16 @@ def _agent_audit(
                 detail="候选风险缺少可支持结论的可靠依据，需人工复核",
             ))
     return AgentAuditResult(grounded, issues, planned, completed)
+
+
+def _candidate_matches_dimensions(
+    risk: dict,
+    role: str,
+    selected_dimensions: list[str],
+) -> bool:
+    detected = candidate_dimensions(risk)
+    allowed = set(selected_dimensions) if selected_dimensions else _ROLE_DIMENSIONS[role]
+    return bool(detected.intersection(allowed))
 
 
 def _ground_risks(

@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
-from typing import Literal, Mapping, Protocol, Sequence
+from typing import Callable, Literal, Mapping, Protocol, Sequence
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -162,20 +163,28 @@ class SecondaryReviewer:
         adapter: LLMAdapter,
         *,
         recorder: SecondaryCallRecorder | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._adapter = adapter
         self._recorder = recorder or NullSecondaryCallRecorder()
+        self._clock = clock
 
     def review(
         self,
         *,
         risks: Sequence[Mapping[str, object]],
         conflict_claim_ids: set[str],
+        deadline: float | None = None,
     ) -> SecondaryReviewResult:
         selected, immediate = select_secondary_candidates(risks, conflict_claim_ids)
         decisions = dict(immediate)
         for risk in selected:
             claim_id = str(risk.get("claim_id", ""))
+            if deadline is not None and self._clock() >= deadline:
+                decisions[claim_id] = SecondaryOutcome(
+                    "manual_required", "二次复核达到整体时限，必须人工复核"
+                )
+                continue
             decisions[claim_id] = self._review_one(risk)
         return SecondaryReviewResult(by_claim=decisions)
 

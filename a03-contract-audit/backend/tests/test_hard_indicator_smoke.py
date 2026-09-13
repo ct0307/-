@@ -150,6 +150,12 @@ def test_production_settings_accept_explicit_secrets():
     assert settings.APP_ENV == "prod"
 
 
+@pytest.mark.parametrize("seconds", [0, -1, 1800])
+def test_audit_deadline_must_be_positive_and_shorter_than_worker_lease(seconds):
+    with pytest.raises(ValidationError):
+        Settings(AUDIT_DEADLINE_SECONDS=seconds)
+
+
 def test_postgres_password_special_characters_are_url_encoded():
     password = "p@ss:/#%word-with-symbols"
     settings = Settings(DB_BACKEND="postgres", POSTGRES_PASSWORD=password)

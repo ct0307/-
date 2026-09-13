@@ -405,6 +405,54 @@ def test_three_call_budget_sleeps_only_before_two_retry_calls():
     assert all(record["validation_status"] == "error" for record in checkpoint.records)
 
 
+def test_shared_deadline_stops_pagination_but_keeps_verified_candidates():
+    from app.services.audit.review_pipeline import WindowReviewer
+
+    now = [0.0]
+
+    class AdvancingAdapter(FakeAdapter):
+        def chat(self, *args, **kwargs):
+            response = super().chat(*args, **kwargs)
+            now[0] = 2.0
+            return response
+
+    adapter = AdvancingAdapter([_response(risks=[_risk()], has_more=True)])
+    request = _request()
+    request = request.__class__(**{**request.__dict__, "deadline": 1.0})
+
+    result = WindowReviewer(adapter, clock=lambda: now[0]).review(request)
+
+    assert len(adapter.calls) == 1
+    assert [risk.category for risk in result.candidates] == ["付款风险"]
+    assert result.complete is False
+    assert [issue.code for issue in result.issues] == ["AUDIT_DEADLINE_EXCEEDED"]
+
+
+def test_deadline_is_checked_before_retry_sleep_or_another_model_call():
+    from app.services.audit.review_pipeline import WindowReviewer
+
+    now = [0.0]
+
+    class ExpiringAdapter(FakeAdapter):
+        def chat(self, *args, **kwargs):
+            try:
+                return super().chat(*args, **kwargs)
+            finally:
+                now[0] = 2.0
+
+    sleeps = []
+    request = _request()
+    request = request.__class__(**{**request.__dict__, "deadline": 1.0})
+    result = WindowReviewer(
+        ExpiringAdapter([LLMError("timeout", code="MODEL_TIMEOUT", retryable=True)]),
+        clock=lambda: now[0],
+        sleep=sleeps.append,
+    ).review(request)
+
+    assert sleeps == []
+    assert [issue.code for issue in result.issues] == ["AUDIT_DEADLINE_EXCEEDED"]
+
+
 def test_network_and_format_failures_share_three_call_budget_per_page():
     from app.services.audit.review_pipeline import WindowReviewer
 

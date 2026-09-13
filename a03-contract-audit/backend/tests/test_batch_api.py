@@ -330,7 +330,7 @@ def test_audit_task_updates_batch_item_and_forwards_dimensions(monkeypatch, tmp_
         db.commit()
         contract_id, item_id = contract.id, item.id
 
-    captured: list[list[str]] = []
+    captured: list[tuple[list[str], float | None]] = []
 
     def fake_run_audit(
         _db,
@@ -340,8 +340,9 @@ def test_audit_task_updates_batch_item_and_forwards_dimensions(monkeypatch, tmp_
         generation=None,
         batch_item_id=None,
         execution_token=None,
+        deadline=None,
     ):
-        captured.append(dimensions or [])
+        captured.append((dimensions or [], deadline))
         cross_checks = [{
             "id": "CC1",
             "from": "legal",
@@ -382,7 +383,8 @@ def test_audit_task_updates_batch_item_and_forwards_dimensions(monkeypatch, tmp_
         assert persisted_result["cross_checks"][0]["id"] == "CC1"
     assert result["status"] == "done"
     assert repeated["status"] == "already_done"
-    assert captured == [["legal"]]
+    assert captured[0][0] == ["legal"]
+    assert isinstance(captured[0][1], float)
 
 
 def test_audit_task_does_not_duplicate_an_active_lease(monkeypatch, tmp_path):

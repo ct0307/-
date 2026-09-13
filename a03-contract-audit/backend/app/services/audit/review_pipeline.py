@@ -35,6 +35,7 @@ class WindowReviewRequest:
     review_window: ReviewWindow
     system_prompt: str
     build_user_prompt: Callable[[ReviewWindow, int, tuple[str, ...]], str]
+    deadline: float | None = None
 
 
 class WindowCheckpoint(Protocol):
@@ -104,6 +105,7 @@ class WindowReviewer:
         max_pages: int = 3,
         max_call_attempts: int = 3,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if max_split_depth < 0:
             raise ValueError("max_split_depth 不能小于 0")
@@ -117,6 +119,7 @@ class WindowReviewer:
         self._max_pages = max_pages
         self._max_call_attempts = max_call_attempts
         self._sleep = sleep
+        self._clock = clock
 
     def review(self, request: WindowReviewRequest) -> AgentReviewResult:
         cached = self._checkpoint.load_valid(request)
@@ -131,6 +134,8 @@ class WindowReviewer:
     def _review_uncached(self, request: WindowReviewRequest) -> AgentReviewResult:
         candidates: list[ReviewedRiskCandidate] = []
         for page in range(1, self._max_pages + 1):
+            if self._deadline_expired(request):
+                return self._deadline_result(request, candidates)
             outcome = self._review_page(request, page)
             if outcome.kind == "truncated":
                 recovered = self._recover_truncated(request)
@@ -188,6 +193,11 @@ class WindowReviewer:
         retryable_failures = 0
         invalid_outputs = 0
         while call_attempt < self._max_call_attempts:
+            if self._deadline_expired(request):
+                return _PageOutcome(
+                    kind="issue",
+                    issue=self._issue(request, "AUDIT_DEADLINE_EXCEEDED"),
+                )
             call_attempt += 1
             options = ChatOptions(
                 response_format=AUDIT_JSON_FORMAT,
@@ -215,6 +225,11 @@ class WindowReviewer:
                         issue=self._issue(request, error_code),
                     )
                 # 总预算最多允许两次等待，因此三次调用的退避固定为 0、1 秒。
+                if not self._can_wait(request, retryable_failures):
+                    return _PageOutcome(
+                        kind="issue",
+                        issue=self._issue(request, "AUDIT_DEADLINE_EXCEEDED"),
+                    )
                 self._sleep(retryable_failures)
                 retryable_failures += 1
                 continue
@@ -325,12 +340,35 @@ class WindowReviewer:
             "MODEL_TIMEOUT": "模型调用超时且已达到重试上限",
             "MODEL_UNAVAILABLE": "模型暂时不可用且已达到重试上限",
             "PAGINATION_EXHAUSTED": "模型仍有后续结果但已达到分页上限",
+            "AUDIT_DEADLINE_EXCEEDED": "审查达到整体时限，未启动新的模型调用",
         }
         return ReviewIssue(
             code=code,
             agent=request.agent,
             window_id=request.review_window.window.window_id,
             detail=details[code],
+        )
+
+    def _deadline_expired(self, request: WindowReviewRequest) -> bool:
+        return request.deadline is not None and self._clock() >= request.deadline
+
+    def _can_wait(self, request: WindowReviewRequest, seconds: float) -> bool:
+        return (
+            request.deadline is None
+            or self._clock() + seconds < request.deadline
+        )
+
+    def _deadline_result(
+        self,
+        request: WindowReviewRequest,
+        candidates: list[ReviewedRiskCandidate] | None = None,
+    ) -> AgentReviewResult:
+        return AgentReviewResult(
+            candidates=self._deduplicate(request.agent, candidates or []),
+            issues=[self._issue(request, "AUDIT_DEADLINE_EXCEEDED")],
+            complete=False,
+            planned_windows=1,
+            completed_windows=0,
         )
 
     @staticmethod

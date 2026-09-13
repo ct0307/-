@@ -231,6 +231,35 @@ def test_timeout_only_marks_selected_candidate_and_records_safe_failure():
     assert "sensitive provider text" not in repr(recorder.calls)
 
 
+def test_secondary_items_share_deadline_and_do_not_start_after_expiry():
+    from app.services.audit.secondary_review import SecondaryReviewer
+
+    now = [0.0]
+
+    class AdvancingAdapter(QueueAdapter):
+        def chat(self, *args, **kwargs):
+            response = super().chat(*args, **kwargs)
+            now[0] = 2.0
+            return response
+
+    risks = [
+        _risk(claim_id="C-FIRST-01", level="high"),
+        _risk(claim_id="C-SECOND-01", level="high"),
+    ]
+    adapter = AdvancingAdapter([_decision("C-FIRST-01")])
+
+    result = SecondaryReviewer(adapter, clock=lambda: now[0]).review(
+        risks=risks,
+        conflict_claim_ids=set(),
+        deadline=1.0,
+    )
+
+    assert len(adapter.calls) == 1
+    assert result.by_claim["C-FIRST-01"].status == "confirmed"
+    assert result.by_claim["C-SECOND-01"].status == "manual_required"
+    assert "时限" in result.by_claim["C-SECOND-01"].reason
+
+
 def test_explicit_related_party_claim_is_selected_even_when_category_differs():
     risks = [_risk(
         "C-RELATED-001",

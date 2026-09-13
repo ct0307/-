@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Query, Session, sessionmaker
 
 from app.db.session import Base
-from app.llm.base import LLMError
+from app.llm.base import LLMError, LLMResponse
 from app.models.models import AuditBatch, AuditBatchItem, Contract, ContractClause, Risk, User
 from app.services.audit import runner
 from app.services.audit.runner import run_audit
@@ -94,6 +94,104 @@ def test_native_high_quality_contract_finishes_without_quality_risk(
     assert result["status"] == "done"
     assert result["coverage"] == {"planned": 1, "completed": 1}
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
+
+
+def test_cross_dimension_candidate_requires_review_instead_of_done(
+    monkeypatch, db: Session
+):
+    from app.services.audit import auditor
+
+    contract = _contract(db, "dimension-mismatch.txt")
+    quote = "第一条 合同主体具备合法签约资格"
+    parsed = DocumentParseResult(
+        text=quote + "。双方应当遵守合同约定。" * 30,
+        source="native",
+    )
+    source = {
+        "content": "付款金额异常时，应当核验付款金额和合同价款。",
+        "source": "测试付款规则",
+        "reliable": True,
+    }
+
+    class Adapter:
+        def chat(self, *_args, **_kwargs):
+            return LLMResponse(
+                text=json.dumps({
+                    "risks": [{
+                        "level": "medium",
+                        "category": "付款金额异常",
+                        "quote": quote,
+                        "reason": "付款金额需要进一步核验",
+                        "suggestion": "补充明确的付款金额",
+                    }],
+                    "has_more": False,
+                }, ensure_ascii=False),
+                model="test",
+            )
+
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
+    monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [source])
+
+    result = run_audit(db, contract, dimensions=["legal"])
+    db.refresh(contract)
+
+    assert contract.status == "review_required"
+    assert result["status"] == "review_required"
+    assert result["quality_reasons"] == ["DIMENSION_MISMATCH"]
+    assert [issue["code"] for issue in result["issues"]] == [
+        "DIMENSION_MISMATCH"
+    ]
+    assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
+
+
+def test_nonexistent_amount_claim_requires_review_instead_of_done(
+    monkeypatch, db: Session
+):
+    from app.services.audit import auditor
+
+    contract = _contract(db, "fact-mismatch.txt")
+    quote = "第一条 合同价款为人民币100元"
+    parsed = DocumentParseResult(
+        text=quote + "。付款金额以本条约定为准。" * 30,
+        source="native",
+    )
+    source = {
+        "content": "付款金额异常时，应当核验合同价款和付款金额。",
+        "source": "测试付款规则",
+        "reliable": True,
+    }
+
+    class Adapter:
+        def chat(self, *_args, **_kwargs):
+            return LLMResponse(
+                text=json.dumps({
+                    "risks": [{
+                        "level": "medium",
+                        "category": "付款金额异常",
+                        "quote": quote,
+                        "reason": "合同价款记载为人民币200元",
+                        "suggestion": "核对并统一合同价款",
+                    }],
+                    "has_more": False,
+                }, ensure_ascii=False),
+                model="test",
+            )
+
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
+    monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [source])
+
+    result = run_audit(db, contract, dimensions=["payment"])
+    db.refresh(contract)
+
+    assert contract.status == "review_required"
+    assert result["status"] == "review_required"
+    assert result["quality_reasons"] == ["FACT_VALIDATION_FAILED"]
+    assert [issue["code"] for issue in result["issues"]] == [
+        "FACT_VALIDATION_FAILED"
+    ]
+    assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 1
 
 
 @pytest.mark.parametrize(
