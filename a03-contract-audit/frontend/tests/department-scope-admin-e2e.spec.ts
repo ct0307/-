@@ -62,3 +62,48 @@ test('admin can update the departments available to a legal user', async ({ page
   expect(savedDepartments.sort()).toEqual(['法务部', '采购中心'])
   await expect(page.getByText('授权部门已更新')).toBeVisible()
 })
+
+test('admin can restore a deleted contract draft from trash', async ({ page }) => {
+  let restored = false
+  await page.addInitScript(() => {
+    localStorage.setItem('token', 'admin-token')
+    localStorage.setItem('role', 'admin')
+    localStorage.setItem('username', 'admin')
+    localStorage.setItem('department', '管理部')
+  })
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/runtime/status')) {
+      return fulfillJson(route, { status: 'online', checked_at: '2026-09-11T10:00:00Z' })
+    }
+    if (path.endsWith('/admin/access-matrix')) return fulfillJson(route, { modules: [], roles: [] })
+    if (path.endsWith('/admin/audit-logs') || path.endsWith('/admin/llm-calls')) return fulfillJson(route, [])
+    if (path.includes('/admin/lookups/') || path.endsWith('/admin/users/department-scopes')) return fulfillJson(route, [])
+    if (path.endsWith('/admin/contract-trash')) {
+      return fulfillJson(route, restored ? [] : [{
+        batch_id: 42,
+        item_id: 9,
+        contract_id: 11,
+        filename: '待恢复合同.txt',
+        contract_type: '采购合同',
+        department: '采购中心',
+        deleted_at: '2026-09-10T10:00:00Z',
+        expires_at: '2026-10-10T10:00:00Z',
+        recoverable: true,
+      }])
+    }
+    if (path.endsWith('/imports/42/items/9/restore') && route.request().method() === 'POST') {
+      restored = true
+      return fulfillJson(route, {})
+    }
+    return fulfillJson(route, [])
+  })
+
+  await page.goto(`${baseUrl}/admin`)
+  await page.getByRole('tab', { name: '合同回收站' }).click()
+  await expect(page.getByText('待恢复合同.txt')).toBeVisible()
+  await page.getByRole('button', { name: '恢复 待恢复合同.txt' }).click()
+
+  await expect(page.getByText('合同草稿已恢复')).toBeVisible()
+  await expect(page.getByText('待恢复合同.txt')).toBeHidden()
+})

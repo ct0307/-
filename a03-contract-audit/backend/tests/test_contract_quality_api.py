@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -162,6 +163,45 @@ def test_single_upload_is_idempotent_and_rejects_payload_mismatch(monkeypatch, t
         assert db.query(Contract).count() == 1
         assert len(list(tmp_path.iterdir())) == 1
     engine.dispose()
+
+
+def test_deleted_contract_does_not_block_reupload_with_same_idempotency_key(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username="reupload-after-delete",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.flush()
+        deleted = Contract(
+            filename="deleted.pdf",
+            storage_path="",
+            department=user.department,
+            uploaded_by=user.id,
+            upload_idempotency_key="reupload-request-001",
+            content_sha256="old-hash",
+            deleted_at=datetime.now(timezone.utc),
+            status="purged",
+        )
+        db.add(deleted)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+
+        uploaded = contracts.upload_contract(
+            _upload("contract.pdf", b"replacement contract"),
+            contract_type="采购合同",
+            idempotency_key="reupload-request-001",
+            db=db,
+            user=user,
+        )
+
+        assert uploaded.id != deleted.id
+        assert uploaded.deleted_at is None
+        assert deleted.upload_idempotency_key is None
 
 
 def test_upload_keeps_committed_file_when_response_refresh_fails(monkeypatch, tmp_path):

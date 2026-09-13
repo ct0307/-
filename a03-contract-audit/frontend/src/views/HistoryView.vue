@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 审查历史记录：el-table + 分页 + 搜索 + 风险等级筛选 + 点击行查看风险详情。
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getHistory } from '@/api/history'
 import { getRisks } from '@/api/contract'
@@ -11,10 +11,11 @@ import DemoBadge from '@/components/common/DemoBadge.vue'
 import { evidenceMeta } from '@/utils/risk-evidence'
 
 const router = useRouter()
+const route = useRoute()
 
 const rows = ref<HistoryRow[]>([])
 const loading = ref(false)
-const keyword = ref('')
+const keyword = ref(typeof route.query.contract === 'string' ? route.query.contract : '')
 const levelFilter = ref('全部')
 const statusFilter = ref('全部')
 const page = ref(1)

@@ -118,9 +118,9 @@ export function createBatchStore(
       const key = actionKey(fileActionSignature(files, contractType, dimensions))
       try {
         batch.value = await api.createBatch(files, contractType, dimensions, key)
-        pendingAction = null
         if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
         else await startPolling(batch.value.id)
+        pendingAction = null
         return batch.value
       } catch (cause) {
         error.value = cause instanceof Error ? cause.message : '批次创建失败'
@@ -140,9 +140,9 @@ export function createBatchStore(
           dimensions,
           key,
         )
-        pendingAction = null
         if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
         else await startPolling(batch.value.id)
+        pendingAction = null
         return batch.value
       } catch (cause) {
         error.value = cause instanceof Error ? cause.message : '批次创建失败'

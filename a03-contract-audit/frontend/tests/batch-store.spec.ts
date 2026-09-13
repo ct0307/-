@@ -134,3 +134,28 @@ test('reuses the idempotency key when retrying the same failed audit action', as
   expect(keys).toHaveLength(2)
   expect(keys[1]).toBe(keys[0])
 })
+
+test('keeps the idempotency key when initial polling fails after creation', async () => {
+  const keys: string[] = []
+  let pollingAttempts = 0
+  const useStore = createBatchStore({
+    ...fakeApi([batch('running', ['auditing'])]),
+    createBatch: async (_files, _contractType, _dimensions, key) => {
+      keys.push(key ?? '')
+      return batch('running', ['auditing'])
+    },
+    getBatch: async () => {
+      pollingAttempts += 1
+      if (pollingAttempts === 1) throw new Error('轮询暂时不可用')
+      return batch('done', ['done'])
+    },
+  }, 'polling-retry-action-key')
+  const store = useStore()
+  const files = [new File(['same'], 'same.txt', { lastModified: 1 })]
+
+  await expect(store.create(files)).rejects.toThrow('轮询暂时不可用')
+  await store.create(files)
+
+  expect(keys).toHaveLength(2)
+  expect(keys[1]).toBe(keys[0])
+})

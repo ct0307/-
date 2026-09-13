@@ -7,7 +7,7 @@ celery_app = Celery(
     "a03",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.audit_tasks", "app.tasks.import_tasks"],
+    include=["app.tasks.audit_tasks", "app.tasks.import_tasks", "app.tasks.maintenance_tasks"],
 )
 
 celery_app.conf.update(
@@ -20,6 +20,10 @@ celery_app.conf.update(
         "recover-orphaned-audit-items": {
             "task": "audit.recover_orphans",
             "schedule": 60.0,
+        },
+        "purge-expired-contract-trash": {
+            "task": "maintenance.purge_contract_trash",
+            "schedule": 86400.0,
         },
     },
 )

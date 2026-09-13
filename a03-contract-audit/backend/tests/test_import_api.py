@@ -165,16 +165,32 @@ def test_append_import_replays_the_same_request_without_duplicates(monkeypatch, 
     assert db.query(Contract).count() == 2
 
 
-def test_create_import_rejects_reused_key_with_different_payload(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("filename", "content", "department"),
+    [
+        ("different.txt", b"first", "法务部"),
+        ("first.txt", b"different", "法务部"),
+        ("first.txt", b"first", "采购中心"),
+    ],
+)
+def test_create_import_rejects_reused_key_with_different_request(
+    monkeypatch,
+    tmp_path,
+    filename,
+    content,
+    department,
+):
     db = _session()
     legal = _user(db)
+    legal.authorized_departments_json = '["采购中心"]'
+    db.commit()
     monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
     monkeypatch.setattr(imports, "_dispatch_import_item", lambda item_id: f"task-{item_id}")
     imports.create_import([_file("first.txt", b"first")], "shared-key", "法务部", db, legal)
 
     with pytest.raises(HTTPException) as error:
         imports.create_import(
-            [_file("different.txt", b"different")], "shared-key", "法务部", db, legal
+            [_file(filename, content)], "shared-key", department, db, legal
         )
 
     assert error.value.status_code == 409

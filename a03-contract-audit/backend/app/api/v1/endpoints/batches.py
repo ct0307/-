@@ -91,8 +91,7 @@ def _refresh_batch(batch: AuditBatch) -> None:
 
 
 def _require_batch_access(batch: AuditBatch, user: User) -> None:
-    if user.role != "admin" and batch.department != user.department:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问其他部门的审查批次")
+    require_department_access(user, batch.department)
 
 
 @router.post("", response_model=BatchOut, status_code=status.HTTP_202_ACCEPTED)

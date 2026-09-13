@@ -82,14 +82,53 @@ async function prepare(page: Page) {
     if (path.endsWith('/batches/from-import') && method === 'POST') {
       return fulfillJson(route, {
         id: 88,
+        status: 'partial_failed',
+        total: 2,
+        completed: 2,
+        failed: 1,
+        created_at: '2026-09-11T10:00:00Z',
+        updated_at: '2026-09-11T10:00:00Z',
+        items: [
+          {
+            id: 501,
+            contract_id: 11,
+            filename: '采购合同.txt',
+            status: 'done',
+            error: null,
+            attempts: 0,
+            started_at: null,
+            finished_at: '2026-09-11T10:01:00Z',
+          },
+          {
+            id: 502,
+            contract_id: 12,
+            filename: '开发协议.txt',
+            status: 'failed',
+            error: '模型服务暂不可用',
+            attempts: 1,
+            started_at: null,
+            finished_at: '2026-09-11T10:01:00Z',
+          },
+        ],
+      }, 202)
+    }
+    if (path.endsWith('/batches/88/retry') && method === 'POST') {
+      return fulfillJson(route, { batch_id: 88, retried: 1, status: 'queued' })
+    }
+    if (path.endsWith('/batches/88') && method === 'GET') {
+      return fulfillJson(route, {
+        id: 88,
         status: 'done',
         total: 2,
         completed: 2,
         failed: 0,
         created_at: '2026-09-11T10:00:00Z',
-        updated_at: '2026-09-11T10:00:00Z',
-        items: [],
-      }, 202)
+        updated_at: '2026-09-11T10:02:00Z',
+        items: [
+          { id: 501, contract_id: 11, filename: '采购合同.txt', status: 'done', error: null, attempts: 0, started_at: null, finished_at: null },
+          { id: 502, contract_id: 12, filename: '开发协议.txt', status: 'done', error: null, attempts: 2, started_at: null, finished_at: null },
+        ],
+      })
     }
     return fulfillJson(route, [])
   })
@@ -117,6 +156,14 @@ test('uploads mixed contracts, confirms one exception and audits ready items', a
   await page.getByRole('button', { name: '审查就绪项' }).click()
 
   await expect(page.getByText('已提交 2 份合同')).toBeVisible()
+  await expect(page.getByRole('region', { name: '审查批次 88' })).toContainText('部分失败')
+  await expect(page.getByRole('region', { name: '审查批次 88' })).toContainText('模型服务暂不可用')
+
+  await page.getByRole('button', { name: '重试失败项' }).click()
+  await expect(page.getByRole('region', { name: '审查批次 88' })).toContainText('已完成')
+
+  await page.getByRole('button', { name: '查看 采购合同.txt 的审查结果' }).click()
+  await expect(page).toHaveURL(/\/history\?contract=C0011/)
 })
 
 test('restores import batch from the url after reload', async ({ page }) => {

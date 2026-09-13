@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile,
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_roles
+from app.api.deps import allowed_departments, get_current_user, require_roles
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_db
@@ -94,10 +94,8 @@ def _raise_parse_error(contract_id: int, exc: Exception, *, code: str | None = N
 
 
 def _dept_accessible(contract, user) -> bool:
-    """部门访问控制：business 角色只可见本部门合同，其他角色全量可见。"""
-    if user.role == "business":
-        return contract.department == user.department
-    return True
+    """管理员可访问全量，其他角色仅访问当前授权部门。"""
+    return user.role == "admin" or contract.department in allowed_departments(user)
 
 
 # 审查状态推导：人工复核优先；其次是整改状态；其余为合规。
@@ -129,7 +127,7 @@ def list_contracts_history(
 
     搜索/筛选/分页全在前端本地处理，端点直接返回裸数组。
     """
-    contracts = db.query(Contract).order_by(Contract.id.desc()).all()
+    contracts = db.query(Contract).filter(Contract.deleted_at.is_(None)).order_by(Contract.id.desc()).all()
     # 部门访问隔离：business 角色只看本部门合同
     contracts = [c for c in contracts if _dept_accessible(c, user)]
     # 批量预取上传者（避免 N+1）
@@ -289,9 +287,13 @@ def upload_contract(
         Contract.upload_idempotency_key == key,
     ).first()
     if existing:
-        if existing.content_sha256 != content_sha256:
+        if existing.deleted_at is not None:
+            existing.upload_idempotency_key = None
+            db.flush()
+        elif existing.content_sha256 != content_sha256:
             raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键与文件内容不一致")
-        return existing
+        else:
+            return existing
 
     # 加密存储：启用 FILE_ENCRYPT_KEY 时落盘前加密，防止明文泄漏
     from app.core.crypto import encrypt_bytes, is_encryption_enabled
@@ -580,7 +582,10 @@ def get_contract_risks(
 
 
 def _get_contract(db: Session, contract_id: int, user: User | None = None) -> Contract:
-    contract = db.query(Contract).filter(Contract.id == contract_id).first()
+    contract = db.query(Contract).filter(
+        Contract.id == contract_id,
+        Contract.deleted_at.is_(None),
+    ).first()
     if not contract:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "合同不存在")
     if user and not _dept_accessible(contract, user):

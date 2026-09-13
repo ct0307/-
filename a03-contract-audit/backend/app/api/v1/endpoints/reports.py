@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import allowed_departments, get_current_user
 from app.db.session import get_db
 from app.models.models import Contract, User
 from app.services import audit_log
@@ -17,9 +17,9 @@ router = APIRouter()
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-def department_scope_for(user: User) -> str | None:
-    """业务用户限定本部门，法务、财务和管理员保持全局报表权限。"""
-    return user.department if user.role == "business" else None
+def department_scope_for(user: User) -> set[str] | None:
+    """管理员可查看全量，其他角色仅查看当前授权部门集合。"""
+    return None if user.role == "admin" else allowed_departments(user)
 
 
 @router.get("/summary")
@@ -52,7 +52,7 @@ def export_report(
         accessible_ids = {
             contract_id for (contract_id,) in db.query(Contract.id).filter(
                 Contract.id.in_(contract_ids),
-                Contract.department == department_scope,
+                Contract.department.in_(department_scope),
             ).all()
         }
         if accessible_ids != set(contract_ids):

@@ -207,7 +207,7 @@ def _get_batch(
     batch = query.first()
     if not batch:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "导入批次不存在")
-    if user.role == "admin" or batch.owner_id == user.id:
+    if user.role == "admin":
         return batch
     departments = {
         item.contract.department
@@ -215,6 +215,8 @@ def _get_batch(
         if item.contract is not None and item.status != "deleted"
     }
     if not departments:
+        if batch.owner_id == user.id:
+            return batch
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该导入批次")
     for department in departments:
         require_department_access(user, department)
