@@ -1,16 +1,25 @@
 """批次状态机、进度聚合与失败重试规则。"""
 from dataclasses import dataclass
 
-BATCH_STATUSES = frozenset({"queued", "running", "done", "partial_failed", "failed"})
-ITEM_STATUSES = frozenset({"queued", "parsing", "auditing", "done", "failed"})
-TERMINAL_ITEM_STATUSES = frozenset({"done", "failed"})
+BATCH_STATUSES = frozenset({
+    "queued", "running", "done", "review_required", "partial_failed", "failed",
+})
+ITEM_STATUSES = frozenset({
+    "queued", "parsing", "reviewing", "validating", "done", "review_required", "failed",
+})
+ACTIVE_AUDIT_ITEM_STATUSES = frozenset({
+    "queued", "parsing", "reviewing", "validating", "auditing",
+})
+TERMINAL_ITEM_STATUSES = frozenset({"done", "review_required", "failed"})
 
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"parsing", "failed"}),
-    "parsing": frozenset({"auditing", "failed"}),
-    "auditing": frozenset({"done", "failed"}),
+    "parsing": frozenset({"reviewing", "failed"}),
+    "reviewing": frozenset({"validating", "failed"}),
+    "validating": frozenset({"done", "review_required", "failed"}),
     "failed": frozenset({"queued"}),
     "done": frozenset(),
+    "review_required": frozenset(),
 }
 
 
@@ -45,6 +54,8 @@ def summarize(statuses: list[str]) -> BatchProgress:
         status = "queued"
     elif completed < total:
         status = "running"
+    elif failed == 0 and "review_required" in statuses:
+        status = "review_required"
     elif failed == 0:
         status = "done"
     elif failed == total:

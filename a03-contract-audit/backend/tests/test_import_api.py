@@ -12,7 +12,15 @@ from sqlalchemy.orm.query import Query
 from app.api.v1.endpoints import imports
 from app.core.config import settings
 from app.db.session import Base
-from app.models.models import AuditLog, Contract, ImportBatch, ImportBatchItem, User
+from app.models.models import (
+    AuditBatch,
+    AuditBatchItem,
+    AuditLog,
+    Contract,
+    ImportBatch,
+    ImportBatchItem,
+    User,
+)
 from app.schemas.import_batch import ConfirmImportItem
 
 
@@ -365,6 +373,48 @@ def test_confirm_retry_remove_and_delete_have_distinct_semantics(monkeypatch, tm
     failed_contract = db.get(ImportBatchItem, parse_failed_id).contract
     assert failed_contract.deleted_at is not None
     assert db.query(AuditLog).filter(AuditLog.action == "contract_draft_delete").count() == 1
+
+
+@pytest.mark.parametrize(
+    "audit_status",
+    ["queued", "parsing", "reviewing", "validating", "auditing"],
+)
+def test_delete_contract_draft_rejects_active_audit_item(audit_status, tmp_path):
+    db = _session()
+    legal = _user(db)
+    contract = Contract(
+        filename="审查中.txt",
+        storage_path=str(tmp_path / "active.txt"),
+        uploaded_by=legal.id,
+        department=legal.department,
+        status="parsed",
+    )
+    import_batch = ImportBatch(owner_id=legal.id, idempotency_key=f"import-{audit_status}")
+    import_item = ImportBatchItem(filename=contract.filename, contract=contract, status="ready")
+    import_batch.items.append(import_item)
+    audit_batch = AuditBatch(
+        owner_id=legal.id,
+        department=legal.department,
+        idempotency_key=f"audit-{audit_status}",
+    )
+    db.add_all([import_batch, audit_batch])
+    db.flush()
+    audit_item = AuditBatchItem(
+        batch_id=audit_batch.id,
+        contract_id=contract.id,
+        import_item_id=import_item.id,
+        filename=contract.filename,
+        status=audit_status,
+    )
+    db.add(audit_item)
+    db.commit()
+
+    with pytest.raises(HTTPException) as error:
+        imports.delete_contract_draft(import_batch.id, import_item.id, db, legal)
+
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "CONTRACT_BUSY"
+    assert db.get(Contract, contract.id).deleted_at is None
 
 
 def test_create_import_isolates_one_invalid_file_in_a_fifty_two_file_batch(monkeypatch, tmp_path):

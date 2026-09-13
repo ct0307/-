@@ -1,6 +1,7 @@
 """合同端点：上传、解析、触发审查、查询。"""
 import hashlib
 import json
+import math
 import os
 import uuid
 from datetime import timezone
@@ -445,19 +446,7 @@ def audit_contract_endpoint(
         db.commit()
         db.refresh(item)
 
-    return AuditResponse(
-        contract_id=contract_id,
-        status="auditing",
-        task_id=item.task_id,
-        batch_id=creation.batch.id,
-        job_id=item.id,
-        error_code=item.error_code,
-        error_message=item.error,
-        retryable=item.error_code == "DISPATCH_PENDING",
-        requires_review=contract.requires_review,
-        ocr_confidence=contract.ocr_confidence,
-        review_reason=contract.review_reason,
-    )
+    return _audit_response_from_item(contract, item)
 
 
 @router.get("/{contract_id}/audit-status", response_model=AuditResponse)
@@ -477,44 +466,76 @@ def get_contract_audit_status(
             raise HTTPException(status.HTTP_404_NOT_FOUND, "审查任务不存在")
     else:
         item = item_query.order_by(AuditBatchItem.id.desc()).first()
-    result: dict = {}
-    if item:
-        try:
-            candidate = json.loads(item.result_json or "{}")
-            result = candidate if isinstance(candidate, dict) else {}
-        except (TypeError, ValueError):
-            result = {}
+    if item is not None:
+        return _audit_response_from_item(contract, item)
+    risk_count = db.query(Risk).filter(Risk.contract_id == contract_id).count()
+    return _audit_response_from_item(
+        contract,
+        None,
+        fallback_risk_count=risk_count,
+    )
+
+
+def _audit_response_from_item(
+    contract: Contract,
+    item: AuditBatchItem | None,
+    *,
+    fallback_risk_count: int | None = None,
+) -> AuditResponse:
+    """从选定任务快照构造响应；任务存在时不读取合同当前代次质量。"""
+    result = _audit_result_snapshot(item)
+    raw_status = item.status if item is not None else contract.status
+    response_status = {
+        "failed": "audit_failed",
+        "auditing": "reviewing",
+    }.get(raw_status, raw_status)
+    if response_status not in {
+        "queued", "parsing", "reviewing", "validating",
+        "done", "review_required", "audit_failed",
+    }:
+        response_status = "audit_failed"
+
     risk_count = result.get("risk_count")
-    if not isinstance(risk_count, int):
-        risk_query = db.query(Risk).filter(Risk.contract_id == contract_id)
-        if item:
-            risk_query = risk_query.filter(
-                Risk.audit_job_id == item.id
-                if item.audit_generation > 0
-                else Risk.audit_job_id.is_(None)
-            )
-        risk_count = risk_query.count()
+    if (
+        not isinstance(risk_count, int)
+        or isinstance(risk_count, bool)
+        or risk_count < 0
+    ):
+        risk_count = fallback_risk_count if item is None else None
+
     raw_cross_checks = result.get("cross_checks", [])
-    cross_checks = (
-        [_to_cross_out(value) for value in raw_cross_checks if isinstance(value, dict)]
-        if isinstance(raw_cross_checks, list)
-        else []
+    cross_checks: list[CrossCheckOut] = []
+    if isinstance(raw_cross_checks, list):
+        for value in raw_cross_checks:
+            if not isinstance(value, dict):
+                continue
+            try:
+                cross_checks.append(_to_cross_out(value))
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    requires_review = response_status == "review_required"
+    raw_ocr_confidence = (
+        result.get("ocr_confidence") if item is not None else contract.ocr_confidence
     )
-    item_status = item.status if item else contract.status
-    response_status = "audit_failed" if item_status == "failed" else item_status
-    requires_review = result.get("requires_review")
-    if not isinstance(requires_review, bool):
-        requires_review = contract.requires_review
-    ocr_confidence = (
-        result.get("ocr_confidence")
-        if "ocr_confidence" in result
-        else contract.ocr_confidence
-    )
-    review_reason = (
-        result.get("review_reason")
-        if "review_reason" in result
-        else contract.review_reason
-    )
+    ocr_confidence = _safe_ocr_confidence(raw_ocr_confidence)
+    review_reason = None
+    if requires_review:
+        candidate_reason = (
+            result.get("review_reason") if item is not None else contract.review_reason
+        )
+        review_reason = candidate_reason if isinstance(candidate_reason, str) else None
+
+    quality_reasons = result.get("quality_reasons", [])
+    if not isinstance(quality_reasons, list) or not all(
+        isinstance(value, str) for value in quality_reasons
+    ):
+        quality_reasons = []
+    issues = result.get("issues", [])
+    if not isinstance(issues, list):
+        issues = []
+    issues = [value for value in issues if isinstance(value, dict)]
+    coverage = _safe_coverage(result.get("coverage"))
     retryable_codes = {
         "DISPATCH_PENDING",
         "MODEL_TIMEOUT",
@@ -522,20 +543,63 @@ def get_contract_audit_status(
         "NETWORK_UNCERTAIN",
     }
     return AuditResponse(
-        contract_id=contract_id,
+        contract_id=contract.id,
         status=response_status,
         risk_count=risk_count,
         cross_checks=cross_checks,
-        task_id=item.task_id if item else None,
-        batch_id=item.batch_id if item else None,
-        job_id=item.id if item else None,
-        error_code=item.error_code if item else None,
-        error_message=item.error if item else None,
-        retryable=bool(item and item.error_code in retryable_codes),
+        task_id=item.task_id if item is not None else None,
+        batch_id=item.batch_id if item is not None else None,
+        job_id=item.id if item is not None else None,
+        error_code=item.error_code if item is not None else None,
+        error_message=item.error if item is not None else None,
+        retryable=bool(item is not None and item.error_code in retryable_codes),
         requires_review=requires_review,
         ocr_confidence=ocr_confidence,
         review_reason=review_reason,
+        quality_reasons=quality_reasons,
+        issues=issues,
+        coverage=coverage,
     )
+
+
+def _audit_result_snapshot(item: AuditBatchItem | None) -> dict:
+    if item is None:
+        return {}
+    try:
+        candidate = json.loads(item.result_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return candidate if isinstance(candidate, dict) else {}
+
+
+def _safe_coverage(value: object) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    planned = value.get("planned")
+    completed = value.get("completed")
+    if (
+        not isinstance(planned, int)
+        or isinstance(planned, bool)
+        or not isinstance(completed, int)
+        or isinstance(completed, bool)
+        or planned < 0
+        or completed < 0
+        or completed > planned
+    ):
+        return None
+    return {"planned": planned, "completed": completed}
+
+
+def _safe_ocr_confidence(value: object) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(normalized) or not 0 <= normalized <= 1:
+        return None
+    return normalized
 
 
 def _to_cross_out(c: dict) -> CrossCheckOut:

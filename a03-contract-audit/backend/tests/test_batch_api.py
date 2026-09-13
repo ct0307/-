@@ -312,6 +312,7 @@ def test_audit_task_updates_batch_item_and_forwards_dimensions(monkeypatch, tmp_
         saved_item.finished_at = datetime.now(timezone.utc)
         _db.commit()
         return {
+            "status": "done",
             "risk_count": 1,
             "cross_checks": cross_checks,
             "requires_review": False,
@@ -406,7 +407,8 @@ def test_audit_task_reclaims_an_expired_lease(monkeypatch, tmp_path):
         audit_tasks,
         "run_audit",
         lambda _db, saved_contract, dimensions=None, **_kwargs: (
-            calls.append(saved_contract.id) or {"risk_count": 0, "cross_checks": []}
+            calls.append(saved_contract.id)
+            or {"status": "done", "risk_count": 0, "cross_checks": []}
         ),
     )
 
@@ -466,6 +468,139 @@ def test_expired_worker_cannot_overwrite_new_execution_state(monkeypatch, tmp_pa
         assert saved.execution_token == "new-worker-token"
         assert saved.error_code is None
         assert saved.error is None
+
+
+def test_old_generation_failure_cannot_overwrite_new_generation(monkeypatch, tmp_path):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'generation-fencing.db').as_posix()}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = _user(db)
+        contract = Contract(
+            filename="generation.txt",
+            storage_path=str(tmp_path / "generation.txt"),
+            department=user.department,
+            uploaded_by=user.id,
+            status="reviewing",
+            audit_generation=1,
+        )
+        batch = AuditBatch(
+            owner_id=user.id,
+            department=user.department,
+            idempotency_key="generation-fencing",
+        )
+        db.add_all([contract, batch])
+        db.flush()
+        item = AuditBatchItem(
+            batch_id=batch.id,
+            contract_id=contract.id,
+            filename=contract.filename,
+            audit_generation=1,
+        )
+        db.add(item)
+        db.commit()
+        contract_id, item_id = contract.id, item.id
+
+    def supersede_generation(session, *_args, batch_item_id=None, **_kwargs):
+        current_contract = session.get(Contract, contract_id)
+        current_item = session.get(AuditBatchItem, batch_item_id)
+        current_contract.audit_generation = 2
+        current_contract.status = "validating"
+        current_item.audit_generation = 2
+        current_item.status = "validating"
+        session.commit()
+        raise RuntimeError("old worker failed")
+
+    monkeypatch.setattr(audit_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(audit_tasks, "run_audit", supersede_generation)
+
+    with pytest.raises(RuntimeError, match="old worker failed"):
+        run_contract_audit.run(contract_id, ["legal"], item_id)
+
+    with Session(engine) as db:
+        saved_contract = db.get(Contract, contract_id)
+        saved_item = db.get(AuditBatchItem, item_id)
+        assert saved_contract.audit_generation == 2
+        assert saved_contract.status == "validating"
+        assert saved_item.audit_generation == 2
+        assert saved_item.status == "validating"
+        assert saved_item.execution_token is not None
+        assert saved_item.error_code is None
+
+
+def test_worker_failure_rechecks_token_inside_publish_transaction(monkeypatch, tmp_path):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'failure-token-race.db').as_posix()}")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        user = _user(db)
+        contract = Contract(
+            filename="token-race.txt",
+            storage_path=str(tmp_path / "token-race.txt"),
+            department=user.department,
+            uploaded_by=user.id,
+            status="reviewing",
+            audit_generation=1,
+        )
+        batch = AuditBatch(
+            owner_id=user.id,
+            department=user.department,
+            idempotency_key="failure-token-race",
+        )
+        db.add_all([contract, batch])
+        db.flush()
+        item = AuditBatchItem(
+            batch_id=batch.id,
+            contract_id=contract.id,
+            filename=contract.filename,
+            audit_generation=1,
+        )
+        db.add(item)
+        db.commit()
+        contract_id, item_id = contract.id, item.id
+
+    worker_sessions: list[Session] = []
+
+    def session_factory():
+        session = Session(engine)
+        worker_sessions.append(session)
+        return session
+
+    class InterleavingFailure:
+        code = "AUDIT_INTERNAL_ERROR"
+        message = "审查任务执行失败，请联系管理员"
+
+        @property
+        def retryable(self):
+            worker_sessions[0].rollback()
+            with Session(engine) as replacement:
+                current_contract = replacement.get(Contract, contract_id)
+                current_item = replacement.get(AuditBatchItem, item_id)
+                current_contract.status = "reviewing"
+                current_item.status = "reviewing"
+                current_item.execution_token = "new-worker-token"
+                current_item.error_code = None
+                current_item.error = None
+                replacement.commit()
+            return False
+
+    def fail_after_claim(*_args, **_kwargs):
+        raise RuntimeError("worker failed after claim")
+
+    monkeypatch.setattr(audit_tasks, "SessionLocal", session_factory)
+    monkeypatch.setattr(audit_tasks, "classify_task_error", lambda _exc: InterleavingFailure())
+    monkeypatch.setattr(audit_tasks, "run_audit", fail_after_claim)
+
+    with pytest.raises(RuntimeError, match="worker failed after claim"):
+        run_contract_audit.run(contract_id, ["legal"], item_id)
+
+    with Session(engine) as db:
+        saved_contract = db.get(Contract, contract_id)
+        saved_item = db.get(AuditBatchItem, item_id)
+        assert saved_contract.status == "reviewing"
+        assert saved_item.status == "reviewing"
+        assert saved_item.execution_token == "new-worker-token"
+        assert saved_item.error_code is None
+        assert saved_item.error is None
 
 
 def test_recovery_dispatches_queued_and_expired_items_only(tmp_path):

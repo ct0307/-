@@ -76,7 +76,9 @@ def recover_local_audit_items(
             db.query(AuditBatchItem)
             .filter(
                 AuditBatchItem.task_id.like("local:%"),
-                AuditBatchItem.status.in_(("queued", "parsing", "auditing")),
+                AuditBatchItem.status.in_(
+                    ("queued", "parsing", "reviewing", "validating", "auditing")
+                ),
             )
             .with_for_update()
             .all()

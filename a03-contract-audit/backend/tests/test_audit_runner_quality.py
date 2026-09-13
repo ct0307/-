@@ -34,7 +34,7 @@ def _contract(db: Session, name: str) -> Contract:
     return contract
 
 
-def test_low_confidence_ocr_requires_review_and_keeps_one_quality_risk(
+def test_low_confidence_ocr_requires_review_without_publishing_quality_risk(
     monkeypatch, db: Session
 ):
     contract = _contract(db, "scan.pdf")
@@ -49,7 +49,10 @@ def test_low_confidence_ocr_requires_review_and_keeps_one_quality_risk(
     monkeypatch.setattr(
         runner,
         "audit_contract",
-        lambda *_args, **_kwargs: {"risks": [], "cross_checks": []},
+        lambda *_args, **_kwargs: {
+            "risks": [], "cross_checks": [], "issues": [],
+            "coverage": {"planned": 1, "completed": 1},
+        },
     )
 
     result = run_audit(db, contract)
@@ -62,8 +65,9 @@ def test_low_confidence_ocr_requires_review_and_keeps_one_quality_risk(
     assert contract.ocr_confidence == 0.42
     assert contract.requires_review is True
     assert result["requires_review"] is True
-    assert [risk.category for risk in risks].count("扫描件识别质量不足") == 1
-    assert next(risk for risk in risks if risk.category == "扫描件识别质量不足").tier == "red"
+    assert result["status"] == "review_required"
+    assert result["quality_reasons"] == ["PARSE_QUALITY_LOW"]
+    assert risks == []
 
 
 def test_native_high_quality_contract_finishes_without_quality_risk(
@@ -75,7 +79,10 @@ def test_native_high_quality_contract_finishes_without_quality_risk(
     monkeypatch.setattr(
         runner,
         "audit_contract",
-        lambda *_args, **_kwargs: {"risks": [], "cross_checks": []},
+        lambda *_args, **_kwargs: {
+            "risks": [], "cross_checks": [], "issues": [],
+            "coverage": {"planned": 1, "completed": 1},
+        },
     )
 
     result = run_audit(db, contract)
@@ -84,7 +91,38 @@ def test_native_high_quality_contract_finishes_without_quality_risk(
     assert contract.status == "done"
     assert contract.requires_review is False
     assert result["requires_review"] is False
+    assert result["status"] == "done"
+    assert result["coverage"] == {"planned": 1, "completed": 1}
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
+
+
+@pytest.mark.parametrize(
+    "coverage",
+    [
+        None,
+        {"planned": True, "completed": True},
+        {"planned": "1", "completed": "1"},
+        {"planned": 1.0, "completed": 1.0},
+    ],
+    ids=["missing", "bool", "numeric-string", "float"],
+)
+def test_invalid_audit_coverage_fails_closed(monkeypatch, db: Session, coverage):
+    contract = _contract(db, "invalid-coverage.txt")
+    monkeypatch.setattr(
+        runner,
+        "extract_document",
+        lambda _path: DocumentParseResult(text="有效合同正文" * 60, source="native"),
+    )
+    model_result = {"risks": [], "cross_checks": [], "issues": []}
+    if coverage is not None:
+        model_result["coverage"] = coverage
+    monkeypatch.setattr(runner, "audit_contract", lambda *_args, **_kwargs: model_result)
+
+    result = run_audit(db, contract)
+
+    assert result["status"] == "audit_failed"
+    assert result["coverage"] == {"planned": 0, "completed": 0}
+    assert [issue["code"] for issue in result["issues"]] == ["INVALID_MODEL_OUTPUT"]
 
 
 def test_run_audit_persists_clauses_claims_and_contract_evidence(monkeypatch, db: Session):
@@ -139,10 +177,11 @@ def test_run_audit_persists_clauses_claims_and_contract_evidence(monkeypatch, db
                 "original_text_verified": True,
                 "requires_manual_review": False,
                 "rag_sources": [],
-            }],
-            "cross_checks": [],
-        },
-    )
+                }],
+                "cross_checks": [],
+                "coverage": {"planned": 1, "completed": 1},
+            },
+        )
 
     run_audit(db, contract)
 
@@ -189,10 +228,11 @@ def test_evidence_gap_promotes_contract_to_manual_review(monkeypatch, db: Sessio
                 "original_text_verified": False,
                 "requires_manual_review": True,
                 "rag_sources": [],
-            }],
-            "cross_checks": [],
-        },
-    )
+                }],
+                "cross_checks": [],
+                "coverage": {"planned": 1, "completed": 1},
+            },
+        )
 
     result = run_audit(db, contract)
     db.refresh(contract)
@@ -200,7 +240,7 @@ def test_evidence_gap_promotes_contract_to_manual_review(monkeypatch, db: Sessio
     assert result["requires_review"] is True
     assert contract.requires_review is True
     assert contract.status == "review_required"
-    assert contract.review_reason == "存在证据不足或原文未核验的风险"
+    assert contract.review_reason == "风险原文尚未核验；风险依据尚未核验"
     risk = db.query(Risk).filter(Risk.contract_id == contract.id).one()
     assert risk.support_validator_version == "unvalidated"
 
@@ -223,10 +263,152 @@ def test_short_native_text_requires_review_without_duplicate_parse_risk(
     risks = db.query(Risk).filter(Risk.contract_id == contract.id).all()
 
     assert contract.requires_review is True
-    assert contract.review_reason == "合同文本长度不足 200 字"
+    assert contract.review_reason == "合同文本不完整，需人工复核"
     assert contract.status == "review_required"
     assert result["requires_review"] is True
-    assert [risk.category for risk in risks].count("文本解析失败") == 1
+    assert result["status"] == "review_required"
+    assert result["quality_reasons"] == ["CONTRACT_TEXT_INCOMPLETE"]
+    assert risks == []
+
+
+def test_failed_quality_keeps_previous_pending_risks(monkeypatch, db: Session):
+    contract = _contract(db, "failed-quality.txt")
+    previous = Risk(
+        contract_id=contract.id,
+        agent="legal",
+        level="low",
+        category="上一代风险",
+        original_text="上一代原文",
+        basis="上一代依据",
+        suggestion="上一代建议",
+        confidence=80,
+        tier="green",
+        review_status="pending",
+        rag_sources="[]",
+    )
+    db.add(previous)
+    db.commit()
+    monkeypatch.setattr(
+        runner,
+        "extract_document",
+        lambda _path: DocumentParseResult(text="有效合同正文" * 60, source="native"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "audit_contract",
+        lambda *_args, **_kwargs: {
+            "risks": [],
+            "cross_checks": [],
+            "issues": [{
+                "code": "MODEL_TIMEOUT",
+                "agent": "legal",
+                "window_id": "legal-1",
+                "detail": "模型超时",
+            }],
+            "coverage": {"planned": 1, "completed": 0},
+        },
+    )
+
+    result = run_audit(db, contract)
+
+    db.refresh(contract)
+    assert result["status"] == "audit_failed"
+    assert result["risk_count"] == 0
+    assert contract.status == "audit_failed"
+    assert contract.requires_review is False
+    assert db.query(Risk).filter(Risk.contract_id == contract.id).one().id == previous.id
+
+
+def test_partial_failure_publishes_verified_risk_and_quality_snapshot(monkeypatch, db: Session):
+    user = User(
+        username="partial-user",
+        password_hash="not-used",
+        role="legal",
+        department="法务部",
+    )
+    db.add(user)
+    db.flush()
+    contract = Contract(
+        filename="partial.txt",
+        storage_path="/partial.txt",
+        department=user.department,
+        uploaded_by=user.id,
+        status="reviewing",
+        audit_generation=4,
+    )
+    batch = AuditBatch(
+        owner_id=user.id,
+        department=user.department,
+        idempotency_key="partial-quality",
+    )
+    db.add_all([contract, batch])
+    db.flush()
+    item = AuditBatchItem(
+        batch_id=batch.id,
+        contract_id=contract.id,
+        filename=contract.filename,
+        status="reviewing",
+        audit_generation=4,
+        execution_token="partial-token",
+    )
+    db.add(item)
+    db.commit()
+    observed_generations: list[int] = []
+    monkeypatch.setattr(
+        runner,
+        "extract_document",
+        lambda _path: DocumentParseResult(text="有效合同正文" * 60, source="native"),
+    )
+
+    def fake_audit(*_args, audit_generation=0, **_kwargs):
+        observed_generations.append(audit_generation)
+        return {
+            "risks": [{
+                "agent": "legal",
+                "level": "medium",
+                "category": "已核验风险",
+                "original_text": "有效合同正文",
+                "risk_reason": "存在付款风险",
+                "basis": "已核验依据",
+                "suggestion": "补充付款条件",
+                "confidence": 88,
+                "tier": "green",
+                "evidence_status": "supported",
+                "support_relation_status": "supported",
+                "original_text_verified": True,
+                "requires_manual_review": False,
+            }],
+            "cross_checks": [],
+            "issues": [{
+                "code": "MODEL_TIMEOUT",
+                "agent": "finance",
+                "window_id": "finance-2",
+                "detail": "供应商返回的任意正文不得持久化",
+            }],
+            "coverage": {"planned": 2, "completed": 1},
+        }
+
+    monkeypatch.setattr(runner, "audit_contract", fake_audit)
+
+    result = run_audit(
+        db,
+        contract,
+        generation=4,
+        batch_item_id=item.id,
+        execution_token="partial-token",
+    )
+
+    db.expire_all()
+    saved_item = db.get(AuditBatchItem, item.id)
+    snapshot = json.loads(saved_item.result_json)
+    assert observed_generations == [4]
+    assert result["status"] == saved_item.status == "review_required"
+    assert result["risk_count"] == 1
+    assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 1
+    assert snapshot["quality_reasons"] == ["INCOMPLETE_COVERAGE", "MODEL_TIMEOUT"]
+    assert snapshot["coverage"] == {"planned": 2, "completed": 1}
+    assert snapshot["issues"][0]["detail"] == "模型调用超时"
+    assert "供应商返回" not in saved_item.result_json
 
 
 def test_run_audit_releases_claim_transaction_before_external_work(monkeypatch, db: Session):
@@ -271,8 +453,8 @@ def test_run_audit_releases_claim_transaction_before_external_work(monkeypatch, 
     run_audit(db, contract)
 
     assert transaction_states == [False, False]
-    assert lock_calls == 2
-    assert commits == 2
+    assert lock_calls == 3
+    assert commits == 3
 
 
 def test_stale_audit_generation_cannot_publish(monkeypatch, db: Session):
@@ -486,7 +668,7 @@ def test_task_publish_rolls_back_risks_and_terminal_state_together(monkeypatch, 
     def fail_publish_commit():
         nonlocal commits
         commits += 1
-        if commits == 1:
+        if commits == 2:
             raise RuntimeError("publish commit failed")
         return original_commit()
 
@@ -503,7 +685,7 @@ def test_task_publish_rolls_back_risks_and_terminal_state_together(monkeypatch, 
 
     db.rollback()
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
-    assert db.get(AuditBatchItem, item.id).status == "auditing"
+    assert db.get(AuditBatchItem, item.id).status == "validating"
 
 
 def test_expired_worker_execution_token_cannot_publish(monkeypatch, db: Session):

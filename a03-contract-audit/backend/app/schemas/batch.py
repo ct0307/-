@@ -4,8 +4,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-BatchStatus = Literal["queued", "running", "done", "partial_failed", "failed"]
-BatchItemStatus = Literal["queued", "parsing", "auditing", "done", "failed"]
+BatchStatus = Literal[
+    "queued", "running", "done", "review_required", "partial_failed", "failed",
+]
+BatchItemStatus = Literal[
+    "queued", "parsing", "reviewing", "validating", "done", "review_required", "failed",
+]
 
 
 class BatchItemOut(BaseModel):

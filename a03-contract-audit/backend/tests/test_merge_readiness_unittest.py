@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from importlib.util import find_spec
 from unittest.mock import patch
 
@@ -9,13 +10,92 @@ from app.api.deps import get_current_user
 from app.api.v1.endpoints import contracts, risks, runtime
 from app.db import init_db as init_db_module
 from app.db.session import Base
-from app.models.models import Contract, Risk, User
+from app.models.models import AuditBatch, AuditBatchItem, Contract, Risk, User
 from app.schemas.contract import RiskStatusUpdate
-from app.tasks.audit_tasks import run_contract_audit
+from app.tasks.audit_tasks import recover_orphaned_batch_items, run_contract_audit
 from scripts import migrate_sqlite_to_postgres
 
 
 class MergeReadinessTests(unittest.TestCase):
+    def test_orphan_recovery_resets_running_states_and_ignores_terminal_states(self):
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        try:
+            with Session(engine) as db:
+                user = User(
+                    username="recovery-user",
+                    password_hash="hash",
+                    role="legal",
+                    department="法务部",
+                )
+                batch = AuditBatch(
+                    owner_id=1,
+                    department="法务部",
+                    idempotency_key="recovery-state-matrix",
+                    dimensions_json='["legal"]',
+                )
+                db.add_all([user, batch])
+                db.flush()
+                item_statuses = (
+                    "parsing", "reviewing", "validating", "review_required", "done", "failed",
+                )
+                items = []
+                for index, item_status in enumerate(item_statuses):
+                    contract = Contract(
+                        filename=f"contract-{index}.pdf",
+                        storage_path=f"/contract-{index}.pdf",
+                        department=user.department,
+                        uploaded_by=user.id,
+                    )
+                    db.add(contract)
+                    db.flush()
+                    item = AuditBatchItem(
+                        batch_id=batch.id,
+                        contract_id=contract.id,
+                        filename=contract.filename,
+                        status=item_status,
+                        task_id=f"task-{index}",
+                        execution_token=f"token-{index}",
+                        lease_expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+                    )
+                    db.add(item)
+                    items.append(item)
+                db.commit()
+                item_ids = {item.status: item.id for item in items}
+                status_indexes = {
+                    item_status: index for index, item_status in enumerate(item_statuses)
+                }
+
+            dispatched = []
+            recovered = recover_orphaned_batch_items(
+                session_factory=lambda: Session(engine),
+                dispatch=lambda contract_id, dimensions, item_id: (
+                    dispatched.append((contract_id, dimensions, item_id)) or f"retry-{item_id}"
+                ),
+            )
+
+            self.assertEqual(recovered, 3)
+            self.assertEqual(
+                {item_id for _, _, item_id in dispatched},
+                {item_ids[status] for status in ("parsing", "reviewing", "validating")},
+            )
+            with Session(engine) as db:
+                for item_status in ("parsing", "reviewing", "validating"):
+                    item = db.get(AuditBatchItem, item_ids[item_status])
+                    self.assertEqual(item.status, "queued")
+                    self.assertIsNone(item.execution_token)
+                    self.assertIsNone(item.lease_expires_at)
+                    self.assertEqual(item.task_id, f"retry-{item.id}")
+                for item_status in ("review_required", "done", "failed"):
+                    item = db.get(AuditBatchItem, item_ids[item_status])
+                    self.assertEqual(item.status, item_status)
+                    index = status_indexes[item_status]
+                    self.assertEqual(item.execution_token, f"token-{index}")
+                    self.assertEqual(item.task_id, f"task-{index}")
+                    self.assertIsNotNone(item.lease_expires_at)
+        finally:
+            engine.dispose()
+
     def test_sqlite_hot_migration_adds_window_observation_columns_and_indexes(self):
         engine = create_engine("sqlite:///:memory:")
         try:

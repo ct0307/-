@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Response, UploadFile, status
+from sqlalchemy import exists
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -16,6 +17,7 @@ from app.core.config import settings
 from app.core.crypto import encrypt_bytes
 from app.db.session import get_db
 from app.models.models import (
+    AuditBatchItem,
     AuditLog,
     Contract,
     ImportAppendRequest,
@@ -24,6 +26,7 @@ from app.models.models import (
     User,
 )
 from app.schemas.import_batch import ConfirmImportItem, ImportBatchOut, ImportItemOut
+from app.services.batch.service import ACTIVE_AUDIT_ITEM_STATUSES
 from app.services.imports.service import summarize_import
 from app.tasks.dispatcher import dispatch_import_item
 
@@ -522,13 +525,37 @@ def delete_contract_draft(
 ) -> ImportItemOut:
     batch, item = _get_item(db, batch_id, item_id, user)
     contract = item.contract
-    if not contract or item.status in {"auditing", "done"} or contract.status in {"auditing", "done"}:
+    protected_contract_statuses = ACTIVE_AUDIT_ITEM_STATUSES | {"done", "review_required"}
+    if (
+        not contract
+        or item.status in {"auditing", "done"}
+        or contract.status in protected_contract_statuses
+    ):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             {"code": "CONTRACT_BUSY", "message": "审查中或已审查合同不能删除"},
         )
-    contract.deleted_at = datetime.now(timezone.utc)
-    contract.deleted_by = user.id
+    deleted_at = datetime.now(timezone.utc)
+    active_audit = exists().where(
+        AuditBatchItem.contract_id == Contract.id,
+        AuditBatchItem.status.in_(ACTIVE_AUDIT_ITEM_STATUSES),
+    )
+    deleted = db.query(Contract).filter(
+        Contract.id == contract.id,
+        Contract.deleted_at.is_(None),
+        Contract.status.notin_(protected_contract_statuses),
+        ~active_audit,
+    ).update(
+        {Contract.deleted_at: deleted_at, Contract.deleted_by: user.id},
+        synchronize_session=False,
+    )
+    if deleted != 1:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"code": "CONTRACT_BUSY", "message": "审查中或已审查合同不能删除"},
+        )
+    db.expire(contract)
     item.status = "deleted"
     db.add(AuditLog(
         user_id=user.id,

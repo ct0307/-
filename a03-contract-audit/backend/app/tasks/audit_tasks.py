@@ -12,13 +12,17 @@ import uuid
 from typing import Callable
 
 from celery.signals import worker_ready
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, exists, or_
 from sqlalchemy.orm import Session
 
 from app.models.models import AuditBatchItem, Contract, ImportBatchItem
 from app.llm.base import LLMError
 from app.services.audit.runner import StaleAuditRun, run_audit
-from app.services.batch.service import retry_failed_item, transition_item
+from app.services.batch.service import (
+    ACTIVE_AUDIT_ITEM_STATUSES,
+    retry_failed_item,
+    transition_item,
+)
 from app.tasks.celery_app import celery_app
 from app.tasks.import_tasks import refresh_import_batch
 
@@ -37,9 +41,15 @@ def classify_task_error(exc: Exception) -> TaskErrorInfo:
     if isinstance(exc, StaleAuditRun):
         return TaskErrorInfo("STALE_AUDIT_RUN", "审查任务已被更新的运行取代", False)
     if isinstance(exc, LLMError):
-        if "超时" in str(exc):
-            return TaskErrorInfo("MODEL_TIMEOUT", "模型调用超时，请稍后重试", True)
-        return TaskErrorInfo("MODEL_UNAVAILABLE", "模型服务暂时不可用，请稍后重试", True)
+        messages = {
+            "MODEL_TIMEOUT": "模型调用超时，请稍后重试",
+            "MODEL_UNAVAILABLE": "模型服务暂时不可用，请稍后重试",
+        }
+        return TaskErrorInfo(
+            exc.code,
+            messages.get(exc.code, "模型审查失败，请检查服务状态后重试"),
+            exc.retryable,
+        )
     return TaskErrorInfo("AUDIT_INTERNAL_ERROR", "审查任务执行失败，请联系管理员", False)
 
 
@@ -77,7 +87,9 @@ def recover_orphaned_batch_items(
                         ),
                     ),
                     and_(
-                        AuditBatchItem.status.in_(("parsing", "auditing")),
+                        AuditBatchItem.status.in_(
+                            ACTIVE_AUDIT_ITEM_STATUSES - {"queued"}
+                        ),
                         or_(
                             AuditBatchItem.lease_expires_at.is_(None),
                             AuditBatchItem.lease_expires_at <= now,
@@ -92,7 +104,7 @@ def recover_orphaned_batch_items(
         )
         for item in candidates:
             try:
-                if item.status in {"parsing", "auditing"}:
+                if item.status in ACTIVE_AUDIT_ITEM_STATUSES - {"queued"}:
                     item.status = "queued"
                     item.lease_expires_at = None
                     item.task_id = None
@@ -139,6 +151,7 @@ def run_contract_audit(
     """单份合同审查任务：解析 → 审查 → 落库。worker 进程内自建 DB 会话。"""
     db = SessionLocal()
     execution_token: str | None = None
+    audit_generation: int | None = None
     try:
         item = (
             db.query(AuditBatchItem)
@@ -148,11 +161,13 @@ def run_contract_audit(
             if batch_item_id
             else None
         )
-        if item and item.status == "done":
-            return {"contract_id": contract_id, "status": "already_done"}
+        if item and item.status in {"done", "review_required"}:
+            return {"contract_id": contract_id, "status": f"already_{item.status}"}
         if item:
             now = datetime.now(timezone.utc)
-            if item.status in {"parsing", "auditing"} and _lease_is_active(item.lease_expires_at, now):
+            if item.status in ACTIVE_AUDIT_ITEM_STATUSES and _lease_is_active(
+                item.lease_expires_at, now
+            ):
                 db.commit()
                 return {"contract_id": contract_id, "status": "already_running"}
             if item.status == "failed":
@@ -163,6 +178,7 @@ def run_contract_audit(
             item.lease_expires_at = now + timedelta(minutes=30)
             execution_token = uuid.uuid4().hex
             item.execution_token = execution_token
+            audit_generation = item.audit_generation
             db.commit()
 
         contract = db.query(Contract).filter(Contract.id == contract_id).first()
@@ -175,7 +191,8 @@ def run_contract_audit(
                 db.commit()
             return {"contract_id": contract_id, "error": "not_found"}
         if item:
-            item.status = transition_item(item.status, "auditing")
+            item.status = transition_item(item.status, "reviewing")
+            contract.status = "reviewing"
             db.commit()
         result = run_audit(
             db,
@@ -186,16 +203,22 @@ def run_contract_audit(
             execution_token=execution_token,
         )
         if item:
-            _complete_import_item(db, item)
+            if result["status"] in {"done", "review_required"}:
+                _complete_import_item(db, item)
+            else:
+                _return_import_item_to_ready(db, item)
             db.commit()
         return {
             "contract_id": contract_id,
             "risk_count": result["risk_count"],
             "cross_checks": result["cross_checks"],
-            "status": "done",
+            "status": result["status"],
             "requires_review": bool(result.get("requires_review", False)),
             "ocr_confidence": result.get("ocr_confidence"),
             "review_reason": result.get("review_reason"),
+            "quality_reasons": result.get("quality_reasons", []),
+            "issues": result.get("issues", []),
+            "coverage": result.get("coverage", {"planned": 0, "completed": 0}),
         }
     except Exception as exc:  # noqa: BLE001
         db.rollback()
@@ -206,30 +229,82 @@ def run_contract_audit(
             error_code=failure.code,
             exception_type=type(exc).__name__,
         )
-        item = db.query(AuditBatchItem).filter(AuditBatchItem.id == batch_item_id).first() if batch_item_id else None
-        if item and item.execution_token != execution_token:
-            db.rollback()
-            raise
         retries = int(getattr(self.request, "retries", 0))
-        contract = db.query(Contract).filter(Contract.id == contract_id).first()
+        item = (
+            db.query(AuditBatchItem)
+            .filter(
+                AuditBatchItem.id == batch_item_id,
+                AuditBatchItem.contract_id == contract_id,
+            )
+            .populate_existing()
+            .first()
+            if batch_item_id
+            else None
+        )
         persisted_attempts = item.attempts if item else retries
+        failure_status = item.status if item else None
+        failure_attempts = item.attempts if item else retries
+        if item and failure_status not in {"done", "review_required", "failed"}:
+            failure_status = (
+                "failed"
+                if failure_status == "auditing"
+                else transition_item(failure_status, "failed")
+            )
         should_retry = failure.retryable and max(retries, persisted_attempts) < self.max_retries
-        if item:
-            if item.status not in {"done", "failed"}:
-                item.status = transition_item(item.status, "failed")
-            item.error_code = failure.code
-            item.error = failure.message
-            item.lease_expires_at = None
-            item.execution_token = None
+        if batch_item_id:
+            if item is None or audit_generation is None or not execution_token:
+                db.rollback()
+                raise
+            values = {
+                AuditBatchItem.status: failure_status,
+                AuditBatchItem.error_code: failure.code,
+                AuditBatchItem.error: failure.message,
+                AuditBatchItem.lease_expires_at: None,
+                AuditBatchItem.execution_token: None,
+            }
             if should_retry:
-                decision = retry_failed_item(item.status, attempts=item.attempts)
-                item.status = decision.status
-                item.attempts = decision.attempts
+                decision = retry_failed_item(failure_status, attempts=failure_attempts)
+                values[AuditBatchItem.status] = decision.status
+                values[AuditBatchItem.attempts] = decision.attempts
             else:
-                item.finished_at = datetime.now(timezone.utc)
+                values[AuditBatchItem.finished_at] = datetime.now(timezone.utc)
+
+            contract_fence = db.query(Contract).filter(
+                Contract.id == contract_id,
+                Contract.audit_generation == audit_generation,
+            ).update(
+                {Contract.audit_generation: Contract.audit_generation},
+                synchronize_session=False,
+            )
+            contract_generation_matches = exists().where(
+                Contract.id == contract_id,
+                Contract.audit_generation == audit_generation,
+            )
+            published = db.query(AuditBatchItem).filter(
+                AuditBatchItem.id == batch_item_id,
+                AuditBatchItem.contract_id == contract_id,
+                AuditBatchItem.audit_generation == audit_generation,
+                AuditBatchItem.execution_token == execution_token,
+                contract_generation_matches,
+            ).update(values, synchronize_session=False)
+            if contract_fence != 1 or published != 1:
+                db.rollback()
+                raise
+            if not should_retry:
                 _return_import_item_to_ready(db, item)
-        if not should_retry and failure.code != "STALE_AUDIT_RUN" and contract:
-            contract.status = "audit_failed"
+
+        if not should_retry and failure.code != "STALE_AUDIT_RUN":
+            contract_updated = db.query(Contract).filter(
+                Contract.id == contract_id,
+                *(
+                    [Contract.audit_generation == audit_generation]
+                    if batch_item_id
+                    else []
+                ),
+            ).update({Contract.status: "audit_failed"}, synchronize_session=False)
+            if batch_item_id and contract_updated != 1:
+                db.rollback()
+                raise
         db.commit()
         if should_retry:
             raise self.retry(exc=exc, countdown=10)

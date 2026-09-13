@@ -85,7 +85,7 @@ def test_audit_reliability_fields_round_trip():
     item_payload = BatchItemOut.model_validate(saved)
     audit_payload = AuditResponse(
         contract_id=contract.id,
-        status="failed",
+        status="audit_failed",
         batch_id=batch.id,
         job_id=item.id,
         error_code=saved.error_code,
@@ -95,6 +95,27 @@ def test_audit_reliability_fields_round_trip():
     assert item_payload.error_code == "MODEL_TIMEOUT"
     assert audit_payload.job_id == item.id
     assert audit_payload.retryable is True
+
+
+def test_audit_response_exposes_typed_quality_fields_without_shared_defaults():
+    first = AuditResponse(
+        contract_id=1,
+        status="review_required",
+        quality_reasons=["PARSE_QUALITY_LOW"],
+        coverage={"planned": 2, "completed": 1},
+    )
+    second = AuditResponse(contract_id=2, status="done")
+
+    first.cross_checks.append({
+        "id": "CC1", "from_agent": "legal", "to_agent": "finance",
+        "trigger": "付款", "action": "复核", "verdict": "conflict",
+        "note": "不一致", "category": "付款",
+    })
+    assert first.coverage.planned == 2
+    assert first.quality_reasons == ["PARSE_QUALITY_LOW"]
+    assert second.cross_checks == []
+    assert second.quality_reasons == []
+    assert second.coverage is None
 
 
 def test_single_audit_job_is_idempotent_and_rejects_payload_mismatch():
@@ -202,7 +223,7 @@ def test_audit_endpoint_commits_job_before_dispatch_and_dispatches_once(
         user=user,
     )
 
-    assert first.status == "auditing"
+    assert first.status == "queued"
     assert first.job_id is not None
     assert first.batch_id is not None
     assert first.task_id == "task-001"
@@ -210,6 +231,188 @@ def test_audit_endpoint_commits_job_before_dispatch_and_dispatches_once(
     assert dispatched == [(contract.id, ["legal"], first.job_id)]
     db.close()
     engine.dispose()
+
+
+def test_audit_endpoint_replays_failed_item_as_audit_failed(monkeypatch):
+    from app.api.v1.endpoints import contracts
+
+    db = _session()
+    user = _user(db)
+    contract = Contract(
+        filename="failed-replay.pdf",
+        storage_path="/private/failed-replay.pdf",
+        contract_type="采购合同",
+        department=user.department,
+        uploaded_by=user.id,
+        status="parsed",
+    )
+    db.add(contract)
+    db.commit()
+    monkeypatch.setattr(contracts, "dispatch_audit_item", lambda *_args: "task-001")
+    request = AuditRequest(contract_type="采购合同", dimensions=["legal"])
+    first = contracts.audit_contract_endpoint(
+        contract.id,
+        request,
+        idempotency_key="failed-replay-001",
+        db=db,
+        user=user,
+    )
+    item = db.get(AuditBatchItem, first.job_id)
+    item.status = "failed"
+    item.error_code = "MODEL_TIMEOUT"
+    item.error = "模型调用超时，请稍后重试"
+    db.commit()
+
+    replay = contracts.audit_contract_endpoint(
+        contract.id,
+        request,
+        idempotency_key="failed-replay-001",
+        db=db,
+        user=user,
+    )
+
+    assert replay.status == "audit_failed"
+    assert replay.requires_review is False
+    assert replay.error_code == "MODEL_TIMEOUT"
+
+
+def test_audit_endpoint_replay_uses_selected_item_quality_snapshot(monkeypatch):
+    from app.api.v1.endpoints import contracts
+
+    db = _session()
+    user = _user(db)
+    contract = Contract(
+        filename="snapshot.pdf",
+        storage_path="/private/snapshot.pdf",
+        contract_type="采购合同",
+        department=user.department,
+        uploaded_by=user.id,
+        status="parsed",
+    )
+    db.add(contract)
+    db.commit()
+    monkeypatch.setattr(contracts, "dispatch_audit_item", lambda *_args: "task-001")
+    request = AuditRequest(contract_type="采购合同", dimensions=["legal"])
+    first = contracts.audit_contract_endpoint(
+        contract.id,
+        request,
+        idempotency_key="snapshot-replay-001",
+        db=db,
+        user=user,
+    )
+    item = db.get(AuditBatchItem, first.job_id)
+    item.status = "done"
+    item.result_json = json.dumps({
+        "risk_count": 2,
+        "requires_review": True,
+        "ocr_confidence": 0.62,
+        "review_reason": "旧任务不应显示该原因",
+        "quality_reasons": ["EVIDENCE_UNRESOLVED"],
+        "coverage": {"planned": 2, "completed": 2},
+        "cross_checks": [{
+            "id": "CC-SNAPSHOT",
+            "from_agent": "legal",
+            "to_agent": "finance",
+            "trigger": "付款冲突",
+            "action": "复核",
+            "verdict": "confirmed",
+            "note": "已消解",
+            "category": "付款",
+        }],
+    }, ensure_ascii=False)
+    contract.audit_generation += 1
+    contract.status = "review_required"
+    contract.requires_review = True
+    contract.ocr_confidence = 0.19
+    contract.review_reason = "新一代合同状态"
+    db.commit()
+
+    replay = contracts.audit_contract_endpoint(
+        contract.id,
+        request,
+        idempotency_key="snapshot-replay-001",
+        db=db,
+        user=user,
+    )
+
+    assert replay.status == "done"
+    assert replay.risk_count == 2
+    assert replay.requires_review is False
+    assert replay.review_reason is None
+    assert replay.quality_reasons == ["EVIDENCE_UNRESOLVED"]
+    assert replay.coverage.model_dump() == {"planned": 2, "completed": 2}
+    assert [value.id for value in replay.cross_checks] == ["CC-SNAPSHOT"]
+    assert replay.ocr_confidence == 0.62
+    restored = contracts.get_contract_audit_status(
+        contract.id, job_id=item.id, db=db, user=user
+    )
+    assert restored.model_dump() == replay.model_dump()
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        "not-json",
+        "[]",
+        json.dumps({
+            "risk_count": {"bad": True},
+            "quality_reasons": ["VALID", 3],
+            "coverage": {"planned": True, "completed": 0},
+            "ocr_confidence": float("nan"),
+            "cross_checks": [{"id": "missing-required-fields"}],
+            "review_reason": {"bad": True},
+        }),
+        json.dumps({"ocr_confidence": True}),
+        json.dumps({"ocr_confidence": {"bad": True}}),
+        json.dumps({"ocr_confidence": -0.1}),
+        json.dumps({"ocr_confidence": 1.1}),
+        json.dumps({"ocr_confidence": 10 ** 400}),
+    ],
+)
+def test_audit_status_bad_snapshot_fails_closed(snapshot):
+    from app.api.v1.endpoints import contracts
+
+    db = _session()
+    user = _user(db)
+    contract = Contract(
+        filename="bad-snapshot.pdf",
+        storage_path="/private/bad-snapshot.pdf",
+        department=user.department,
+        uploaded_by=user.id,
+        status="review_required",
+        requires_review=True,
+        ocr_confidence=0.91,
+        review_reason="合同当前状态不得污染任务快照",
+    )
+    batch = AuditBatch(
+        owner_id=user.id,
+        department=user.department,
+        idempotency_key=f"bad-snapshot-{abs(hash(snapshot))}",
+    )
+    db.add_all([contract, batch])
+    db.flush()
+    item = AuditBatchItem(
+        batch_id=batch.id,
+        contract_id=contract.id,
+        filename=contract.filename,
+        status="review_required",
+        result_json=snapshot,
+    )
+    db.add(item)
+    db.commit()
+
+    response = contracts.get_contract_audit_status(
+        contract.id, job_id=item.id, db=db, user=user
+    )
+
+    assert response.status == "review_required"
+    assert response.risk_count is None
+    assert response.requires_review is True
+    assert response.review_reason is None
+    assert response.quality_reasons == []
+    assert response.coverage is None
+    assert response.cross_checks == []
+    assert response.ocr_confidence is None
 
 
 def test_audit_status_restores_persisted_result_and_failure_details():
@@ -247,7 +450,7 @@ def test_audit_status_restores_persisted_result_and_failure_details():
         result_json=json.dumps(
             {
                 "risk_count": 3,
-                "requires_review": True,
+                "requires_review": False,
                 "ocr_confidence": 0.61,
                 "review_reason": "任务 A 的质量快照",
                 "cross_checks": [
@@ -281,7 +484,7 @@ def test_audit_status_restores_persisted_result_and_failure_details():
         batch_id=newer_batch.id,
         contract_id=contract.id,
         filename=contract.filename,
-        status="auditing",
+        status="reviewing",
         audit_generation=2,
     )
     db.add(newer)
@@ -324,9 +527,9 @@ def test_audit_status_restores_persisted_result_and_failure_details():
     assert result.batch_id == batch.id
     assert result.risk_count == 3
     assert [cross.id for cross in result.cross_checks] == ["CC1"]
-    assert result.requires_review is True
+    assert result.requires_review is False
     assert result.ocr_confidence == 0.61
-    assert result.review_reason == "任务 A 的质量快照"
+    assert result.review_reason is None
     risks = contracts.get_contract_risks(
         contract.id, job_id=item.id, db=db, user=user
     )
@@ -347,7 +550,7 @@ def test_audit_status_restores_persisted_result_and_failure_details():
 
     latest = contracts.get_contract_audit_status(contract.id, db=db, user=user)
     assert latest.job_id == newer.id
-    assert latest.risk_count == 1
+    assert latest.risk_count is None
 
 
 def test_audit_status_rejects_job_from_another_contract():
@@ -491,12 +694,14 @@ def test_audit_task_errors_are_classified_for_safe_retry_policy():
     from app.services.audit.runner import StaleAuditRun
     from app.tasks.audit_tasks import classify_task_error
 
-    timeout = classify_task_error(LLMError("LLM 调用超时（120s）"))
+    timeout = classify_task_error(
+        LLMError("任意安全消息", code="MODEL_TIMEOUT", retryable=False)
+    )
     unavailable = classify_task_error(LLMError("LLM 请求失败：DNS error"))
     stale = classify_task_error(StaleAuditRun("generation mismatch"))
     internal = classify_task_error(RuntimeError("C:/secret/internal traceback"))
 
-    assert (timeout.code, timeout.retryable) == ("MODEL_TIMEOUT", True)
+    assert (timeout.code, timeout.retryable) == ("MODEL_TIMEOUT", False)
     assert (unavailable.code, unavailable.retryable) == ("MODEL_UNAVAILABLE", True)
     assert (stale.code, stale.retryable) == ("STALE_AUDIT_RUN", False)
     assert (internal.code, internal.retryable) == ("AUDIT_INTERNAL_ERROR", False)

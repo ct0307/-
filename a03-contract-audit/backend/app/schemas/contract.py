@@ -1,6 +1,7 @@
 """Pydantic 请求/响应模型。骨架：仅示例核心结构。"""
 import json
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
@@ -17,7 +18,7 @@ class RiskOut(BaseModel):
     risk_reason: str = ""
     tier: str  # 人工干预档位：green/yellow/red
     review_status: str
-    rag_sources: list[dict] = []   # RAG 检索来源：[{content, source, score}]
+    rag_sources: list[dict] = Field(default_factory=list)   # RAG 检索来源
     evidence_status: str = "unsupported"
     original_text_verified: bool | None = None
     requires_manual_review: bool = True
@@ -93,15 +94,26 @@ class CrossCheckOut(BaseModel):
 class AuditRequest(BaseModel):
     """审查触发请求：合同类型必须由用户确认，维度为空表示全量审查。"""
     contract_type: str = ""
-    dimensions: list[str] = []
+    dimensions: list[str] = Field(default_factory=list)
+
+
+AuditStatus = Literal[
+    "queued", "parsing", "reviewing", "validating",
+    "done", "review_required", "audit_failed",
+]
+
+
+class AuditCoverageOut(BaseModel):
+    planned: int = 0
+    completed: int = 0
 
 
 class AuditResponse(BaseModel):
     """审查触发与状态响应，以持久任务状态为事实来源。"""
     contract_id: int
-    status: str
+    status: AuditStatus
     risk_count: int | None = None
-    cross_checks: list[CrossCheckOut] = []
+    cross_checks: list[CrossCheckOut] = Field(default_factory=list)
     task_id: str | None = None
     batch_id: int | None = None
     job_id: int | None = None
@@ -111,6 +123,9 @@ class AuditResponse(BaseModel):
     requires_review: bool = False
     ocr_confidence: float | None = None
     review_reason: str | None = None
+    quality_reasons: list[str] = Field(default_factory=list)
+    issues: list[dict] = Field(default_factory=list)
+    coverage: AuditCoverageOut | None = None
 
 
 class ParseResponse(BaseModel):
@@ -237,7 +252,7 @@ class ContractTemplateOut(BaseModel):
 class ContractTemplateCreate(BaseModel):
     name: str
     type: str = "软件开发外包合同"
-    clauses: list[str] = []
+    clauses: list[str] = Field(default_factory=list)
 
 
 class RectificationOut(BaseModel):

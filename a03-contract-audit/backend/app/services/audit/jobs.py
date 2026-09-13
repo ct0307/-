@@ -3,11 +3,13 @@ from dataclasses import dataclass
 import hashlib
 import json
 
+from sqlalchemy import exists
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.models import AuditBatch, AuditBatchItem, Contract, User
 from app.services import audit_log
+from app.services.batch.service import ACTIVE_AUDIT_ITEM_STATUSES
 
 
 class AuditJobConflict(ValueError):
@@ -49,6 +51,46 @@ def import_batch_request_fingerprint(
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def claim_contract_for_audit(
+    db: Session,
+    *,
+    contract_id: int,
+    contract_type: str | None = None,
+    allow_active: bool = False,
+) -> Contract | None:
+    """以 Contract 条件更新作为创建审查与删除草稿的共同互斥点。"""
+    active_job = exists().where(
+        AuditBatchItem.contract_id == Contract.id,
+        AuditBatchItem.status.in_(ACTIVE_AUDIT_ITEM_STATUSES),
+    )
+    values: dict = {
+        Contract.audit_generation: Contract.audit_generation + 1,
+        Contract.status: "reviewing",
+    }
+    if contract_type is not None:
+        values[Contract.contract_type] = contract_type.strip()
+    conditions = [Contract.id == contract_id, Contract.deleted_at.is_(None)]
+    if not allow_active:
+        conditions.extend(
+            [
+                Contract.status.notin_(ACTIVE_AUDIT_ITEM_STATUSES),
+                ~active_job,
+            ]
+        )
+    claimed = db.query(Contract).filter(*conditions).update(
+        values,
+        synchronize_session=False,
+    )
+    if claimed != 1:
+        return None
+    return (
+        db.query(Contract)
+        .filter(Contract.id == contract_id)
+        .populate_existing()
+        .one()
+    )
 
 
 def _existing_job(
@@ -99,14 +141,15 @@ def create_single_audit_job(
     if existing:
         return existing
 
-    claimed_contract = (
-        db.query(Contract)
-        .filter(Contract.id == contract.id)
-        .with_for_update()
-        .populate_existing()
-        .one()
+    claimed_contract = claim_contract_for_audit(
+        db,
+        contract_id=contract.id,
+        contract_type=contract_type,
+        allow_active=True,
     )
-    claimed_contract.audit_generation += 1
+    if claimed_contract is None:
+        db.rollback()
+        raise AuditJobConflict("合同已删除或不存在")
     generation = claimed_contract.audit_generation
 
     batch = AuditBatch(
@@ -125,8 +168,6 @@ def create_single_audit_job(
         audit_generation=generation,
     )
     batch.items.append(item)
-    claimed_contract.contract_type = contract_type.strip()
-    claimed_contract.status = "auditing"
     db.add(batch)
     try:
         db.flush()

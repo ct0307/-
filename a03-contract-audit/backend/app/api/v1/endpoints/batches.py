@@ -22,8 +22,16 @@ from app.models.models import (
     User,
 )
 from app.schemas.batch import BatchFromImportRequest, BatchOut, BatchRetryOut
-from app.services.audit.jobs import import_batch_request_fingerprint, normalize_dimensions
-from app.services.batch.service import retry_failed_item, summarize
+from app.services.audit.jobs import (
+    claim_contract_for_audit,
+    import_batch_request_fingerprint,
+    normalize_dimensions,
+)
+from app.services.batch.service import (
+    ACTIVE_AUDIT_ITEM_STATUSES,
+    retry_failed_item,
+    summarize,
+)
 from app.tasks.dispatcher import dispatch_audit_item
 
 router = APIRouter()
@@ -92,6 +100,30 @@ def _refresh_batch(batch: AuditBatch) -> None:
 
 def _require_batch_access(batch: AuditBatch, user: User) -> None:
     require_department_access(user, batch.department)
+
+
+def _replay_concurrent_batch_or_raise(
+    db: Session,
+    *,
+    owner_id: int,
+    key: str,
+    fingerprint: str,
+    fallback_detail: dict[str, str],
+) -> BatchOut:
+    """结束当前事务后重查幂等结果；查不到时保留原业务冲突。"""
+    db.rollback()
+    concurrent = db.query(AuditBatch).filter(
+        AuditBatch.owner_id == owner_id,
+        AuditBatch.idempotency_key == key,
+    ).first()
+    if concurrent is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, fallback_detail)
+    if concurrent.request_fingerprint != fingerprint:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"code": "IDEMPOTENCY_CONFLICT", "message": "幂等键已用于其他审查请求"},
+        )
+    return BatchOut.model_validate(concurrent)
 
 
 @router.post("", response_model=BatchOut, status_code=status.HTTP_202_ACCEPTED)
@@ -226,7 +258,6 @@ def create_batch_from_import(
     items = (
         db.query(ImportBatchItem)
         .filter(ImportBatchItem.id.in_(body.import_item_ids))
-        .with_for_update()
         .all()
     )
     item_by_id = {item.id: item for item in items}
@@ -280,13 +311,35 @@ def create_batch_from_import(
             )
         active = db.query(AuditBatchItem.id).filter(
             AuditBatchItem.contract_id == contract.id,
-            AuditBatchItem.status.in_(("queued", "parsing", "auditing")),
+            AuditBatchItem.status.in_(ACTIVE_AUDIT_ITEM_STATUSES),
         ).first()
         if active:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                {"code": "CONTRACT_ALREADY_AUDITING", "message": f"{item.filename} 正在审查"},
+            return _replay_concurrent_batch_or_raise(
+                db,
+                owner_id=user.id,
+                key=key,
+                fingerprint=fingerprint,
+                fallback_detail={
+                    "code": "CONTRACT_ALREADY_AUDITING",
+                    "message": f"{item.filename} 正在审查",
+                },
             )
+
+    claimed_contracts: dict[int, Contract] = {}
+    for contract_id in sorted(item.contract_id for item in ordered_items):
+        claimed = claim_contract_for_audit(db, contract_id=contract_id)
+        if claimed is None:
+            return _replay_concurrent_batch_or_raise(
+                db,
+                owner_id=user.id,
+                key=key,
+                fingerprint=fingerprint,
+                fallback_detail={
+                    "code": "IMPORT_ITEM_NOT_READY",
+                    "message": "合同已删除或正在审查",
+                },
+            )
+        claimed_contracts[contract_id] = claimed
 
     batch = AuditBatch(
         owner_id=user.id,
@@ -298,9 +351,7 @@ def create_batch_from_import(
         total=len(ordered_items),
     )
     for source_item in ordered_items:
-        contract = source_item.contract
-        contract.audit_generation += 1
-        contract.status = "auditing"
+        contract = claimed_contracts[source_item.contract_id]
         source_item.status = "auditing"
         batch.items.append(AuditBatchItem(
             contract=contract,
