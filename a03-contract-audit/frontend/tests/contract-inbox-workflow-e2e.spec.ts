@@ -130,6 +130,40 @@ async function prepare(page: Page) {
         ],
       })
     }
+    if (path.endsWith('/contracts/11/audit-status')) {
+      return fulfillJson(route, {
+        contract_id: 11,
+        status: 'done',
+        job_id: 501,
+        risk_count: 1,
+        cross_checks: [],
+        requires_review: false,
+        ocr_confidence: 0.96,
+        review_reason: null,
+      })
+    }
+    if (path.endsWith('/contracts/11/risks')) {
+      return fulfillJson(route, [{
+        id: 701,
+        agent: 'legal',
+        level: 'high',
+        category: '付款条款',
+        original_text: '验收后一次性付款',
+        risk_reason: '缺少明确付款期限',
+        basis: '《中华人民共和国民法典》第五百零九条',
+        suggestion: '约定验收后十个工作日内付款',
+        confidence: 0.94,
+        tier: 'red',
+        review_status: 'pending',
+        rag_sources: [],
+        evidence_status: 'supported',
+        original_text_verified: true,
+        requires_manual_review: true,
+        support_relation_status: 'supported',
+        support_validation_reason: '依据支持结论',
+        support_validator_version: 'test',
+      }])
+    }
     return fulfillJson(route, [])
   })
 }
@@ -163,7 +197,11 @@ test('uploads mixed contracts, confirms one exception and audits ready items', a
   await expect(page.getByRole('region', { name: '审查批次 88' })).toContainText('已完成')
 
   await page.getByRole('button', { name: '查看 采购合同.txt 的审查结果' }).click()
-  await expect(page).toHaveURL(/\/history\?contract=C0011/)
+  await expect(page).toHaveURL(/\/audit/)
+  await expect(page.getByText('当前查看')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '采购合同.txt' })).toBeVisible()
+  await expect(page.getByText('付款条款', { exact: true })).toBeVisible()
+  await expect(page.getByText('进入复核', { exact: true })).toBeVisible()
 })
 
 test('restores import batch from the url after reload', async ({ page }) => {
