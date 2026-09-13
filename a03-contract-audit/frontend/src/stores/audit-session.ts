@@ -327,6 +327,30 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     }
   }
 
+  async function loadCompletedAudit(selectedContractId: number, selectedFilename: string) {
+    if (busy.value) throw new Error('当前任务处理中，请稍后再试')
+    busy.value = true
+    try {
+      const initial = await getAuditStatus(selectedContractId)
+      const result = await waitForAuditTerminal(
+        async () => initial,
+        { intervalMs: 0, maxAttempts: 1 },
+      )
+      const loadedRisks = await getRisks(selectedContractId, result.job_id)
+
+      contractId.value = selectedContractId
+      filename.value = selectedFilename
+      elements.value = null
+      applyQuality(result)
+      crossChecks.value = result.cross_checks ?? []
+      risks.value = loadedRisks
+      step.value = 2
+      return result
+    } finally {
+      busy.value = false
+    }
+  }
+
   function abortAudit() {
     if (_auditAbort) {
       _auditAbort.abort()
@@ -362,6 +386,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     selectParsedContract,
     runAudit,
     resumeActiveAudit,
+    loadCompletedAudit,
     abortAudit,
     setRiskStatus,
   }
