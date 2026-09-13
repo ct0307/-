@@ -22,7 +22,12 @@ export interface BatchApi {
   retryBatch(batchId: number, dimensions?: string[]): Promise<BatchRetryResult>
 }
 
-const TERMINAL_STATUSES = new Set<AuditBatch['status']>(['done', 'partial_failed', 'failed'])
+const TERMINAL_STATUSES = new Set<AuditBatch['status']>([
+  'done',
+  'review_required',
+  'partial_failed',
+  'failed',
+])
 let testStoreSequence = 0
 
 interface PendingAction {
@@ -58,6 +63,8 @@ export function createBatchStore(
     const error = ref('')
     let pendingAction: PendingAction | null = null
     let timer: ReturnType<typeof setTimeout> | null = null
+    let pollingVersion = 0
+    let activeBatchId: number | null = null
 
     function actionKey(signature: string): string {
       const key = pendingAction?.signature === signature
@@ -74,6 +81,7 @@ export function createBatchStore(
     const isTerminal = computed(() => Boolean(batch.value && TERMINAL_STATUSES.has(batch.value.status)))
 
     function stopPolling() {
+      pollingVersion += 1
       polling.value = false
       if (timer) {
         clearTimeout(timer)
@@ -81,15 +89,21 @@ export function createBatchStore(
       }
     }
 
-    async function pollOnce(batchId = batch.value?.id): Promise<AuditBatch | null> {
+    async function pollOnce(
+      batchId = batch.value?.id,
+      expectedVersion = pollingVersion,
+    ): Promise<AuditBatch | null> {
       if (!batchId) return null
       try {
         const next = await api.getBatch(batchId)
+        if (expectedVersion !== pollingVersion) return null
         batch.value = next
+        activeBatchId = batchId
         error.value = ''
         if (TERMINAL_STATUSES.has(next.status)) stopPolling()
         return next
       } catch (cause) {
+        if (expectedVersion !== pollingVersion) return null
         stopPolling()
         error.value = cause instanceof Error ? cause.message : '批次状态查询失败'
         throw cause
@@ -99,16 +113,20 @@ export function createBatchStore(
     async function startPolling(batchId = batch.value?.id) {
       if (!batchId) return
       stopPolling()
+      activeBatchId = batchId
+      const expectedVersion = pollingVersion
       polling.value = true
 
       const tick = async () => {
         try {
-          await pollOnce(batchId)
+          return await pollOnce(batchId, expectedVersion)
         } finally {
-          if (polling.value) timer = setTimeout(tick, 1500)
+          if (polling.value && expectedVersion === pollingVersion) {
+            timer = setTimeout(tick, 1500)
+          }
         }
       }
-      await tick()
+      return await tick()
     }
 
     async function create(files: File[], contractType = '', dimensions: string[] = []) {
@@ -117,6 +135,7 @@ export function createBatchStore(
       const key = actionKey(fileActionSignature(files, contractType, dimensions))
       try {
         batch.value = await api.createBatch(files, contractType, dimensions, key)
+        activeBatchId = batch.value.id
         if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
         else await startPolling(batch.value.id)
         pendingAction = null
@@ -139,6 +158,7 @@ export function createBatchStore(
           dimensions,
           key,
         )
+        activeBatchId = batch.value.id
         if (TERMINAL_STATUSES.has(batch.value.status)) stopPolling()
         else await startPolling(batch.value.id)
         pendingAction = null
@@ -152,11 +172,16 @@ export function createBatchStore(
     }
 
     async function resume(batchId: number) {
+      if (batch.value?.id === batchId) {
+        if (polling.value || TERMINAL_STATUSES.has(batch.value.status)) return batch.value
+      }
+      batch.value = null
+      error.value = ''
       loading.value = true
       try {
-        await startPolling(batchId)
+        return await startPolling(batchId)
       } finally {
-        loading.value = false
+        if (activeBatchId === batchId) loading.value = false
       }
     }
 
@@ -176,6 +201,8 @@ export function createBatchStore(
       stopPolling()
       batch.value = null
       error.value = ''
+      loading.value = false
+      activeBatchId = null
       pendingAction = null
     }
 

@@ -19,8 +19,15 @@ interface AuditPollingOptions {
   signal?: AbortSignal
 }
 
-const AUDIT_PENDING_STATUSES = new Set(['queued', 'parsing', 'auditing'])
+const AUDIT_PENDING_STATUSES = new Set([
+  'queued',
+  'parsing',
+  'reviewing',
+  'validating',
+  'auditing',
+])
 const AUDIT_SUCCESS_STATUSES = new Set(['done', 'review_required'])
+const AUDIT_FAILURE_STATUSES = new Set(['audit_failed', 'failed'])
 
 export class AuditTaskError extends Error {
   code: string
@@ -50,7 +57,7 @@ export async function waitForAuditTerminal<T extends AuditTerminalResult>(
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const result = await fetchStatus(options.signal)
-    if (result.status === 'audit_failed') {
+    if (AUDIT_FAILURE_STATUSES.has(result.status)) {
       throw new AuditTaskError(
         result.error_message || '审查任务执行失败',
         result.error_code || '',

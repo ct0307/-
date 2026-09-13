@@ -1,7 +1,8 @@
 import client from './client'
+import type { AuditBatchStatus, AuditItemStatus } from './types'
 
-export type BatchStatus = 'queued' | 'running' | 'done' | 'partial_failed' | 'failed'
-export type BatchItemStatus = 'queued' | 'parsing' | 'auditing' | 'done' | 'failed'
+export type BatchStatus = AuditBatchStatus
+export type BatchItemStatus = AuditItemStatus
 
 export interface AuditBatchItem {
   id: number
@@ -9,6 +10,7 @@ export interface AuditBatchItem {
   filename: string
   status: BatchItemStatus
   error: string | null
+  error_code?: string | null
   attempts: number
   started_at: string | null
   finished_at: string | null

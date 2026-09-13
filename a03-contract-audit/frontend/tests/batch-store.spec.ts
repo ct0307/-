@@ -8,7 +8,9 @@ function batch(status: AuditBatch['status'], itemStatuses: AuditBatch['items'][n
     id: 1,
     status,
     total: itemStatuses.length,
-    completed: itemStatuses.filter((item) => item === 'done' || item === 'failed').length,
+    completed: itemStatuses.filter((item) => (
+      item === 'done' || item === 'review_required' || item === 'failed'
+    )).length,
     failed: itemStatuses.filter((item) => item === 'failed').length,
     created_at: '2026-07-26T10:00:00Z',
     updated_at: '2026-07-26T10:00:00Z',
@@ -49,7 +51,7 @@ test('stops polling when every item is terminal', async () => {
 })
 
 test('keeps polling while an item is running', async () => {
-  const useStore = createBatchStore(fakeApi([batch('running', ['done', 'auditing'])]))
+  const useStore = createBatchStore(fakeApi([batch('running', ['done', 'reviewing'])]))
   const store = useStore()
   store.polling = true
 
@@ -57,6 +59,20 @@ test('keeps polling while an item is running', async () => {
 
   expect(store.polling).toBe(true)
   expect(store.progress).toBe(50)
+})
+
+test('review_required is terminal and does not count as failed', async () => {
+  const useStore = createBatchStore(fakeApi([
+    batch('review_required', ['done', 'review_required']),
+  ]))
+  const store = useStore()
+  store.polling = true
+
+  await store.pollOnce(1)
+
+  expect(store.polling).toBe(false)
+  expect(store.batch?.failed).toBe(0)
+  expect(store.progress).toBe(100)
 })
 
 test('creates an audit batch from selected import items', async () => {
@@ -164,10 +180,10 @@ test('keeps the idempotency key when initial polling fails after creation', asyn
   const keys: string[] = []
   let pollingAttempts = 0
   const useStore = createBatchStore({
-    ...fakeApi([batch('running', ['auditing'])]),
+    ...fakeApi([batch('running', ['reviewing'])]),
     createBatch: async (_files, _contractType, _dimensions, key) => {
       keys.push(key ?? '')
-      return batch('running', ['auditing'])
+      return batch('running', ['reviewing'])
     },
     getBatch: async () => {
       pollingAttempts += 1
@@ -183,4 +199,43 @@ test('keeps the idempotency key when initial polling fails after creation', asyn
 
   expect(keys).toHaveLength(2)
   expect(keys[1]).toBe(keys[0])
+})
+
+test('resume isolates the requested batch before a failed response', async () => {
+  const useStore = createBatchStore({
+    ...fakeApi([batch('done', ['done'])]),
+    getBatch: async () => {
+      throw new Error('目标批次不存在')
+    },
+  }, 'resume-isolates-target')
+  const store = useStore()
+  store.batch = batch('done', ['done'])
+
+  const pending = store.resume(2)
+
+  expect(store.batch).toBeNull()
+  await expect(pending).rejects.toThrow('目标批次不存在')
+  expect(store.batch).toBeNull()
+})
+
+test('a late batch response cannot overwrite a newer route target', async () => {
+  let resolveFirst!: (value: AuditBatch) => void
+  const firstResponse = new Promise<AuditBatch>((resolve) => {
+    resolveFirst = resolve
+  })
+  const second = { ...batch('review_required', ['review_required']), id: 2 }
+  const useStore = createBatchStore({
+    ...fakeApi([second]),
+    getBatch: async (batchId) => batchId === 1 ? firstResponse : second,
+  }, 'resume-race')
+  const store = useStore()
+
+  const firstResume = store.resume(1)
+  const secondResume = store.resume(2)
+  await secondResume
+  resolveFirst({ ...batch('done', ['done']), id: 1 })
+  await firstResume
+
+  expect(store.batch?.id).toBe(2)
+  expect(store.batch?.status).toBe('review_required')
 })

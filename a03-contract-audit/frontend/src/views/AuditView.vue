@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 合同合规审查（真实接口核心闭环）：上传→解析→审查→复核→生成整改。
 // 闭环逻辑迁移自 WorkbenchView，数据落 audit-session store。
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, RefreshRight, View, WarningFilled } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -92,6 +92,25 @@ onMounted(async () => {
   }
 })
 
+watch(
+  () => route.query.batch,
+  async (value) => {
+    const batchId = Number(value)
+    if (!Number.isInteger(batchId) || batchId <= 0) {
+      batchStore.reset()
+      return
+    }
+    try {
+      await batchStore.resume(batchId)
+    } catch {
+      if (Number(route.query.batch) === batchId) {
+        ElMessage.error(batchStore.error || '审查批次恢复失败')
+      }
+    }
+  },
+  { immediate: true },
+)
+
 onBeforeUnmount(() => {
   inbox.stopPolling()
   batchStore.stopPolling()
@@ -165,6 +184,7 @@ async function auditReadyItems() {
       inbox.selectedIds,
       dimensions.value.filter((item) => item.on).map((item) => item.key),
     )
+    await router.replace({ query: { ...route.query, batch: String(created.id) } })
     ElMessage.success(`已提交 ${created.total} 份合同`)
     await inbox.pollOnce()
   } catch {
@@ -176,6 +196,7 @@ const batchStatusLabel = {
   queued: '等待审查',
   running: '审查中',
   done: '已完成',
+  review_required: '需人工复核',
   partial_failed: '部分失败',
   failed: '审查失败',
 } as const
@@ -183,9 +204,21 @@ const batchStatusLabel = {
 const batchItemStatusLabel = {
   queued: '等待中',
   parsing: '解析中',
-  auditing: '审查中',
+  reviewing: '审查中',
+  validating: '结果校验中',
   done: '已完成',
+  review_required: '需人工复核',
   failed: '失败',
+} as const
+
+const batchItemStatusType = {
+  queued: 'info',
+  parsing: 'info',
+  reviewing: 'info',
+  validating: 'info',
+  done: 'success',
+  review_required: 'warning',
+  failed: 'danger',
 } as const
 
 async function retryAuditBatch() {
@@ -201,10 +234,10 @@ async function retryAuditBatch() {
 
 const openingContractId = ref<number | null>(null)
 
-async function openBatchResult(contractId: number, filename: string) {
+async function openBatchResult(contractId: number, filename: string, jobId: number) {
   openingContractId.value = contractId
   try {
-    await session.loadCompletedAudit(contractId, filename)
+    await session.loadCompletedAudit(contractId, filename, jobId)
     await nextTick()
     document.querySelector<HTMLElement>('[data-audit-detail]')
       ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -353,7 +386,7 @@ const onboardSteps = [
               <h2>{{ batchStatusLabel[batchStore.batch.status] }}</h2>
             </div>
             <el-button
-              v-if="batchStore.batch.failed"
+              v-if="batchStore.batch.failed > 0"
               :icon="RefreshRight"
               :loading="batchStore.loading"
               @click="retryAuditBatch"
@@ -368,12 +401,16 @@ const onboardSteps = [
               <div class="batch-item-main">
                 <strong>{{ item.filename }}</strong>
                 <span v-if="item.error" class="batch-item-error">{{ item.error }}</span>
+                <span
+                  v-else-if="item.status === 'review_required' && item.review_reason"
+                  class="batch-item-review-reason"
+                >{{ item.review_reason }}</span>
               </div>
-              <el-tag :type="item.status === 'failed' ? 'danger' : item.status === 'done' ? 'success' : 'info'" size="small">
+              <el-tag :type="batchItemStatusType[item.status]" size="small">
                 {{ batchItemStatusLabel[item.status] }}
               </el-tag>
               <el-button
-                v-if="item.status === 'done'"
+                v-if="item.status === 'done' || item.status === 'review_required'"
                 class="batch-result-action"
                 type="primary"
                 plain
@@ -381,7 +418,7 @@ const onboardSteps = [
                 :loading="openingContractId === item.contract_id"
                 :disabled="openingContractId !== null && openingContractId !== item.contract_id"
                 :aria-label="`查看 ${item.filename} 的审查结果`"
-                @click="openBatchResult(item.contract_id, item.filename)"
+                @click="openBatchResult(item.contract_id, item.filename, item.id)"
               >
                 查看审查结果
               </el-button>
@@ -567,7 +604,8 @@ const onboardSteps = [
   min-width: 0;
 }
 .batch-item-main strong,
-.batch-item-error {
+.batch-item-error,
+.batch-item-review-reason {
   display: block;
   overflow-wrap: anywhere;
 }
@@ -578,6 +616,12 @@ const onboardSteps = [
   margin-top: 3px;
   color: var(--seal);
   font-size: 12px;
+}
+.batch-item-review-reason {
+  margin-top: 3px;
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.5;
 }
 .batch-result-action {
   flex: none;
@@ -1147,10 +1191,14 @@ const onboardSteps = [
 @media (max-width: 640px) {
   .batch-result-head {
     align-items: flex-start;
+    flex-wrap: wrap;
   }
   .batch-item {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+  .batch-item-main {
+    flex-basis: calc(100% - 112px);
   }
   .batch-result-action {
     width: 100%;

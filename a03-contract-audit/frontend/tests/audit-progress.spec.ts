@@ -50,9 +50,43 @@ test('single audit waits for persisted terminal status', async () => {
   expect(result.requires_review).toBe(true)
 })
 
+test('single audit follows reviewing and validating before done', async () => {
+  const responses = [
+    { contract_id: 1, status: 'reviewing' },
+    { contract_id: 1, status: 'validating' },
+    { contract_id: 1, status: 'done' },
+  ]
+  let calls = 0
+
+  const result = await waitForAuditTerminal(
+    async () => responses[calls++]!,
+    { intervalMs: 0, maxAttempts: 3 },
+  )
+
+  expect(calls).toBe(3)
+  expect(result.status).toBe('done')
+})
+
+test('single audit accepts review_required as a usable terminal result', async () => {
+  const result = await waitForAuditTerminal(
+    async () => ({ contract_id: 1, status: 'review_required', requires_review: true }),
+    { intervalMs: 0, maxAttempts: 1 },
+  )
+
+  expect(result.status).toBe('review_required')
+  expect(result.requires_review).toBe(true)
+})
+
 test('single audit surfaces persisted failure status', async () => {
   await expect(waitForAuditTerminal(
     async () => ({ contract_id: 1, status: 'audit_failed' }),
+    { intervalMs: 0, maxAttempts: 1 },
+  )).rejects.toThrow('审查任务执行失败')
+})
+
+test('single audit accepts the batch failure alias as terminal failure', async () => {
+  await expect(waitForAuditTerminal(
+    async () => ({ contract_id: 1, status: 'failed' }),
     { intervalMs: 0, maxAttempts: 1 },
   )).rejects.toThrow('审查任务执行失败')
 })

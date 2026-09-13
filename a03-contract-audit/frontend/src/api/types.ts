@@ -1,5 +1,35 @@
 // 后端返回的数据类型（与 backend/app/schemas 对齐）
 
+export type AuditItemStatus =
+  | 'queued'
+  | 'parsing'
+  | 'reviewing'
+  | 'validating'
+  | 'done'
+  | 'review_required'
+  | 'failed'
+
+export type AuditBatchStatus =
+  | 'queued'
+  | 'running'
+  | 'done'
+  | 'review_required'
+  | 'partial_failed'
+  | 'failed'
+
+export type AuditStatus = Exclude<AuditItemStatus, 'failed'> | 'audit_failed'
+
+export type ContractStatus =
+  | 'uploaded'
+  | 'parsed'
+  | 'reviewing'
+  | 'validating'
+  | 'done'
+  | 'review_required'
+  | 'audit_failed'
+  | 'three_review'
+  | 'purged'
+
 export interface LoginResult {
   access_token: string
   token_type: string
@@ -13,7 +43,7 @@ export interface ContractOut {
   id: number
   filename: string
   contract_type: string
-  status: string
+  status: ContractStatus
   created_at: string
   requires_review?: boolean
   ocr_confidence?: number | null
@@ -47,7 +77,7 @@ export interface AuditResult {
   task_id?: string
   job_id?: number
   batch_id?: number
-  status: string
+  status: AuditStatus
   error_code?: string | null
   error_message?: string | null
   retryable?: boolean
@@ -76,4 +106,6 @@ export interface RiskOut {
   support_relation_status: 'supported' | 'unclear' | 'contradicted' | string
   support_validation_reason: string
   support_validator_version: string
+  secondary_review_status?: 'not_required' | 'confirmed' | 'rejected' | 'conflict' | 'manual_required'
+  secondary_review_reason?: string
 }

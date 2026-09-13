@@ -327,16 +327,20 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     }
   }
 
-  async function loadCompletedAudit(selectedContractId: number, selectedFilename: string) {
+  async function loadCompletedAudit(
+    selectedContractId: number,
+    selectedFilename: string,
+    selectedJobId: number,
+  ) {
     if (busy.value) throw new Error('当前任务处理中，请稍后再试')
     busy.value = true
     try {
-      const initial = await getAuditStatus(selectedContractId)
+      const initial = await getAuditStatus(selectedContractId, selectedJobId)
       const result = await waitForAuditTerminal(
         async () => initial,
         { intervalMs: 0, maxAttempts: 1 },
       )
-      const loadedRisks = await getRisks(selectedContractId, result.job_id)
+      const loadedRisks = await getRisks(selectedContractId, result.job_id ?? selectedJobId)
 
       contractId.value = selectedContractId
       filename.value = selectedFilename
