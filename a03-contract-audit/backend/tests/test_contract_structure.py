@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_contract_chunks_have_stable_clause_ids_and_neighbors():
     from app.services.rag.contract_structure import build_contract_chunks
 
@@ -85,3 +88,167 @@ def test_contract_windows_keep_preamble_before_first_numbered_clause():
     assert "软件开发合同" in windows[0].text
     assert "甲方：测试科技有限公司" in windows[0].text
     assert windows[0].clause_ids == ("第一条", "第二条")
+
+
+def test_split_contract_window_preserves_text_clauses_and_stable_ids():
+    from app.services.rag.contract_structure import (
+        ContractWindow,
+        split_contract_window,
+    )
+
+    text = """第一条 项目范围为合同审查。
+第二条 乙方应按期交付成果。
+第三条 甲方应在验收后付款。
+第四条 双方应保护商业秘密。"""
+    parent = ContractWindow(
+        window_id="window-parent",
+        clause_ids=("第一条", "第二条", "第三条", "第四条"),
+        text=text,
+    )
+
+    first = split_contract_window(parent)
+    second = split_contract_window(parent)
+
+    assert len(first) >= 2
+    assert "".join(child.text for child in first) == parent.text
+    assert tuple(
+        clause_id for child in first for clause_id in child.clause_ids
+    ) == parent.clause_ids
+    assert [child.window_id for child in first] == [
+        child.window_id for child in second
+    ]
+    assert all(child.window_id != parent.window_id for child in first)
+    assert all(child.text.strip() for child in first)
+
+
+def test_split_contract_window_uses_parent_relative_clause_boundaries():
+    from app.services.rag.contract_structure import (
+        ContractWindow,
+        build_contract_chunks,
+        split_contract_window,
+    )
+
+    text = """合同名称：软件开发合同
+第一条 项目内容为开发审查系统。
+第二条 乙方应在十日内完成交付。
+第三条 甲方在验收后支付款项。"""
+    parent = ContractWindow(
+        window_id="window-with-preamble",
+        clause_ids=("第一条", "第二条", "第三条"),
+        text=text,
+    )
+
+    children = split_contract_window(parent)
+    rebuilt_chunks = [
+        chunk
+        for child in children
+        for chunk in build_contract_chunks(child.text)
+    ]
+
+    assert "".join(child.text for child in children) == text
+    assert [chunk.clause_id for chunk in rebuilt_chunks] == list(parent.clause_ids)
+    assert all(
+        child.text.lstrip().startswith(("合同名称", "第一条", "第二条", "第三条"))
+        for child in children
+    )
+
+
+def test_split_contract_window_returns_empty_when_no_stable_boundary_exists():
+    from app.services.rag.contract_structure import ContractWindow, split_contract_window
+
+    parent = ContractWindow(
+        window_id="window-atomic",
+        clause_ids=("第一条",),
+        text="第一条 这是不能继续拆分的单一条款。",
+    )
+
+    assert split_contract_window(parent) == []
+
+
+def test_split_contract_window_does_not_treat_clause_reference_as_heading():
+    from app.services.rag.contract_structure import ContractWindow, split_contract_window
+
+    parent = ContractWindow(
+        window_id="window-reference",
+        clause_ids=("第一条", "第二条"),
+        text=(
+            "第一条 付款安排如第二条另有约定，从其约定。\n"
+            "第二条 乙方应在验收后十日内交付成果。"
+        ),
+    )
+
+    children = split_contract_window(parent)
+
+    assert [child.clause_ids for child in children] == [("第一条",), ("第二条",)]
+
+
+@pytest.mark.parametrize(
+    ("first_heading", "second_heading", "expected_ids"),
+    [
+        ("一、", "二、", ("一", "二")),
+        ("1、", "2、", ("1", "2")),
+    ],
+)
+def test_split_real_window_normalizes_enumeration_ids_consistently(
+    first_heading,
+    second_heading,
+    expected_ids,
+):
+    from app.services.rag.contract_structure import (
+        build_contract_windows,
+        split_contract_window,
+    )
+
+    text = (
+        f"{first_heading}付款安排参照{second_heading}交付约定执行。\n"
+        f"{second_heading}乙方应在验收后十日内交付成果。"
+    )
+    windows = build_contract_windows(text, max_chars=500)
+
+    assert len(windows) == 1
+    assert windows[0].clause_ids == expected_ids
+
+    children = split_contract_window(windows[0])
+
+    assert [child.clause_ids for child in children] == [
+        (expected_ids[0],),
+        (expected_ids[1],),
+    ]
+
+
+def test_split_real_unnumbered_window_uses_preserved_paragraph_segments():
+    from app.services.rag.contract_structure import (
+        build_contract_windows,
+        split_contract_window,
+    )
+
+    source = (
+        "项目范围包括合同审查与风险提示。\n\n"
+        "乙方应在十个工作日内完成交付。\n\n"
+        "甲方应在验收后十日内支付款项。"
+    )
+    windows = build_contract_windows(source, max_chars=500)
+
+    assert len(windows) == 1
+    assert windows[0].clause_ids == ("段落1", "段落2", "段落3")
+
+    children = split_contract_window(windows[0])
+
+    assert len(children) >= 2
+    assert "".join(child.text for child in children) == windows[0].text
+    assert tuple(
+        clause_id for child in children for clause_id in child.clause_ids
+    ) == windows[0].clause_ids
+    assert all(child.clause_ids for child in children)
+
+
+def test_split_manual_window_refuses_to_guess_unresolved_clause_ids():
+    from app.services.rag.contract_structure import ContractWindow, split_contract_window
+
+    parent = ContractWindow(
+        window_id="window-unresolved-ids",
+        clause_ids=("外部ID-A", "外部ID-B"),
+        text="第一条 项目范围。\n第二条 付款安排。",
+    )
+
+    assert split_contract_window(parent) == []

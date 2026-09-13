@@ -20,6 +20,7 @@ _CLAUSE_RE = re.compile(
     r")(?P<title>[^\n]*)",
     re.MULTILINE,
 )
+_CLAUSE_ID_TRAILING = ".．、"
 
 
 @dataclass(frozen=True)
@@ -37,10 +38,17 @@ class ContractChunk:
 
 
 @dataclass(frozen=True)
+class ContractWindowSegment:
+    text: str
+    clause_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ContractWindow:
     window_id: str
     clause_ids: tuple[str, ...]
     text: str
+    segments: tuple[ContractWindowSegment, ...] = ()
 
 
 def build_contract_chunks(
@@ -57,7 +65,7 @@ def build_contract_chunks(
             start = match.start()
             end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
             content = text[start:end].strip()
-            clause_id = match.group("clause_id").rstrip(".．、")
+            clause_id = _normalize_clause_id(match.group("clause_id"))
             chapter = _chapter_before(chapters, start)
             chunks.append(_make_chunk(
                 clause_id=clause_id,
@@ -89,36 +97,143 @@ def build_contract_windows(text: str, *, max_chars: int = 8000) -> list[Contract
     if max_chars < 200:
         raise ValueError("审查窗口上限不能小于 200 字符")
     chunks = build_contract_chunks(text)
-    units: list[tuple[str | None, str]] = []
+    units: list[ContractWindowSegment] = []
     if chunks:
         first_start = chunks[0].anchor.char_start or 0
         preamble = text[:first_start].strip()
         if preamble:
-            units.extend((None, part) for part in _split_oversized(preamble, max_chars))
+            units.extend(
+                ContractWindowSegment(text=part)
+                for part in _split_oversized(preamble, max_chars)
+            )
     for chunk in chunks:
         units.extend(
-            (chunk.clause_id, part)
+            ContractWindowSegment(text=part, clause_ids=(chunk.clause_id,))
             for part in _split_oversized(chunk.text, max_chars)
         )
     windows: list[ContractWindow] = []
-    current_ids: list[str] = []
-    current_parts: list[str] = []
-    for clause_id, unit in units:
-        candidate = "\n".join((*current_parts, unit))
-        if current_parts and len(candidate) > max_chars:
-            windows.append(_make_window(current_ids, current_parts))
-            current_ids = []
-            current_parts = []
-        current_parts.append(unit)
-        if clause_id and clause_id not in current_ids:
-            current_ids.append(clause_id)
-    if current_parts:
-        windows.append(_make_window(current_ids, current_parts))
+    current_segments: list[ContractWindowSegment] = []
+    for unit in units:
+        candidate = "\n".join(
+            segment.text for segment in (*current_segments, unit)
+        )
+        if current_segments and len(candidate) > max_chars:
+            windows.append(_make_window(current_segments))
+            current_segments = []
+        current_segments.append(unit)
+    if current_segments:
+        windows.append(_make_window(current_segments))
     return windows
+
+
+def split_contract_window(window: ContractWindow) -> list[ContractWindow]:
+    """沿父窗口内的稳定结构边界二分，并保留父窗口的文本和条款身份。"""
+    text = window.text
+    if not text.strip():
+        return []
+
+    if len(window.segments) >= 2:
+        split_index = _choose_segment_split(window.segments)
+        split_at = sum(
+            len(segment.text) + 1
+            for segment in window.segments[:split_index]
+        )
+        segment_groups = (
+            window.segments[:split_index],
+            window.segments[split_index:],
+        )
+        parts = (text[:split_at], text[split_at:])
+        if any(not part.strip() for part in parts):
+            return []
+        return [
+            _make_split_window(
+                clause_ids=_segment_clause_ids(segments),
+                text=part,
+                segments=segments,
+            )
+            for segments, part in zip(segment_groups, parts, strict=True)
+        ]
+
+    clause_boundaries = [
+        match.start()
+        for match in _CLAUSE_RE.finditer(text)
+        if text[:match.start()].strip() and text[match.start():].strip()
+    ]
+    boundaries = clause_boundaries or [
+        match.end()
+        for match in re.finditer(r"\n[ \t\u3000]*\n", text)
+        if text[:match.end()].strip() and text[match.end():].strip()
+    ]
+    if not boundaries:
+        return []
+
+    split_at = min(boundaries, key=lambda offset: (abs(offset - len(text) / 2), offset))
+    parts = (text[:split_at], text[split_at:])
+    if any(not part.strip() for part in parts):
+        return []
+
+    parsed_clause_ids = [
+        {
+            _normalize_clause_id(match.group("clause_id"))
+            for match in _CLAUSE_RE.finditer(part)
+        }
+        for part in parts
+    ]
+    child_clause_ids: list[list[str]] = [[], []]
+    for clause_id in window.clause_ids:
+        matches = [
+            index
+            for index, parsed_ids in enumerate(parsed_clause_ids)
+            if clause_id in parsed_ids
+        ]
+        if len(matches) != 1:
+            return []
+        child_clause_ids[matches[0]].append(clause_id)
+
+    return [
+        _make_split_window(
+            clause_ids=clause_ids,
+            text=part,
+        )
+        for clause_ids, part in zip(child_clause_ids, parts, strict=True)
+    ]
 
 
 def _chapter_before(chapters: list[tuple[int, str]], position: int) -> str:
     return next((title for offset, title in reversed(chapters) if offset < position), "")
+
+
+def _normalize_clause_id(value: str) -> str:
+    return value.rstrip(_CLAUSE_ID_TRAILING)
+
+
+def _choose_segment_split(segments: tuple[ContractWindowSegment, ...]) -> int:
+    candidates = [
+        index
+        for index in range(1, len(segments))
+        if segments[index - 1].clause_ids != segments[index].clause_ids
+    ] or list(range(1, len(segments)))
+    total_length = sum(len(segment.text) for segment in segments) + len(segments) - 1
+    return min(
+        candidates,
+        key=lambda index: (
+            abs(
+                sum(len(segment.text) + 1 for segment in segments[:index])
+                - total_length / 2
+            ),
+            index,
+        ),
+    )
+
+
+def _segment_clause_ids(
+    segments: tuple[ContractWindowSegment, ...],
+) -> list[str]:
+    return list(dict.fromkeys(
+        clause_id
+        for segment in segments
+        for clause_id in segment.clause_ids
+    ))
 
 
 def _make_chunk(
@@ -200,11 +315,33 @@ def _split_oversized(text: str, max_chars: int) -> list[str]:
     return parts
 
 
-def _make_window(clause_ids: list[str], parts: list[str]) -> ContractWindow:
-    content = "\n".join(parts)
-    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+def _make_window(segments: list[ContractWindowSegment]) -> ContractWindow:
+    content = "\n".join(segment.text for segment in segments)
+    clause_ids = _segment_clause_ids(tuple(segments))
+    digest = _window_digest(clause_ids, content)
     return ContractWindow(
         window_id=f"window-{digest}",
         clause_ids=tuple(clause_ids),
         text=content,
+        segments=tuple(segments),
     )
+
+
+def _make_split_window(
+    *,
+    clause_ids: list[str],
+    text: str,
+    segments: tuple[ContractWindowSegment, ...] = (),
+) -> ContractWindow:
+    digest = _window_digest(clause_ids, text)
+    return ContractWindow(
+        window_id=f"window-{digest}",
+        clause_ids=tuple(clause_ids),
+        text=text,
+        segments=segments,
+    )
+
+
+def _window_digest(clause_ids: list[str], text: str) -> str:
+    identity = f"{'|'.join(clause_ids)}\0{text}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
