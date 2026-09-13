@@ -25,6 +25,8 @@ class RiskOut(BaseModel):
     support_relation_status: str = "unclear"
     support_validation_reason: str = ""
     support_validator_version: str = "unvalidated"
+    secondary_review_status: str = "not_required"
+    secondary_review_reason: str = ""
     claim_id: str | None = None
     claim_status: str = "pending_evidence"
     source_window_id: str | None = None

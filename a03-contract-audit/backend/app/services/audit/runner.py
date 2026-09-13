@@ -39,6 +39,7 @@ _QUALITY_REASON_MESSAGES = {
     "CONTRACT_TEXT_INCOMPLETE": "合同文本不完整，需人工复核",
     "SECONDARY_REVIEW_CONFLICT": "二次复核存在冲突",
     "SECONDARY_REVIEW_PENDING": "二次复核尚未完成",
+    "UNBOUND_CONFLICT": "冲突项无法关联到具体风险，需人工复核",
 }
 
 
@@ -466,6 +467,8 @@ def _risk_model(
         support_relation_status=risk.get("support_relation_status", "unclear"),
         support_validation_reason=risk.get("support_validation_reason", ""),
         support_validator_version=risk.get("support_validator_version", "unvalidated"),
+        secondary_review_status=risk.get("secondary_review_status", "not_required"),
+        secondary_review_reason=risk.get("secondary_review_reason", ""),
         claim_id=risk.get("claim_id"),
         claim_status=risk.get("claim_status", "pending_evidence"),
         source_window_id=risk.get("source_window_id"),

@@ -45,8 +45,11 @@ def decide_audit_status(
     if any(risk.get("original_text_verified") is not True for risk in risks):
         reasons.append("ORIGINAL_TEXT_UNRESOLVED")
     if any(
-        risk.get("evidence_status") != "supported"
-        or risk.get("support_relation_status") != "supported"
+        (
+            risk.get("evidence_status") != "supported"
+            or risk.get("support_relation_status") != "supported"
+        )
+        and risk.get("secondary_review_status") != "confirmed"
         for risk in risks
     ):
         reasons.append("EVIDENCE_UNRESOLVED")

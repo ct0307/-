@@ -73,6 +73,21 @@ def test_done_requires_verified_quote_evidence_and_secondary_review(field, value
     assert decision.reasons == (reason,)
 
 
+def test_confirmed_and_not_required_secondary_results_can_complete():
+    coverage, decide = _quality()
+    risks = [
+        {
+            **_risk(),
+            "evidence_status": "partially_supported",
+            "support_relation_status": "unclear",
+            "secondary_review_status": "confirmed",
+        },
+        _risk(secondary_review_status="not_required"),
+    ]
+
+    assert decide(risks, [], coverage(1, 1)).status == "done"
+
+
 def test_reasons_are_deduplicated_and_independent_of_issue_order():
     coverage, decide = _quality()
     issues = [{"code": "OUTPUT_TRUNCATED", "detail": "随机自由文本"},

@@ -42,6 +42,12 @@ from app.services.audit.review_pipeline import (
     WindowReviewer,
     WindowReviewRequest,
 )
+from app.services.audit.secondary_review import (
+    SecondaryReviewer,
+    SqlAlchemySecondaryCallRecorder,
+    apply_secondary_decisions,
+    conflict_claim_ids,
+)
 from app.services.audit.window_repository import SqlAlchemyWindowCheckpoint
 from app.services.rag.contract_structure import build_contract_windows
 from app.services.rag.retriever import retrieve
@@ -160,9 +166,31 @@ def audit_contract(
 
     cross_checks = detect_conflicts(shared_context, elements)
     cross_checks.extend(build_logic_cross_checks(contract_text))
-    conflict_categories = {c["category"] for c in cross_checks if c["verdict"] == "conflict"}
+    exact_conflict_claim_ids = conflict_claim_ids(all_risks, cross_checks)
+    recorder = (
+        SqlAlchemySecondaryCallRecorder(
+            contract_id=contract_id,
+            audit_job_id=audit_job_id,
+        )
+        if contract_id is not None else None
+    )
+    secondary_result = SecondaryReviewer(
+        get_llm_adapter(), recorder=recorder
+    ).review(
+        risks=all_risks,
+        conflict_claim_ids=exact_conflict_claim_ids,
+    )
+    all_risks, secondary_issues = apply_secondary_decisions(
+        all_risks, secondary_result
+    )
+    all_issues = [
+        issue for issue in all_issues
+        if _candidate_issue_still_applies(issue, all_risks)
+    ]
+    all_issues.extend(secondary_issues)
+    all_issues.extend(_unbound_conflict_issues(all_risks, cross_checks))
     for r in all_risks:
-        r["tier"] = classify_tier(r, conflict_categories)
+        r["tier"] = classify_tier(r, exact_conflict_claim_ids)
 
     log.info("audit.done", total=len(all_risks), conflicts=len(cross_checks), agents=_AGENT_ORDER)
     return {
@@ -174,18 +202,78 @@ def audit_contract(
     }
 
 
+def _candidate_issue_still_applies(
+    issue: ReviewIssue,
+    retained_risks: list[dict],
+) -> bool:
+    """候选被二次复核拒绝后，不让其候选级问题污染合同终态。"""
+    if issue.code not in {"EVIDENCE_UNRESOLVED", "ORIGINAL_TEXT_UNRESOLVED"}:
+        return True
+    matching = [
+        risk for risk in retained_risks
+        if risk.get("agent") == issue.agent
+        and risk.get("source_window_id") == issue.window_id
+    ]
+    if issue.code == "ORIGINAL_TEXT_UNRESOLVED":
+        return any(risk.get("original_text_verified") is not True for risk in matching)
+    return any(
+        (
+            risk.get("evidence_status") != "supported"
+            or risk.get("support_relation_status") != "supported"
+        )
+        and risk.get("secondary_review_status") != "confirmed"
+        for risk in matching
+    )
+
+
+def _unbound_conflict_issues(
+    risks: list[dict],
+    cross_checks: list[dict],
+) -> list[ReviewIssue]:
+    """无法精确绑定候选的跨 Agent 冲突必须提升到合同级人工复核。"""
+    has_unbound = any(
+        check.get("verdict") == "conflict"
+        and not conflict_claim_ids(risks, [check])
+        for check in cross_checks
+    )
+    if not has_unbound:
+        return []
+    return [ReviewIssue(
+        code="UNBOUND_CONFLICT",
+        agent="system",
+        detail="冲突项无法精确关联到候选风险，需人工复核",
+    )]
+
+
 def _summarize_for_context(role: str, risks: list[dict], elements: dict) -> dict:
     """把某 Agent 的结论提炼为共享上下文条目，供下游 Agent 读取（共享记忆窗口）。"""
     categories = sorted({r["category"] for r in risks})
     # 法务是否识别出关联交易（下游财务需据此做价格公允性复查）
-    related_party = any(
-        ("关联交易" in r["category"] or "关联方" in r["category"] or "关联" in r["original_text"])
-        for r in risks
-    )
+    related_party_claim_ids = [
+        str(risk["claim_id"])
+        for risk in risks
+        if risk.get("claim_id")
+        and (
+            "关联" in risk["category"]
+            or "关联" in risk["original_text"]
+        )
+    ]
+    related_party = bool(related_party_claim_ids)
+    payee = str(elements.get("payee", "") or elements.get("收款账户", "")).strip()
+    payee_claim_ids = [
+        str(risk["claim_id"])
+        for risk in risks
+        if role == "finance"
+        and payee
+        and risk.get("claim_id")
+        and payee in risk["original_text"]
+    ]
     return {
         "risk_count": len(risks),
         "categories": categories,
         "related_party": related_party,
+        "related_party_claim_ids": related_party_claim_ids,
+        "payee_claim_ids": payee_claim_ids,
         "high_count": sum(1 for r in risks if r["level"] == "high"),
         "claims": [
             {
@@ -556,7 +644,7 @@ def _normalize(r: dict, agent: str) -> dict:
     }
 
 
-def classify_tier(risk: dict, conflict_categories: set[str] | None = None) -> str:
+def classify_tier(risk: dict, conflict_claim_ids: set[str] | None = None) -> str:
     """分级风险人工干预：把单条风险归入 green/yellow/red 档。
 
     口径与前端一致：
@@ -564,10 +652,10 @@ def classify_tier(risk: dict, conflict_categories: set[str] | None = None) -> st
       - 绿档：低风险、原文已核验且依据支持关系已核验；
       - 其余：黄档。
     """
-    conflict_categories = conflict_categories or set()
+    conflict_claim_ids = conflict_claim_ids or set()
     text = risk.get("category", "") + risk.get("original_text", "") + risk.get("basis", "")
     sensitive = any(kw in text for kw in _RED_KEYWORDS)
-    in_conflict = risk.get("category", "") in conflict_categories
+    in_conflict = risk.get("claim_id") in conflict_claim_ids
     if risk.get("level") == "high" or sensitive or in_conflict:
         return "red"
     if (
@@ -600,6 +688,7 @@ def detect_conflicts(shared_context: dict, elements: dict) -> list[dict]:
             "verdict": "conflict",
             "note": "关联交易需财务复核价格公允性，防止利益输送 → 联合推理判高风险，建议三员会审。",
             "category": "关联交易",
+            "claim_ids": list(legal.get("related_party_claim_ids", [])),
         })
 
     # 规则 2：收款账户与合同主体不一致（要素级信号）→ 财务回传法务
@@ -615,6 +704,7 @@ def detect_conflicts(shared_context: dict, elements: dict) -> list[dict]:
             "verdict": "conflict",
             "note": "收款账户与乙方主体不符，存在合同主体资格与资金安全双重风险 → 建议驳回。",
             "category": "收款账户",
+            "claim_ids": list(finance.get("payee_claim_ids", [])),
         })
 
     # 规则 3：法务与财务都检出高风险，提示需联合决策

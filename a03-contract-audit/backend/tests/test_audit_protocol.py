@@ -33,7 +33,7 @@ def secondary_decision_payload(**overrides):
     payload = {
         "claim_id": "claim-001",
         "verdict": "confirm",
-        "reason": "valid reason",
+        "reason_code": "EVIDENCE_SUPPORTS_CANDIDATE",
         "evidence_ids": ["evidence-1"],
     }
     payload.update(overrides)
@@ -58,6 +58,7 @@ EXPECTED_REVIEW_ISSUE_CODES = {
     "PARSE_QUALITY_LOW",
     "CONTRACT_TEXT_INCOMPLETE",
     "SECONDARY_REVIEW_CONFLICT",
+    "UNBOUND_CONFLICT",
 }
 
 
@@ -190,19 +191,24 @@ def test_agent_review_result_defaults_and_accepts_complete_progress():
 @pytest.mark.parametrize(
     "payload",
     [
-        {"claim_id": "short", "verdict": "confirm", "reason": "理由充分"},
-        {"claim_id": "claim-001", "verdict": "unknown", "reason": "理由充分"},
-        {"claim_id": "claim-001", "verdict": "confirm", "reason": "bad"},
+        {"claim_id": "short", "verdict": "confirm", "reason_code": "EVIDENCE_SUPPORTS_CANDIDATE"},
+        {"claim_id": "claim-001", "verdict": "unknown", "reason_code": "EVIDENCE_SUPPORTS_CANDIDATE"},
+        {"claim_id": "claim-001", "verdict": "confirm", "reason_code": "UNKNOWN"},
+        {
+            "claim_id": "claim-001",
+            "verdict": "reject",
+            "reason_code": "EVIDENCE_SUPPORTS_CANDIDATE",
+        },
         {
             "claim_id": "claim-001",
             "verdict": "confirm",
-            "reason": "理由充分",
+            "reason_code": "EVIDENCE_SUPPORTS_CANDIDATE",
             "evidence_ids": ["evidence"] * 9,
         },
         {
             "claim_id": "claim-001",
             "verdict": "confirm",
-            "reason": "理由充分",
+            "reason_code": "EVIDENCE_SUPPORTS_CANDIDATE",
             "extra": True,
         },
     ],
@@ -216,7 +222,7 @@ def test_secondary_envelope_is_strict_and_limits_decisions():
     decision = {
         "claim_id": "claim-001",
         "verdict": "conflict",
-        "reason": "证据之间存在直接矛盾。",
+        "reason_code": "EVIDENCE_CONFLICT",
         "evidence_ids": ["evidence-1"],
     }
 
@@ -272,7 +278,6 @@ def test_agent_review_result_rejects_invalid_window_counts(payload):
     ("field", "valid_lengths", "invalid_lengths"),
     [
         ("claim_id", (8, 64), (7, 65)),
-        ("reason", (4, 500), (3, 501)),
     ],
 )
 def test_secondary_decision_enforces_exact_string_boundaries(
@@ -289,6 +294,19 @@ def test_secondary_decision_enforces_exact_string_boundaries(
             SecondaryDecision.model_validate(
                 secondary_decision_payload(**{field: "x" * length})
             )
+
+
+@pytest.mark.parametrize("reason", [
+    "依据《民法典》第五百八十五条确认",
+    "民法典第五百八十五条确认",
+    "Civil Code section 585 confirms this",
+    "new fraud risk detected",
+])
+def test_secondary_decision_rejects_all_free_text_reasons(reason):
+    with pytest.raises(ValidationError):
+        SecondaryDecision.model_validate(
+            {**secondary_decision_payload(), "reason": reason}
+        )
 
 
 def test_secondary_decision_enforces_evidence_id_limit():

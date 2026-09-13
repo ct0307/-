@@ -95,6 +95,8 @@ def test_risk_api_returns_trace_and_redacts_business_retrieval_query(tmp_path):
                 '"anchors": [{"page_number": 2}], "match_type": "exact_quote", '
                 '"score": 1.0}]'
             ),
+            secondary_review_status="confirmed",
+            secondary_review_reason="二次复核确认已有证据支持候选风险",
         ))
         db.commit()
 
@@ -109,9 +111,13 @@ def test_risk_api_returns_trace_and_redacts_business_retrieval_query(tmp_path):
         assert legal_risk.evidence_ids == ["LAW-585"]
         assert legal_risk.retrieval_attempts[0]["query"] == "付款期限 验收后十日内付款"
         assert legal_risk.contract_evidence[0]["anchors"][0]["page_number"] == 2
+        assert legal_risk.secondary_review_status == "confirmed"
+        assert legal_risk.secondary_review_reason == "二次复核确认已有证据支持候选风险"
         assert business_risk["claim_id"] == "C-PAYMENT-001"
         assert business_risk["contract_evidence"][0]["clause_id"] == "第二条"
         assert "query" not in business_risk["retrieval_attempts"][0]
+        assert business_risk["secondary_review_status"] == "confirmed"
+        assert business_risk["secondary_review_reason"] == "二次复核确认已有证据支持候选风险"
 
     engine.dispose()
 

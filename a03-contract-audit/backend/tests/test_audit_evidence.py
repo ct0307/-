@@ -5,6 +5,7 @@ import pytest
 from app.llm.base import LLMResponse
 from app.services.audit import auditor
 from app.services.audit.evidence import bind_risk_evidence, build_evidence_query
+from app.services.audit.protocol import ReviewIssue
 
 
 @pytest.mark.parametrize("text,finish_reason,code", [
@@ -242,6 +243,122 @@ def test_finance_agent_receives_structured_legal_claims(monkeypatch):
 
     assert '"claim_id": "C-LEGAL-001"' in prompts[0]
     assert '"evidence_ids": ["LAW-585", "DOC-8.2"]' in prompts[0]
+
+
+def test_audit_contract_runs_secondary_after_grounding_and_conflict_detection(monkeypatch):
+    grounded = {
+        **auditor._normalize({
+            "level": "medium",
+            "category": "付款期限冲突",
+            "original_text": "验收后十日内付款",
+            "risk_reason": "同一付款条件存在不同期限",
+            "suggestion": "统一付款期限",
+        }, "legal"),
+        "claim_id": "C-PIPELINE-001",
+        "evidence_ids": ["EV-LAW-001"],
+        "rag_sources": [{
+            "content": "付款期限应当明确。", "source": "付款规则", "reliable": True,
+        }],
+        "evidence_status": "supported",
+        "support_relation_status": "supported",
+        "original_text_verified": True,
+        "requires_manual_review": False,
+        "source_window_id": "window-1",
+        "source_clause_ids": ["第一条"],
+    }
+    monkeypatch.setattr(
+        auditor,
+        "_agent_audit",
+        lambda *_args, **_kwargs: auditor.AgentAuditResult([grounded.copy()], [], 1, 1),
+    )
+    monkeypatch.setattr(
+        auditor,
+        "detect_conflicts",
+        lambda *_args, **_kwargs: [{
+            "id": "X-1", "verdict": "conflict", "category": "付款期限冲突",
+            "claim_ids": ["C-PIPELINE-001"],
+        }],
+    )
+    monkeypatch.setattr(auditor, "build_logic_cross_checks", lambda _text: [])
+
+    class Adapter:
+        def chat(self, _system, _user, **_kwargs):
+            return LLMResponse(text=json.dumps({"decisions": [{
+                "claim_id": "C-PIPELINE-001",
+                "verdict": "conflict",
+                "reason_code": "EVIDENCE_CONFLICT",
+                "evidence_ids": ["EV-LAW-001"],
+            }]}), model="secondary-test")
+
+    monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
+
+    result = auditor.audit_contract(
+        {}, "第一条 验收后十日内付款。", dimensions=["legal"]
+    )
+
+    assert len(result["risks"]) == 1
+    assert result["risks"][0]["secondary_review_status"] == "conflict"
+    assert "SECONDARY_REVIEW_CONFLICT" in [issue["code"] for issue in result["issues"]]
+
+
+def test_rejected_secondary_candidate_does_not_leave_candidate_quality_issue(monkeypatch):
+    candidate = {
+        **auditor._normalize({
+            "level": "medium",
+            "category": "付款期限风险",
+            "original_text": "验收后十日内付款",
+            "risk_reason": "付款期限需要进一步核验",
+            "suggestion": "明确付款期限",
+        }, "legal"),
+        "claim_id": "C-REJECT-PIPELINE",
+        "evidence_ids": ["EV-LAW-001"],
+        "rag_sources": [{
+            "content": "付款期限应当明确。", "source": "付款规则", "reliable": True,
+        }],
+        "evidence_status": "partially_supported",
+        "support_relation_status": "unclear",
+        "original_text_verified": True,
+        "source_window_id": "window-1",
+        "source_clause_ids": ["第一条"],
+    }
+    monkeypatch.setattr(
+        auditor,
+        "_agent_audit",
+        lambda *_args, **_kwargs: auditor.AgentAuditResult(
+            [candidate.copy()],
+            [ReviewIssue(
+                code="EVIDENCE_UNRESOLVED",
+                agent="legal",
+                window_id="window-1",
+                detail="候选证据需要进一步核验",
+            )],
+            1,
+            1,
+        ),
+    )
+    monkeypatch.setattr(auditor, "detect_conflicts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(auditor, "build_logic_cross_checks", lambda _text: [])
+
+    class Adapter:
+        def chat(self, _system, _user, **_kwargs):
+            return LLMResponse(text=_secondary_reject(), model="secondary-test")
+
+    def _secondary_reject():
+        return json.dumps({"decisions": [{
+            "claim_id": "C-REJECT-PIPELINE",
+            "verdict": "reject",
+            "reason_code": "EVIDENCE_DOES_NOT_SUPPORT_CANDIDATE",
+            "evidence_ids": ["EV-LAW-001"],
+        }]})
+
+    monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
+
+    result = auditor.audit_contract(
+        {}, "第一条 验收后十日内付款。", dimensions=["legal"]
+    )
+
+    assert result["risks"] == []
+    assert result["issues"] == []
 
 
 def test_normalized_claim_id_is_stable_and_role_scoped():

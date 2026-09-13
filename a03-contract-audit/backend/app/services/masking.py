@@ -98,6 +98,8 @@ def apply_risk_masking(risk: dict | object, role: str) -> dict:
             "support_relation_status": risk.support_relation_status,
             "support_validation_reason": risk.support_validation_reason,
             "support_validator_version": risk.support_validator_version,
+            "secondary_review_status": risk.secondary_review_status,
+            "secondary_review_reason": risk.secondary_review_reason,
             "claim_id": risk.claim_id,
             "claim_status": risk.claim_status,
             "source_window_id": risk.source_window_id,

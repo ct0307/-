@@ -55,6 +55,7 @@ ReviewIssueCode = Literal[
     "PARSE_QUALITY_LOW",
     "CONTRACT_TEXT_INCOMPLETE",
     "SECONDARY_REVIEW_CONFLICT",
+    "UNBOUND_CONFLICT",
 ]
 
 
@@ -105,13 +106,36 @@ class SecondaryDecision(BaseModel):
 
     claim_id: str = Field(min_length=8, max_length=64)
     verdict: Literal["confirm", "reject", "conflict"]
-    reason: str = Field(min_length=4, max_length=500)
+    reason_code: Literal[
+        "EVIDENCE_SUPPORTS_CANDIDATE",
+        "EVIDENCE_DOES_NOT_SUPPORT_CANDIDATE",
+        "EVIDENCE_CONFLICT",
+    ]
     evidence_ids: list[str] = Field(default_factory=list, max_length=8)
 
     _strip_verdict = field_validator("verdict", mode="before")(_strip_string)
+    _strip_reason_code = field_validator("reason_code", mode="before")(_strip_string)
+
+    @model_validator(mode="after")
+    def validate_reason_matches_verdict(self) -> Self:
+        expected = {
+            "confirm": "EVIDENCE_SUPPORTS_CANDIDATE",
+            "reject": "EVIDENCE_DOES_NOT_SUPPORT_CANDIDATE",
+            "conflict": "EVIDENCE_CONFLICT",
+        }[self.verdict]
+        if self.reason_code != expected:
+            raise ValueError("reason_code 与 verdict 不一致")
+        return self
 
 
 class SecondaryEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
 
     decisions: list[SecondaryDecision] = Field(default_factory=list, max_length=5)
+
+
+def parse_secondary_envelope(text: str) -> SecondaryEnvelope:
+    stripped = text.strip()
+    if not stripped.startswith("{") or not stripped.endswith("}"):
+        raise ValueError("二次复核输出必须是 JSON 对象")
+    return SecondaryEnvelope.model_validate_json(stripped)
