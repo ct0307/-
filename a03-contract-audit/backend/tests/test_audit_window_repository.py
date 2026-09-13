@@ -171,11 +171,49 @@ def test_corrupt_valid_result_propagates_but_transient_database_errors_are_typed
         db.scalar(select(models.AuditWindowRun)).result_json = "损坏的 JSON"
     with pytest.raises(ValidationError):
         repo.load_valid(request())
-    with patch.object(Session, "execute", side_effect=OperationalError("查询", {}, Exception("数据库不可用"))):
+    with patch.object(Session, "execute", side_effect=OperationalError("查询", {}, Exception("database is locked"))):
         with pytest.raises(TransientPersistenceError):
             repo.load_valid(request())
         with pytest.raises(TransientPersistenceError):
             repo.save_valid(request(), result())
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "database is locked",
+        "database is busy",
+        "could not serialize access due to concurrent update",
+        "deadlock detected",
+    ],
+)
+def test_explicit_database_contention_errors_are_retryable(store, message):
+    from app.services.audit.window_repository import TransientPersistenceError
+
+    error = OperationalError("query", {}, Exception(message))
+    with patch.object(Session, "execute", side_effect=error):
+        with pytest.raises(TransientPersistenceError):
+            repository(store).load_valid(request())
+
+
+def test_invalidated_connection_is_retryable(store):
+    from app.services.audit.window_repository import TransientPersistenceError
+
+    error = OperationalError("query", {}, Exception("connection reset"))
+    error.connection_invalidated = True
+    with patch.object(Session, "execute", side_effect=error):
+        with pytest.raises(TransientPersistenceError):
+            repository(store).load_valid(request())
+
+
+@pytest.mark.parametrize("message", ["no such table: audit_window_runs", "no such column: missing"])
+def test_schema_and_sql_errors_are_not_retryable(store, message):
+    from app.services.audit.window_repository import TransientPersistenceError
+
+    error = OperationalError("query", {}, Exception(message))
+    with patch.object(Session, "execute", side_effect=error):
+        with pytest.raises(OperationalError):
+            repository(store).load_valid(request())
 
 
 def test_transient_checkpoint_failure_is_retryable_but_programming_errors_are_not():

@@ -482,3 +482,98 @@ def test_failed_audit_returns_import_item_to_ready(monkeypatch):
 
     with Session(engine) as db:
         assert db.get(ImportBatchItem, source_item_id).status == "ready"
+
+
+def test_stale_from_import_worker_returns_source_to_ready_and_allows_recreate(
+    monkeypatch, tmp_path
+):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'stale-from-import.db').as_posix()}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        legal = _user(db)
+        source_item = _import_item(
+            db,
+            legal,
+            filename="陈旧导入.txt",
+            contract_type="采购合同",
+        )
+        monkeypatch.setattr(batches, "_dispatch_item", lambda *_args: "task-1")
+        first = batches.create_batch_from_import(
+            BatchFromImportRequest(
+                import_item_ids=[source_item.id], dimensions=["payment"]
+            ),
+            "stale-from-import-first",
+            db,
+            legal,
+        )
+        audit_item = db.query(AuditBatchItem).filter(
+            AuditBatchItem.batch_id == first.id,
+        ).one()
+        contract_id = source_item.contract_id
+        audit_item_id = audit_item.id
+        source_item_id = source_item.id
+
+    # 新 generation 已经完成，旧 worker 此时才启动。
+    with Session(engine) as newer:
+        contract = newer.get(Contract, contract_id)
+        contract.audit_generation = 2
+        contract.status = "done"
+        newer.commit()
+
+    monkeypatch.setattr(audit_tasks, "SessionLocal", lambda: Session(engine))
+    result = run_contract_audit.run(contract_id, ["payment"], audit_item_id)
+
+    assert result == {"contract_id": contract_id, "status": "stale"}
+    with Session(engine) as verify:
+        saved_contract = verify.get(Contract, contract_id)
+        saved_item = verify.get(AuditBatchItem, audit_item_id)
+        saved_source = verify.get(ImportBatchItem, source_item_id)
+        assert (saved_contract.audit_generation, saved_contract.status) == (2, "done")
+        assert saved_item.status == "failed"
+        assert saved_item.error_code == "STALE_AUDIT_RUN"
+        assert saved_source.status == "ready"
+        assert saved_source.batch.status == "ready"
+
+        monkeypatch.setattr(batches, "_dispatch_item", lambda *_args: "task-2")
+        recreated = batches.create_batch_from_import(
+            BatchFromImportRequest(
+                import_item_ids=[source_item_id], dimensions=["payment"]
+            ),
+            "stale-from-import-second",
+            verify,
+            verify.get(User, saved_source.batch.owner_id),
+        )
+        assert recreated.total == 1
+        assert verify.get(ImportBatchItem, source_item_id).status == "auditing"
+
+
+def test_stale_worker_does_not_rewind_completed_import_item(monkeypatch, tmp_path):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'stale-completed-import.db').as_posix()}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        legal = _user(db)
+        source_item = _import_item(db, legal, filename="已完成导入.txt", contract_type="采购合同")
+        monkeypatch.setattr(batches, "_dispatch_item", lambda *_args: "task-done")
+        batch = batches.create_batch_from_import(
+            BatchFromImportRequest(import_item_ids=[source_item.id], dimensions=["payment"]),
+            "stale-completed-import",
+            db,
+            legal,
+        )
+        audit_item = db.query(AuditBatchItem).filter(AuditBatchItem.batch_id == batch.id).one()
+        contract_id = source_item.contract_id
+        audit_item_id = audit_item.id
+        source_item_id = source_item.id
+
+    with Session(engine) as db:
+        source = db.get(ImportBatchItem, source_item_id)
+        source.status = "done"
+        contract = db.get(Contract, contract_id)
+        contract.audit_generation = 2
+        contract.status = "done"
+        db.commit()
+
+    monkeypatch.setattr(audit_tasks, "SessionLocal", lambda: Session(engine))
+    assert run_contract_audit.run(contract_id, ["payment"], audit_item_id)["status"] == "stale"
+    with Session(engine) as db:
+        assert db.get(ImportBatchItem, source_item_id).status == "done"

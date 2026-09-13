@@ -396,6 +396,17 @@ def _finalize_stale_item(
     if claimed != 1:
         db.rollback()
         return
+    stale_item = (
+        db.query(AuditBatchItem)
+        .filter(
+            AuditBatchItem.id == item_id,
+            AuditBatchItem.contract_id == contract_id,
+            AuditBatchItem.execution_token == stale_token,
+        )
+        .populate_existing()
+        .one()
+    )
+    _return_import_item_to_ready(db, stale_item)
     finalized = db.query(AuditBatchItem).filter(
         AuditBatchItem.id == item_id,
         AuditBatchItem.execution_token == stale_token,
@@ -430,7 +441,7 @@ def _return_import_item_to_ready(db: Session, item: AuditBatchItem) -> None:
     if item.import_item_id is None:
         return
     source_item = db.get(ImportBatchItem, item.import_item_id)
-    if source_item is None or source_item.status == "deleted":
+    if source_item is None or source_item.status != "auditing":
         return
     source_item.status = "ready"
     refresh_import_batch(source_item.batch)

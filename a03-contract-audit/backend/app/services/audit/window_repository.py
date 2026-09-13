@@ -26,7 +26,26 @@ class TransientPersistenceError(RuntimeError):
 
 
 def _raise_if_transient(error: DBAPIError) -> None:
-    if isinstance(error, OperationalError) or error.connection_invalidated:
+    if error.connection_invalidated:
+        raise TransientPersistenceError("audit checkpoint unavailable") from None
+    if not isinstance(error, OperationalError):
+        return
+    details = " ".join(
+        value.lower()
+        for value in (str(error), str(getattr(error, "orig", "")))
+        if value
+    )
+    transient_markers = (
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+        "database is busy",
+        "serialization failure",
+        "could not serialize access",
+        "deadlock detected",
+        "deadlock found",
+    )
+    if any(marker in details for marker in transient_markers):
         raise TransientPersistenceError("audit checkpoint unavailable") from None
 
 
