@@ -251,6 +251,38 @@ class ImportBatchItem(Base):
     contract: Mapped["Contract | None"] = relationship(lazy="joined")
 
 
+class AuditWindowRun(Base):
+    """按任务代次、智能体和协议隔离的窗口检查点。"""
+
+    __tablename__ = "audit_window_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "audit_job_id", "audit_generation", "agent", "dimensions_hash",
+            "window_id", "protocol_version", name="uq_audit_window_runs_identity",
+        ),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("contracts.id", ondelete="CASCADE"), index=True,
+    )
+    audit_job_id: Mapped[int] = mapped_column(Integer, index=True)
+    audit_generation: Mapped[int] = mapped_column(Integer)
+    agent: Mapped[str] = mapped_column(String(16))
+    dimensions_hash: Mapped[str] = mapped_column(String(64))
+    window_id: Mapped[str] = mapped_column(String(64))
+    parent_window_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    depth: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    protocol_version: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16))
+    result_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    issues_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(),
+    )
+
+
 class Risk(Base):
     __tablename__ = "risks"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -282,6 +314,10 @@ class Risk(Base):
     evidence_ids_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
     retrieval_attempts_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
     contract_evidence_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    secondary_review_status: Mapped[str] = mapped_column(
+        String(24), default="not_required", server_default="not_required",
+    )
+    secondary_review_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     contract: Mapped["Contract"] = relationship(back_populates="risks")
@@ -426,6 +462,13 @@ class LLMCallLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     contract_id: Mapped[int | None] = mapped_column(ForeignKey("contracts.id"), nullable=True)
     audit_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    window_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dimension: Mapped[str] = mapped_column(String(64), default="all", server_default="all")
+    attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    validation_status: Mapped[str] = mapped_column(
+        String(24), default="unknown", server_default="unknown",
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     agent: Mapped[str] = mapped_column(String(16), default="")       # legal/finance
     provider: Mapped[str] = mapped_column(String(32), default="")    # deepseek/qwen/openclaw
     model: Mapped[str] = mapped_column(String(64), default="")

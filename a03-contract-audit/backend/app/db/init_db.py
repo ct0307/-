@@ -61,6 +61,8 @@ _DEV_COLUMNS = {
         ("evidence_ids_json", "TEXT DEFAULT '[]' NOT NULL"),
         ("retrieval_attempts_json", "TEXT DEFAULT '[]' NOT NULL"),
         ("contract_evidence_json", "TEXT DEFAULT '[]' NOT NULL"),
+        ("secondary_review_status", "VARCHAR(24) DEFAULT 'not_required' NOT NULL"),
+        ("secondary_review_reason", "TEXT DEFAULT '' NOT NULL"),
     ],
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
     "contracts": [
@@ -98,6 +100,11 @@ _DEV_COLUMNS = {
     "llm_call_logs": [
         ("audit_job_id", "INTEGER"),
         ("finish_reason", "VARCHAR(32)"),
+        ("window_id", "VARCHAR(64)"),
+        ("dimension", "VARCHAR(64) DEFAULT 'all' NOT NULL"),
+        ("attempt", "INTEGER DEFAULT 1 NOT NULL"),
+        ("validation_status", "VARCHAR(24) DEFAULT 'unknown' NOT NULL"),
+        ("error_code", "VARCHAR(64)"),
     ],
     "knowledge_chunks": [
         ("article_number", "VARCHAR(64)"),
@@ -120,6 +127,17 @@ _DEV_COLUMNS = {
 }
 
 _DEV_INDEXES = {
+    "audit_window_runs": ((
+        "ix_audit_window_runs_contract_id",
+        "CREATE INDEX IF NOT EXISTS ix_audit_window_runs_contract_id ON audit_window_runs(contract_id)",
+    ), (
+        "ix_audit_window_runs_audit_job_id",
+        "CREATE INDEX IF NOT EXISTS ix_audit_window_runs_audit_job_id ON audit_window_runs(audit_job_id)",
+    ), (
+        "uq_audit_window_runs_identity",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_window_runs_identity ON audit_window_runs("
+        "audit_job_id, audit_generation, agent, dimensions_hash, window_id, protocol_version)",
+    )),
     "contracts": ((
         "uq_contracts_uploader_upload_idempotency",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_contracts_uploader_upload_idempotency "
@@ -175,6 +193,12 @@ def _migrate_dev_columns() -> None:
             }
             for name, ddl in indexes:
                 required_columns = {
+                    "ix_audit_window_runs_contract_id": {"contract_id"},
+                    "ix_audit_window_runs_audit_job_id": {"audit_job_id"},
+                    "uq_audit_window_runs_identity": {
+                        "audit_job_id", "audit_generation", "agent", "dimensions_hash",
+                        "window_id", "protocol_version",
+                    },
                     "uq_contracts_uploader_upload_idempotency": {
                         "uploaded_by", "upload_idempotency_key"
                     },

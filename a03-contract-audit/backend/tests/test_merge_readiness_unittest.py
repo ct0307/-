@@ -16,6 +16,43 @@ from scripts import migrate_sqlite_to_postgres
 
 
 class MergeReadinessTests(unittest.TestCase):
+    def test_sqlite_hot_migration_adds_window_observation_columns_and_indexes(self):
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql("CREATE TABLE risks (id INTEGER PRIMARY KEY)")
+                connection.exec_driver_sql("INSERT INTO risks (id) VALUES (7)")
+                connection.exec_driver_sql("CREATE TABLE llm_call_logs (id INTEGER PRIMARY KEY)")
+                connection.exec_driver_sql(
+                    "CREATE TABLE audit_window_runs (id INTEGER PRIMARY KEY, contract_id INTEGER, "
+                    "audit_job_id INTEGER, audit_generation INTEGER, agent VARCHAR(16), "
+                    "dimensions_hash VARCHAR(64), window_id VARCHAR(64), protocol_version VARCHAR(32))"
+                )
+            with (
+                patch.object(init_db_module, "engine", engine),
+                patch.object(init_db_module.settings, "DB_BACKEND", "sqlite"),
+            ):
+                init_db_module._migrate_dev_columns()
+                init_db_module._migrate_dev_columns()
+            inspector = inspect(engine)
+            self.assertTrue({"secondary_review_status", "secondary_review_reason"} <= {
+                c["name"] for c in inspector.get_columns("risks")
+            })
+            self.assertTrue({"window_id", "dimension", "attempt", "validation_status", "error_code"} <= {
+                c["name"] for c in inspector.get_columns("llm_call_logs")
+            })
+            self.assertTrue({"ix_audit_window_runs_contract_id", "ix_audit_window_runs_audit_job_id",
+                             "uq_audit_window_runs_identity"} <= {
+                i["name"] for i in inspector.get_indexes("audit_window_runs")
+            })
+            self.assertIn("audit_window_runs", Base.metadata.tables)
+            with engine.connect() as connection:
+                self.assertEqual(connection.exec_driver_sql(
+                    "SELECT id, secondary_review_status, secondary_review_reason FROM risks"
+                ).one(), (7, "not_required", ""))
+        finally:
+            engine.dispose()
+
     def test_contract_audit_status_route_returns_persisted_result(self):
         route = next(
             (
