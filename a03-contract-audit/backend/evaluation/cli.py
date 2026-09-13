@@ -6,8 +6,9 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sys
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 import uuid
 
 from evaluation.batch import (
@@ -17,6 +18,12 @@ from evaluation.batch import (
     load_batch_manifest,
     run_batch_acceptance,
 )
+from evaluation.audit_comparison import (
+    QUALITY_THRESHOLDS,
+    compare_audit_candidates,
+    quality_gate_failures,
+)
+from evaluation.audit_quality import evaluate_audit_files
 from evaluation.benchmark_runner import (
     OpenAICompatibleTarget,
     TargetUnavailable,
@@ -28,7 +35,8 @@ from evaluation.elements import evaluate_dataset
 from evaluation.evidence_metrics import evaluate_evidence_dataset
 from evaluation.retrieval_metrics import evaluate_retrieval_dataset
 from evaluation.evidence import EvidenceWriter, sha256_file
-from evaluation.report import build_report
+from evaluation.report import build_report, load_validated_audit_summary
+from evaluation.snapshot import read_json_object_snapshot
 
 
 EXIT_OK = 0
@@ -36,6 +44,21 @@ EXIT_INVALID = 2
 EXIT_ERROR = 3
 EXIT_FAILED = 4
 EXIT_BLOCKED = 5
+_CANDIDATE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+_AUDIT_COST_METRICS = (
+    "mean_cost_per_success",
+    "mean_prompt_tokens",
+    "mean_completion_tokens",
+    "p95_latency_ms",
+)
+_FROZEN_CONTEXT_FIELDS = (
+    "model_version",
+    "prompt_version",
+    "knowledge_base_version",
+    "dataset_version",
+    "temperature",
+    "environment",
+)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -83,6 +106,15 @@ def _read_retrieval_predictions(path: Path) -> dict[str, list[str]]:
 def _default_run_id(command: str) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{command}-{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
 def _safe_elements_summary(report: dict[str, Any]) -> dict[str, Any]:
@@ -392,6 +424,159 @@ def _run_benchmark(args: argparse.Namespace) -> int:
     return EXIT_OK if comparison.status == "passed" else EXIT_FAILED
 
 
+def _run_audit_quality(args: argparse.Namespace) -> int:
+    report = evaluate_audit_files(args.gold, args.predictions)
+    failures = quality_gate_failures(report["overall"])
+    summary = {**report, "quality_gate_failures": failures}
+    run_id = args.run_id or _default_run_id("audit-quality")
+    writer = EvidenceWriter.create(
+        args.runs_root,
+        run_id=run_id,
+        command="audit-quality",
+        inputs={
+            **report["input_hashes"],
+            "sample_count": report["sample_count"],
+            "evaluation_basis": report["evaluation_basis"],
+        },
+    )
+    for case in report["cases"]:
+        writer.append("audit", {"event": "case", **case})
+    writer.append(
+        "audit",
+        {
+            "event": "summary",
+            "sample_count": report["sample_count"],
+            "evaluation_basis": report["evaluation_basis"],
+            "input_hashes": report["input_hashes"],
+            "overall": report["overall"],
+            "cost_evidence_complete": report["cost_evidence_complete"],
+            "cost_metadata": report["cost_metadata"],
+            "quality_gate_failures": failures,
+            **({"experiment": report["experiment"]} if "experiment" in report else {}),
+        },
+    )
+    _write_json_atomic(writer.run_dir / "audit-summary.json", summary)
+    status = "passed" if not failures else "failed"
+    writer.write_manifest(status=status, modules={"audit": status})
+    return EXIT_OK if status == "passed" else EXIT_FAILED
+
+
+def _parse_candidate_argument(value: str) -> tuple[str, Path]:
+    name, separator, raw_path = value.partition("=")
+    name = name.strip()
+    if not separator or not raw_path.strip():
+        raise ValueError("--candidate 必须使用 NAME=PATH 格式")
+    if not _CANDIDATE_NAME.fullmatch(name):
+        raise ValueError("候选名称只能包含字母、数字、点、下划线和连字符")
+    return name, Path(raw_path.strip())
+
+
+def _safe_candidate_evidence(
+    candidate: Mapping[str, Any], input_sha256: str, position: int
+) -> dict[str, Any]:
+    overall = candidate["overall"]
+    payload: dict[str, Any] = {
+        "event": "candidate",
+        "candidate": candidate["candidate"],
+        "position": position,
+        "input_sha256": input_sha256,
+        "sample_count": candidate["sample_count"],
+        "evaluation_basis": candidate.get("evaluation_basis"),
+        "input_hashes": {
+            field: candidate["input_hashes"][field]
+            for field in ("gold_sha256", "predictions_sha256")
+        },
+        "overall": {
+            metric: overall.get(metric)
+            for metric in (*QUALITY_THRESHOLDS, *_AUDIT_COST_METRICS, "manual_review_rate")
+            if metric in overall
+        },
+        "cost_evidence_complete": candidate["cost_evidence_complete"],
+        "cost_metadata": (
+            {
+                field: candidate["cost_metadata"].get(field)
+                for field in ("currency", "pricing_source", "pricing_version")
+            }
+            if isinstance(candidate.get("cost_metadata"), Mapping)
+            else None
+        ),
+    }
+    experiment = candidate.get("experiment")
+    if candidate["candidate"] in {"A", "B", "C"} and isinstance(experiment, Mapping):
+        context = experiment.get("frozen_context")
+        payload["experiment"] = {
+            field: experiment.get(field)
+            for field in ("group", "git_commit", "change_scope", "output_budget")
+        }
+        payload["experiment"]["frozen_context"] = (
+            {field: context.get(field) for field in _FROZEN_CONTEXT_FIELDS}
+            if isinstance(context, Mapping)
+            else None
+        )
+    return payload
+
+
+def _run_audit_compare(args: argparse.Namespace) -> int:
+    parsed = [_parse_candidate_argument(value) for value in args.candidate]
+    names = [name for name, _path in parsed]
+
+    candidates: list[dict[str, Any]] = []
+    candidate_inputs: list[dict[str, Any]] = []
+    for position, (name, path) in enumerate(parsed):
+        snapshot = read_json_object_snapshot(path, f"候选 {name}")
+        summary = load_validated_audit_summary(path, summary_snapshot=snapshot)
+        summary["candidate"] = name
+        candidates.append(summary)
+        sample_count = summary.get("sample_count")
+        if not isinstance(sample_count, int) or isinstance(sample_count, bool):
+            raise ValueError(f"候选 {name}.sample_count 必须是整数")
+        candidate_inputs.append(
+            {
+                "position": position,
+                "candidate": name,
+                "input_sha256": snapshot.sha256,
+                "sample_count": sample_count,
+            }
+        )
+
+    result = compare_audit_candidates(candidates)
+    result_payload = result.to_dict()
+    run_id = args.run_id or _default_run_id("audit-compare")
+    writer = EvidenceWriter.create(
+        args.runs_root,
+        run_id=run_id,
+        command="audit-compare",
+        inputs={
+            "candidate_count": len(candidates),
+            "candidate_names": names,
+            "candidate_inputs": candidate_inputs,
+            "evaluation_basis": result.evaluation_basis,
+        },
+    )
+    for candidate, binding in zip(candidates, candidate_inputs):
+        writer.append(
+            "audit-comparison",
+            _safe_candidate_evidence(
+                candidate, str(binding["input_sha256"]), int(binding["position"])
+            ),
+        )
+    writer.append("audit-comparison", {"event": "summary", **result_payload})
+    _write_json_atomic(writer.run_dir / "audit-comparison-summary.json", result_payload)
+    manifest_status = {
+        "passed": "passed",
+        "failed": "failed",
+        "quality_passed_cost_inconclusive": "blocked",
+    }[result.status]
+    writer.write_manifest(
+        status=manifest_status, modules={"audit_comparison": manifest_status}
+    )
+    return {
+        "passed": EXIT_OK,
+        "failed": EXIT_FAILED,
+        "quality_passed_cost_inconclusive": EXIT_BLOCKED,
+    }[result.status]
+
+
 def _run_report(args: argparse.Namespace) -> int:
     result = build_report(args.run_dir)
     return {
@@ -442,6 +627,19 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
     benchmark.add_argument("--run-id")
     benchmark.add_argument("--request-timeout", type=float, default=120)
+    audit_quality = subcommands.add_parser(
+        "audit-quality", help="评测合同审查质量、截断与成本"
+    )
+    audit_quality.add_argument("--gold", type=Path, required=True)
+    audit_quality.add_argument("--predictions", type=Path, required=True)
+    audit_quality.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
+    audit_quality.add_argument("--run-id")
+    audit_compare = subcommands.add_parser(
+        "audit-compare", help="先通过质量门槛再比较审查成本"
+    )
+    audit_compare.add_argument("--candidate", action="append", required=True)
+    audit_compare.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
+    audit_compare.add_argument("--run-id")
     report = subcommands.add_parser("report", help="校验证据并生成 Markdown 报告")
     report.add_argument("--run-dir", type=Path, required=True)
     return parser
@@ -460,6 +658,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_batch(args)
         if args.command == "benchmark":
             return _run_benchmark(args)
+        if args.command == "audit-quality":
+            return _run_audit_quality(args)
+        if args.command == "audit-compare":
+            return _run_audit_compare(args)
         if args.command == "report":
             return _run_report(args)
         raise ValueError(f"未知子命令: {args.command}")

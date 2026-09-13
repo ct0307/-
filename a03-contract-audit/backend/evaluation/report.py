@@ -7,7 +7,21 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
+from evaluation.audit_comparison import (
+    QUALITY_THRESHOLDS,
+    compare_audit_candidates,
+    quality_gate_failures,
+)
+from evaluation.audit_quality import summarize_audit_cases
 from evaluation.evidence import RUN_STATUSES, SCHEMA_VERSION
+from evaluation.snapshot import (
+    MAX_FILE_BYTES,
+    MAX_JSONL_LINE_BYTES,
+    MAX_JSONL_LINES,
+    JsonObjectSnapshot,
+    read_json_object_snapshot,
+    read_jsonl_snapshot,
+)
 
 
 _STREAMS = {
@@ -16,8 +30,14 @@ _STREAMS = {
     "retrieval": "retrieval.jsonl",
     "batch": "batch-events.jsonl",
     "benchmark": "benchmark.jsonl",
+    "audit": "audit.jsonl",
+    "audit_comparison": "audit-comparison.jsonl",
 }
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_EVENT_BYTES = MAX_FILE_BYTES
+MAX_EVENT_LINES = MAX_JSONL_LINES
+MAX_EVENT_LINE_BYTES = MAX_JSONL_LINE_BYTES
 
 
 class InvalidEvidence(ValueError):
@@ -45,13 +65,13 @@ def aggregate_status(statuses: Mapping[str, str]) -> str:
 def _load_manifest(run_dir: Path) -> dict[str, Any]:
     path = run_dir / "manifest.json"
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest = read_json_object_snapshot(
+            path, "manifest.json", max_bytes=MAX_MANIFEST_BYTES
+        ).value
     except FileNotFoundError as exc:
         raise InvalidEvidence("缺少 manifest.json") from exc
-    except json.JSONDecodeError as exc:
-        raise InvalidEvidence("manifest.json 不是有效 JSON") from exc
-    if not isinstance(manifest, dict):
-        raise InvalidEvidence("manifest.json 必须是对象")
+    except (OSError, ValueError) as exc:
+        raise InvalidEvidence(f"manifest.json 无效: {exc}") from exc
     if manifest.get("schema_version") != SCHEMA_VERSION:
         raise InvalidEvidence("manifest schema_version 不受支持")
     run_id = manifest.get("run_id")
@@ -77,26 +97,37 @@ def _load_manifest(run_dir: Path) -> dict[str, Any]:
     if not isinstance(inputs, dict):
         raise InvalidEvidence("manifest.inputs 必须是对象")
     for key, value in inputs.items():
-        if key.endswith("_sha256") and (
-            not isinstance(value, str) or not _SHA256.fullmatch(value)
+        if not key.endswith("_sha256"):
+            continue
+        if isinstance(value, str) and _SHA256.fullmatch(value):
+            continue
+        if isinstance(value, Mapping) and value and all(
+            isinstance(name, str)
+            and bool(name)
+            and isinstance(digest, str)
+            and bool(_SHA256.fullmatch(digest))
+            for name, digest in value.items()
         ):
-            raise InvalidEvidence(f"manifest.inputs.{key} 不是有效 SHA-256")
+            continue
+        raise InvalidEvidence(f"manifest.inputs.{key} 不是有效 SHA-256 或哈希对象")
     return manifest
 
 
 def _load_events(path: Path, run_id: str) -> list[dict[str, Any]]:
     if not path.is_file():
         raise InvalidEvidence(f"缺少 {path.name}")
+    try:
+        records, _sha256 = read_jsonl_snapshot(
+            path,
+            path.name,
+            max_bytes=MAX_EVENT_BYTES,
+            max_lines=MAX_EVENT_LINES,
+            max_line_bytes=MAX_EVENT_LINE_BYTES,
+        )
+    except (OSError, ValueError) as exc:
+        raise InvalidEvidence(f"{path.name} 无效: {exc}") from exc
     events: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise InvalidEvidence(f"{path.name}:{line_number} 不是有效 JSON") from exc
-        if not isinstance(event, dict):
-            raise InvalidEvidence(f"{path.name}:{line_number} 必须是对象")
+    for line_number, event in enumerate(records, 1):
         if event.get("schema_version") != SCHEMA_VERSION:
             raise InvalidEvidence(f"{path.name}:{line_number} schema_version 不一致")
         if event.get("run_id") != run_id:
@@ -263,6 +294,219 @@ def _validate_benchmark(
     return comparisons[0]
 
 
+def _validate_audit(
+    status: str,
+    inputs: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    if status in {"blocked", "error"}:
+        return None
+    summaries = _events_of(events, "summary")
+    cases = _events_of(events, "case")
+    if len(summaries) != 1:
+        raise InvalidEvidence("audit 必须且只能包含一个 summary 事件")
+    summary = summaries[0]
+    sample_count = inputs.get("sample_count")
+    if (
+        not isinstance(sample_count, int)
+        or isinstance(sample_count, bool)
+        or sample_count <= 0
+        or len(cases) != sample_count
+        or summary.get("sample_count") != sample_count
+    ):
+        raise InvalidEvidence("audit case 事件数量与 sample_count 不一致")
+    basis = inputs.get("evaluation_basis")
+    if basis not in {"synthetic", "human_gold"} or summary.get("evaluation_basis") != basis:
+        raise InvalidEvidence("audit evaluation_basis 不一致")
+    input_hashes = summary.get("input_hashes")
+    if not isinstance(input_hashes, Mapping) or input_hashes != {
+        "gold_sha256": inputs.get("gold_sha256"),
+        "predictions_sha256": inputs.get("predictions_sha256"),
+    }:
+        raise InvalidEvidence("audit summary 输入哈希与 manifest 不一致")
+    try:
+        derived = summarize_audit_cases(cases)
+        failures = quality_gate_failures(derived["overall"])
+    except ValueError as exc:
+        raise InvalidEvidence(f"audit case 事件无效: {exc}") from exc
+    expected_summary: dict[str, Any] = {
+        "event": "summary",
+        "sample_count": sample_count,
+        "evaluation_basis": basis,
+        "input_hashes": dict(input_hashes),
+        "overall": derived["overall"],
+        "cost_evidence_complete": derived["cost_evidence_complete"],
+        "cost_metadata": derived["cost_metadata"],
+        "quality_gate_failures": failures,
+    }
+    if "experiment" in derived:
+        expected_summary["experiment"] = derived["experiment"]
+    if dict(summary) != expected_summary:
+        raise InvalidEvidence("audit summary 与 case 事实源重算结果不一致")
+    expected_status = "passed" if not failures else "failed"
+    if status != expected_status:
+        raise InvalidEvidence("audit 模块状态与质量门槛结果不一致")
+    return summary
+
+
+def load_validated_audit_summary(
+    summary_path: Path,
+    *,
+    summary_snapshot: JsonObjectSnapshot | None = None,
+) -> dict[str, Any]:
+    """加载并验证 audit-quality 的 manifest、事件流与汇总文件。"""
+    summary_path = Path(summary_path)
+    if summary_path.name != "audit-summary.json":
+        raise InvalidEvidence("候选文件名必须是 audit-summary.json")
+    snapshot = summary_snapshot or read_json_object_snapshot(summary_path, "审计候选汇总")
+    run_dir = summary_path.parent
+    manifest = _load_manifest(run_dir)
+    if manifest.get("command") != "audit-quality" or set(manifest["modules"]) != {"audit"}:
+        raise InvalidEvidence("候选目录必须是单一 audit-quality 运行产物")
+    status = manifest["modules"]["audit"]
+    events = _load_events(run_dir / _STREAMS["audit"], str(manifest["run_id"]))
+    validated = _validate_audit(status, manifest["inputs"], events)
+    if validated is None:
+        raise InvalidEvidence("候选审计运行没有可比较汇总")
+    expected_file = {key: value for key, value in validated.items() if key != "event"}
+    expected_file["cases"] = [
+        {key: value for key, value in case.items() if key != "event"}
+        for case in _events_of(events, "case")
+    ]
+    if snapshot.value != expected_file:
+        raise InvalidEvidence("audit-summary.json 与 manifest 或 audit.jsonl 不一致")
+    return dict(snapshot.value)
+
+
+def _validate_audit_comparison(
+    status: str,
+    inputs: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    summaries = _events_of(events, "summary")
+    candidate_events = _events_of(events, "candidate")
+    if len(summaries) != 1:
+        raise InvalidEvidence("audit_comparison 必须且只能包含一个 summary")
+    summary = summaries[0]
+    count = inputs.get("candidate_count")
+    names = inputs.get("candidate_names")
+    candidate_inputs = inputs.get("candidate_inputs")
+    if (
+        not isinstance(names, list)
+        or not all(isinstance(name, str) and name for name in names)
+    ):
+        raise InvalidEvidence("audit_comparison manifest 候选集不一致")
+    if (
+        not isinstance(count, int)
+        or isinstance(count, bool)
+        or count <= 0
+        or len(names) != count
+        or not isinstance(candidate_inputs, list)
+        or len(candidate_inputs) != count
+        or len(candidate_events) != count
+    ):
+        raise InvalidEvidence("audit_comparison manifest 候选集不一致")
+    expected_bindings: list[dict[str, Any]] = []
+    for position, binding in enumerate(candidate_inputs):
+        if (
+            not isinstance(binding, Mapping)
+            or binding.get("position") != position
+            or binding.get("candidate") != names[position]
+            or not isinstance(binding.get("input_sha256"), str)
+            or not _SHA256.fullmatch(binding["input_sha256"])
+            or not isinstance(binding.get("sample_count"), int)
+            or isinstance(binding.get("sample_count"), bool)
+            or binding["sample_count"] <= 0
+        ):
+            raise InvalidEvidence("audit_comparison manifest 候选绑定无效")
+        expected_bindings.append(dict(binding))
+    event_bindings = [
+        {
+            "position": event.get("position"),
+            "candidate": event.get("candidate"),
+            "input_sha256": event.get("input_sha256"),
+            "sample_count": event.get("sample_count"),
+        }
+        for event in candidate_events
+    ]
+    if event_bindings != expected_bindings:
+        raise InvalidEvidence("audit_comparison 候选哈希或样本数与 manifest 不一致")
+
+    expected_thresholds = {
+        metric: {"operator": operator, "value": threshold}
+        for metric, (operator, threshold) in QUALITY_THRESHOLDS.items()
+    }
+    if summary.get("thresholds") != expected_thresholds:
+        raise InvalidEvidence("audit_comparison 不是固定八项质量门槛")
+    comparison_status = summary.get("status")
+    if inputs.get("evaluation_basis") != summary.get("evaluation_basis"):
+        raise InvalidEvidence("audit_comparison evaluation_basis 与 manifest 不一致")
+    expected_manifest_status = {
+        "passed": "passed",
+        "failed": "failed",
+        "quality_passed_cost_inconclusive": "blocked",
+    }.get(comparison_status)
+    if expected_manifest_status is None or status != expected_manifest_status:
+        raise InvalidEvidence("audit_comparison 状态与比较结果不一致")
+    quality_passed = summary.get("quality_passed")
+    rejected = summary.get("rejected")
+    ranking = summary.get("ranking")
+    selected = summary.get("selected")
+    inconclusive = summary.get("cost_inconclusive")
+    if (
+        not isinstance(quality_passed, list)
+        or not all(isinstance(name, str) for name in quality_passed)
+        or not isinstance(rejected, Mapping)
+        or not all(
+            isinstance(name, str)
+            and isinstance(failures, list)
+            and all(isinstance(metric, str) for metric in failures)
+            for name, failures in rejected.items()
+        )
+        or not isinstance(ranking, list)
+        or not all(isinstance(name, str) for name in ranking)
+        or not isinstance(inconclusive, list)
+        or not all(isinstance(name, str) for name in inconclusive)
+        or set(quality_passed) | set(rejected) != set(names)
+        or set(quality_passed) & set(rejected)
+    ):
+        raise InvalidEvidence("audit_comparison 候选门槛分组不一致")
+    if comparison_status == "passed":
+        if not ranking or ranking != list(dict.fromkeys(ranking)):
+            raise InvalidEvidence("audit_comparison ranking 无效")
+        if set(ranking) != set(quality_passed):
+            raise InvalidEvidence("audit_comparison ranking 与质量通过集不一致")
+        if selected != ranking[0]:
+            raise InvalidEvidence("audit_comparison selected 与 ranking 第一名不一致")
+        if inconclusive:
+            raise InvalidEvidence("audit_comparison 已选中时不得存在成本证据不足项")
+    elif selected is not None or ranking:
+        raise InvalidEvidence("audit_comparison 未通过时 selected 必须为 null 且 ranking 为空")
+    if comparison_status == "failed" and quality_passed:
+        raise InvalidEvidence("audit_comparison failed 与质量通过集矛盾")
+    if comparison_status == "quality_passed_cost_inconclusive" and (
+        not quality_passed or not inconclusive or not set(inconclusive) <= set(quality_passed)
+    ):
+        raise InvalidEvidence("audit_comparison 成本证据不足集无效")
+    reconstructed = [
+        {
+            key: value
+            for key, value in event.items()
+            if key not in {"event", "input_sha256", "position"}
+        }
+        for event in candidate_events
+    ]
+    try:
+        expected = compare_audit_candidates(reconstructed).to_dict()
+    except ValueError as exc:
+        raise InvalidEvidence(f"audit_comparison 候选证据无效: {exc}") from exc
+    if dict(summary) != {"event": "summary", **expected}:
+        raise InvalidEvidence(
+            "audit_comparison 门槛、排序或 selected 与候选原始指标不一致"
+        )
+    return summary
+
+
 def _format_value(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.4f}"
@@ -363,6 +607,59 @@ def _render_report(
                 f"- 缺失预测：{retrieval.get('missing_prediction_count')}",
             ]
         )
+    audit = summaries.get("audit")
+    if audit is not None:
+        overall = audit["overall"]
+        evaluation_label = (
+            "人工金标准评测"
+            if audit.get("evaluation_basis") == "human_gold"
+            else "合成数据技术预评测"
+        )
+        lines.extend(
+            [
+                "",
+                f"## 合同审查{evaluation_label}",
+                "",
+                f"- 样本数：{audit.get('sample_count')}",
+                f"- 高风险召回率：{_format_value(overall.get('high_risk_recall'))}",
+                f"- 整体风险召回率：{_format_value(overall.get('risk_recall'))}",
+                f"- 风险精确率：{_format_value(overall.get('risk_precision'))}",
+                f"- 错误成功率：{_format_value(overall.get('false_success_rate'))}",
+                f"- 最终截断率：{_format_value(overall.get('final_truncation_rate'))}",
+                f"- 质量门槛失败项：{', '.join(audit.get('quality_gate_failures', [])) or '无'}",
+            ]
+        )
+        if audit.get("evaluation_basis") == "synthetic":
+            lines.append("- 边界：本结果仅是合成数据技术预评测，不代表人工准确率结论。")
+    comparison = summaries.get("audit_comparison")
+    if comparison is not None:
+        basis = comparison.get("evaluation_basis")
+        title = (
+            "合同审查合成数据技术预评测对比"
+            if basis == "synthetic"
+            else "合同审查人工金标准质量与成本对比"
+            if basis == "human_gold"
+            else "合同审查质量与成本对比"
+        )
+        lines.extend(["", f"## {title}", ""])
+        comparison_status = comparison.get("status")
+        if comparison_status == "passed":
+            lines.append(f"- 选中候选：`{comparison.get('selected')}`")
+            if basis == "synthetic":
+                lines.extend(
+                    [
+                        "- 结论：该候选仅在本次冻结模型、合成数据集和环境的技术预评测范围内成本排序第一。",
+                        "- 边界：该结果不代表人工准确率、真实合同效果或生产环境最优性价比结论。",
+                    ]
+                )
+            else:
+                lines.append(
+                    "- 结论：该候选仅在本次冻结模型、数据集和环境下最具性价比。"
+                )
+        elif comparison_status == "quality_passed_cost_inconclusive":
+            lines.append("- 结论：质量门槛已通过，但成本证据不足，不选出最具性价比候选。")
+        else:
+            lines.append("- 结论：无候选通过全部质量门槛。")
     lines.extend(
         [
             "",
@@ -385,6 +682,8 @@ def build_report(run_dir: Path) -> ReportResult:
         "retrieval": _validate_retrieval,
         "batch": _validate_batch,
         "benchmark": _validate_benchmark,
+        "audit": _validate_audit,
+        "audit_comparison": _validate_audit_comparison,
     }
     for module, status in manifest["modules"].items():
         events = _load_events(run_dir / _STREAMS[module], manifest["run_id"])
