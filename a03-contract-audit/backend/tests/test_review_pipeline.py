@@ -107,6 +107,37 @@ def _request(window=None, prompt_calls=None):
     )
 
 
+def test_split_candidates_keep_leaf_provenance_through_json_round_trip():
+    from app.services.audit.review_pipeline import WindowReviewer
+    calls = []
+    adapter = FakeAdapter([
+        _response(finish_reason="length"),
+        _response(risks=[_risk()]),
+        _response(risks=[_risk("交付风险", "乙方应按期完成交付。")]),
+    ])
+    result = WindowReviewer(adapter).review(_request(prompt_calls=calls))
+    restored = AgentReviewResult.model_validate_json(result.model_dump_json())
+    assert [candidate.source_window_id for candidate in restored.candidates] == [
+        call[0].window.window_id for call in calls[1:]
+    ]
+    assert [candidate.source_clause_ids for candidate in restored.candidates] == [["第一条"], ["第二条"]]
+
+
+def test_real_window_retains_all_1025_system_clause_ids():
+    from app.services.audit.review_pipeline import WindowReviewer
+    from app.services.rag.contract_structure import build_contract_windows
+
+    text = "\n".join(f"第{index}条 款" for index in range(1, 1026))
+    windows = build_contract_windows(text, max_chars=16000)
+    assert len(windows) == 1
+    assert len(windows[0].clause_ids) == 1025
+    adapter = FakeAdapter([_response(risks=[_risk(quote="第1025条 款")])])
+    result = WindowReviewer(adapter).review(_request(window=windows[0]))
+    restored = AgentReviewResult.model_validate_json(result.model_dump_json())
+    assert restored.complete is True
+    assert restored.candidates[0].source_clause_ids == list(windows[0].clause_ids)
+
+
 def test_review_types_are_frozen_and_constructor_limits_are_validated():
     from app.services.audit.review_pipeline import ReviewWindow, WindowReviewer
 

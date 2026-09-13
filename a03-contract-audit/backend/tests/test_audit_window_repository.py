@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.db.session import Base
 from app.llm.base import LLMResponse
 from app.models import models
-from app.services.audit.protocol import AgentReviewResult, ReviewIssue, RiskCandidate
+from app.services.audit.protocol import AgentReviewResult, ReviewIssue, ReviewedRiskCandidate
 from app.services.audit.review_pipeline import ReviewWindow, WindowReviewRequest
 from app.services.rag.contract_structure import ContractWindow
 
@@ -52,9 +52,10 @@ def request(**changes):
 def result():
     return AgentReviewResult(
         complete=True,
-        candidates=[RiskCandidate(
+        candidates=[ReviewedRiskCandidate(
             level="high", category="付款期限", quote="合同正文", reason="缺少明确期限",
             suggestion="补充付款期限",
+            source_window_id="window-1", source_clause_ids=["clause-1"],
         )],
         issues=[ReviewIssue(code="EVIDENCE_UNRESOLVED", agent="legal", detail="需要补充证据")],
     )
@@ -113,10 +114,42 @@ def test_each_identity_field_is_isolated(store, changes):
 
 
 def test_protocol_version_is_isolated(store):
-    repository(store, protocol_version="v1").save_valid(request(), result())
-    assert repository(store, protocol_version="v2").load_valid(request()) is None
-    repository(store, protocol_version="v2").save_valid(request(), AgentReviewResult(complete=True))
-    assert repository(store, protocol_version="v1").load_valid(request()) == result()
+    repository(store, protocol_version="candidate-v1").save_valid(request(), result())
+    assert repository(store, protocol_version="candidate-v2").load_valid(request()) is None
+    repository(store, protocol_version="candidate-v2").save_valid(request(), AgentReviewResult(complete=True))
+    assert repository(store, protocol_version="candidate-v1").load_valid(request()) == result()
+
+
+def test_default_repository_ignores_legacy_candidates_without_provenance(store):
+    from app.services.audit.window_repository import dimensions_hash
+
+    current_request = request()
+    legacy_result = result().model_dump(mode="json")
+    for candidate in legacy_result["candidates"]:
+        candidate.pop("source_window_id")
+        candidate.pop("source_clause_ids")
+    legacy_json = json.dumps(legacy_result, ensure_ascii=False)
+    with store.begin() as db:
+        db.add(models.AuditWindowRun(
+            contract_id=current_request.contract_id,
+            audit_job_id=current_request.audit_job_id,
+            audit_generation=current_request.audit_generation,
+            agent=current_request.agent,
+            dimensions_hash=dimensions_hash(current_request.dimensions),
+            window_id=current_request.review_window.window.window_id,
+            protocol_version="candidate-v1", status="valid",
+            result_json=legacy_json, issues_json="[]", attempts=1,
+        ))
+
+    current_repository = repository(store)
+    assert current_repository.load_valid(current_request) is None
+    current_repository.save_valid(current_request, result())
+    assert current_repository.load_valid(current_request) == result()
+    with store() as db:
+        rows = db.scalars(select(models.AuditWindowRun)).all()
+        assert {row.protocol_version for row in rows} == {"candidate-v1", "candidate-v2"}
+        legacy_row = next(row for row in rows if row.protocol_version == "candidate-v1")
+        assert legacy_row.result_json == legacy_json
 
 
 def test_dimensions_are_sorted_deduplicated_and_sha256_hashed(store):

@@ -3,7 +3,7 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-AUDIT_PROTOCOL_VERSION = "candidate-v1"
+AUDIT_PROTOCOL_VERSION = "candidate-v2"
 AUDIT_JSON_FORMAT = {"type": "json_object"}
 
 
@@ -21,6 +21,13 @@ class RiskCandidate(BaseModel):
     suggestion: str = Field(min_length=4, max_length=800)
 
     _strip_level = field_validator("level", mode="before")(_strip_string)
+
+
+class ReviewedRiskCandidate(RiskCandidate):
+    """系统附加真实调用来源；此类型不用于模型输出解析。"""
+
+    source_window_id: str = Field(min_length=1, max_length=64)
+    source_clause_ids: list[str] = Field(default_factory=list)
 
 
 class RiskEnvelope(BaseModel):
@@ -65,7 +72,7 @@ class ReviewIssue(BaseModel):
 class AgentReviewResult(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
 
-    candidates: list[RiskCandidate] = Field(default_factory=list)
+    candidates: list[ReviewedRiskCandidate] = Field(default_factory=list)
     issues: list[ReviewIssue] = Field(default_factory=list)
     complete: bool
     planned_windows: int = Field(default=1, ge=1)

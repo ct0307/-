@@ -15,19 +15,17 @@
   - 建议修改（suggestion）
   - 人工干预档位（tier: green/yellow/red）
 
-真实版每个 Agent 走 LLM chat；某 Agent 不可用或返回无法解析时，仅该角色降级到
-对应 Mock 规则（另一角色不受影响），保证审查链路始终可用 —— 企业可用性刚需。
+每个 Agent 通过窗口审查执行器调用模型；局部失败产生结构化问题，保留已验证结果。
 所有结论统一标注"仅供参考，以人工复核为准"。
 """
 import hashlib
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.core.config import settings
 from app.core.logging import get_logger
-from app.llm.base import LLMError
 from app.llm.factory import get_llm_adapter
 from app.services.audit.evidence_validation import (
     SUPPORT_VALIDATOR_VERSION,
@@ -37,6 +35,14 @@ from app.services.audit.contract_logic import (
     analyze_payment_schedule,
     build_logic_cross_checks,
 )
+from app.services.audit.protocol import ReviewIssue
+from app.services.audit.review_pipeline import (
+    NullWindowCheckpoint,
+    ReviewWindow,
+    WindowReviewer,
+    WindowReviewRequest,
+)
+from app.services.audit.window_repository import SqlAlchemyWindowCheckpoint
 from app.services.rag.contract_structure import build_contract_windows
 from app.services.rag.retriever import retrieve
 
@@ -89,41 +95,12 @@ _ROLE_DIMENSIONS: dict[str, set[str]] = {
 }
 
 
-def _record_llm_call(
-    contract_id: int | None,
-    agent: str,
-    resp,
-    mode: str = "llm",
-    audit_job_id: int | None = None,
-    session_factory=None,
-) -> None:
-    """以独立短事务写模型调用日志，绝不跨越下一次外部模型调用。"""
-    if contract_id is None:
-        return
-    if session_factory is None:
-        from app.db.session import SessionLocal
-        session_factory = SessionLocal
-    log_db = session_factory()
-    try:
-        from app.models.models import LLMCallLog
-        log_db.add(LLMCallLog(
-            contract_id=contract_id,
-            audit_job_id=audit_job_id,
-            agent=agent,
-            provider=settings.LLM_PROVIDER,
-            model=resp.model,
-            prompt_tokens=resp.prompt_tokens,
-            completion_tokens=resp.completion_tokens,
-            finish_reason=getattr(resp, "finish_reason", None),
-            latency_ms=resp.latency_ms,
-            mode=mode,
-        ))
-        log_db.commit()
-    except Exception as exc:  # 不让日志写入失败影响审查主链路
-        log_db.rollback()
-        log.warning("audit.llm_log_failed", exception_type=type(exc).__name__)
-    finally:
-        log_db.close()
+@dataclass(frozen=True)
+class AgentAuditResult:
+    risks: list[dict]
+    issues: list[ReviewIssue]
+    planned: int
+    completed: int
 
 
 def audit_contract(
@@ -134,10 +111,14 @@ def audit_contract(
     dimensions: list[str] | None = None,
     contract_type: str = "",
     audit_job_id: int | None = None,
+    audit_generation: int = 0,
 ) -> dict:
     """多智能体主从协同审查。dimensions 为空/None 时全量审查。"""
     all_risks: list[dict] = []
+    all_issues: list[ReviewIssue] = []
+    planned = completed = 0
     canonical_dimensions = _canonical_dimensions(dimensions)
+    _dimension_instruction(canonical_dimensions)
     payment_schedule = analyze_payment_schedule(contract_text)
     shared_context: dict = {
         "elements": elements,
@@ -161,51 +142,21 @@ def audit_contract(
         if canonical_dimensions and not set(canonical_dimensions).intersection(_ROLE_DIMENSIONS[role]):
             log.info("audit.agent_skipped", agent=role, dimensions=canonical_dimensions)
             continue
-        role_started = time.perf_counter()
-        try:
-            risks = _agent_audit(
-                role, elements, contract_text, shared_context,
-                db=db, contract_id=contract_id,
-                dimensions=canonical_dimensions,
-                contract_type=contract_type,
-                timings=timings,
-                audit_job_id=audit_job_id,
-            )
-            log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(risks))
-        except LLMError:
-            raise
-        except ValueError as exc:
-            timings[f"{role}_agent_ms"] = round(
-                (time.perf_counter() - role_started) * 1000
-            )
-            log.warning(
-                "audit.agent_fallback",
-                agent=role,
-                exception_type=type(exc).__name__,
-            )
-            # 不写假风险数据进台账——用一条系统提示风险标明 Agent 降级，
-            # 让法务知道该 Agent 本次未能审查，需要人工补充。
-            risks = [{
-                "agent": role,
-                "level": "medium",
-                "category": "审查引擎降级",
-                "original_text": "（AI 审查服务暂时不可用，本次结果由系统自动标注）",
-                "risk_reason": "模型返回格式不符合审查协议，未形成可采信结论。",
-                "basis": "模型返回格式不符合审查协议，未生成可采信结论。",
-                "suggestion": "请人工对本份合同进行补充审查，或重新触发审查。",
-                "confidence": 0,
-                "disclaimer": DISCLAIMER,
-                "tier": "yellow",
-                "evidence_status": "unsupported",
-                "original_text_verified": False,
-                "requires_manual_review": True,
-                "support_relation_status": "unclear",
-                "support_validation_reason": "模型审查降级，未执行支持关系校验",
-                "support_validator_version": SUPPORT_VALIDATOR_VERSION,
-            }]
-            log.info("audit.agent_done", agent=role, mode="degraded", risk_count=0)
-        all_risks.extend(risks)
-        shared_context[role] = _summarize_for_context(role, risks, elements)
+        result = _agent_audit(
+            role, elements, contract_text, shared_context,
+            db=db, contract_id=contract_id,
+            dimensions=canonical_dimensions,
+            contract_type=contract_type,
+            timings=timings,
+            audit_job_id=audit_job_id,
+            audit_generation=audit_generation,
+        )
+        log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(result.risks))
+        all_risks.extend(result.risks)
+        all_issues.extend(result.issues)
+        planned += result.planned
+        completed += result.completed
+        shared_context[role] = _summarize_for_context(role, result.risks, elements)
 
     cross_checks = detect_conflicts(shared_context, elements)
     cross_checks.extend(build_logic_cross_checks(contract_text))
@@ -214,7 +165,13 @@ def audit_contract(
         r["tier"] = classify_tier(r, conflict_categories)
 
     log.info("audit.done", total=len(all_risks), conflicts=len(cross_checks), agents=_AGENT_ORDER)
-    return {"risks": all_risks, "cross_checks": cross_checks, "timings": timings}
+    return {
+        "risks": all_risks,
+        "cross_checks": cross_checks,
+        "issues": [issue.model_dump(mode="json") for issue in all_issues],
+        "coverage": {"planned": planned, "completed": completed},
+        "timings": timings,
+    }
 
 
 def _summarize_for_context(role: str, risks: list[dict], elements: dict) -> dict:
@@ -289,10 +246,9 @@ def _agent_audit(
     contract_type: str = "",
     timings: dict[str, int] | None = None,
     audit_job_id: int | None = None,
-) -> list[dict]:
-    """单个 Agent 审查：定向 RAG 依据 + 角色 prompt（含上游共享上下文）→ chat → 解析。
-    db/contract_id 可选，仅用于写 LLM 调用日志，不影响审查主链路。
-    """
+    audit_generation: int = 0,
+) -> AgentAuditResult:
+    """单个 Agent 的窗口审查、原文核验和逐项 RAG 依据校验。"""
     agent_started = time.perf_counter()
     cfg = _AGENTS[role]
     dimension_instruction = _dimension_instruction(dimensions)
@@ -329,10 +285,11 @@ def _agent_audit(
         "2. 只依据给定资料识别候选风险，禁止编造法规或依据；正式依据将由系统另行校验；\n"
         "3. 只输出属于你职责维度的风险，不越界评价其他维度；\n"
         "4. 每条风险必须给出原文引用、风险原因、风险等级和修改建议；\n"
-        "5. 输出严格的 JSON 数组，不要输出任何解释性文字或 Markdown；\n"
-        "6. 数组每个元素字段：level(取值 high/medium/low)、category(风险类别)、"
-        "original_text(合同中的相关原文或'（全文未检出）')、risk_reason(风险原因)、"
-        "suggestion(修改建议)。不要输出正式法规依据或置信度分数。\n"
+        "5. 输出严格的 JSON 对象，顶层仅包含 risks 数组与 has_more 布尔值；每页最多5条；"
+        "不要输出任何解释性文字或 Markdown；\n"
+        "6. risks 每个元素仅包含：level(取值 high/medium/low)、category(风险类别)、"
+        "quote(合同中的精确原文或'（全文未检出）')、reason(风险原因)、"
+        "suggestion(修改建议)。不要输出正式法规依据、来源窗口或置信度分数。\n"
         "结论仅供参考，最终以人工复核为准。"
     )
 
@@ -352,37 +309,58 @@ def _agent_audit(
             f"请在此基础上，专注金额、付款、现金流与价格公允性维度做二次加工审查。\n"
         )
 
-    adapter = get_llm_adapter()
-    windows = build_contract_windows(contract_text, max_chars=8000)
-    normalized: list[dict] = []
-    seen_claims: set[str] = set()
-    for window_index, window in enumerate(windows, start=1):
-        user_prompt = (
+    def build_user_prompt(
+        review_window: ReviewWindow, page: int, page_dimensions: tuple[str, ...],
+    ) -> str:
+        window = review_window.window
+        return (
             f"<knowledge>\n{basis_block}\n</knowledge>\n{upstream_block}\n"
             f"【合同基本信息】\n合同类型：{contract_type or '未指定'}\n"
             f"【已抽取的合同要素】\n{json.dumps({k: v for k, v in elements.items() if not k.startswith('has_')}, ensure_ascii=False)}\n\n"
-            f"【审查窗口 {window_index}/{len(windows)}】\n"
+            f"【审查窗口 {window.window_id}】\n"
             f"条款范围：{('、'.join(window.clause_ids) or '未编号段落')}\n"
+            f"{_dimension_instruction(list(page_dimensions))}\n"
             f"<contract>\n{window.text}\n</contract>\n\n"
-            f"请以{cfg['name']}的视角，输出 JSON 数组形式的风险清单。"
+            f"当前第{page}页：按原文出现顺序、同一原文按风险类别排序，"
+            f"每页最多5条，输出第{(page - 1) * 5 + 1}至{page * 5}项，跳过前页项目；"
+            "仍有未输出风险时 has_more=true，否则 false。"
+            "分页由系统页码控制，不输出或依赖模型游标。"
+            f"请以{cfg['name']}的视角输出严格 JSON 对象。"
         )
-        resp = adapter.chat(system_prompt, user_prompt)
-        _record_llm_call(
-            contract_id,
-            agent=role,
-            resp=resp,
-            mode="llm",
+
+    checkpoint = (
+        SqlAlchemyWindowCheckpoint()
+        if contract_id is not None else NullWindowCheckpoint()
+    )
+    reviewer = WindowReviewer(get_llm_adapter(), checkpoint=checkpoint)
+    windows = build_contract_windows(contract_text, max_chars=8000)
+    normalized: list[dict] = []
+    issues: list[ReviewIssue] = []
+    planned = completed = 0
+    for window in windows:
+        result = reviewer.review(WindowReviewRequest(
+            contract_id=contract_id,
             audit_job_id=audit_job_id,
-        )
-        if resp.finish_reason == "length":
-            raise ValueError("模型输出被截断，无法形成完整风险清单")
-        for item in _parse_risk_json(resp.text):
-            risk = _normalize(item, role)
-            if risk["claim_id"] in seen_claims:
-                continue
-            seen_claims.add(risk["claim_id"])
-            risk["source_window_id"] = window.window_id
-            risk["source_clause_ids"] = list(window.clause_ids)
+            audit_generation=audit_generation,
+            agent=role,
+            dimensions=tuple(selected_dimensions),
+            review_window=ReviewWindow(window),
+            system_prompt=system_prompt,
+            build_user_prompt=build_user_prompt,
+        ))
+        planned += result.planned_windows
+        completed += result.completed_windows
+        issues.extend(result.issues)
+        for candidate in result.candidates:
+            risk = _normalize({
+                "level": candidate.level,
+                "category": candidate.category,
+                "original_text": candidate.quote,
+                "risk_reason": candidate.reason,
+                "suggestion": candidate.suggestion,
+            }, role)
+            risk["source_window_id"] = candidate.source_window_id
+            risk["source_clause_ids"] = list(candidate.source_clause_ids)
             normalized.append(risk)
     if timings is not None:
         timings[f"{role}_agent_ms"] = round(
@@ -395,11 +373,46 @@ def _agent_audit(
         contract_type=contract_type,
         dimensions=selected_dimensions,
     )
+    # 同一语义 Claim 的空白变体先完成核验，避免先到的不可定位引用占位。
+    # 字典保留 Claim 首次出现的顺序；质量相同时保留首次候选。
+    selected: dict[str, dict] = {}
+    evidence_rank = {"supported": 2, "partially_supported": 1}
+    for risk in grounded:
+        previous = selected.get(risk["claim_id"])
+        rank = (
+            risk["original_text_verified"] is True,
+            evidence_rank.get(risk["evidence_status"], 0),
+            risk["support_relation_status"] == "supported",
+        )
+        previous_rank = (
+            previous["original_text_verified"] is True,
+            evidence_rank.get(previous["evidence_status"], 0),
+            previous["support_relation_status"] == "supported",
+        ) if previous is not None else None
+        if previous_rank is None or rank > previous_rank:
+            selected[risk["claim_id"]] = risk
+    grounded = list(selected.values())
     if timings is not None:
         timings["grounding_ms"] += round(
             (time.perf_counter() - grounding_started) * 1000
         )
-    return grounded
+    for risk in grounded:
+        if risk["original_text_verified"] is not True:
+            issues.append(ReviewIssue(
+                code="ORIGINAL_TEXT_UNRESOLVED", agent=role,
+                window_id=risk["source_window_id"],
+                detail="候选引用无法在合同正文中精确定位，需人工复核",
+            ))
+        if (
+            risk["evidence_status"] != "supported"
+            or risk["support_relation_status"] != "supported"
+        ):
+            issues.append(ReviewIssue(
+                code="EVIDENCE_UNRESOLVED", agent=role,
+                window_id=risk["source_window_id"],
+                detail="候选风险缺少可支持结论的可靠依据，需人工复核",
+            ))
+    return AgentAuditResult(grounded, issues, planned, completed)
 
 
 def _ground_risks(
@@ -481,8 +494,8 @@ def _verify_original_text(original_text: object, contract_text: str | None) -> b
     """验证候选原文是否存在于合同；未提供合同正文时返回 None。"""
     if contract_text is None:
         return None
-    candidate = re.sub(r"\s+", "", str(original_text or ""))
-    source = re.sub(r"\s+", "", contract_text or "")
+    candidate = str(original_text or "").strip()
+    source = contract_text or ""
     if not candidate or "全文未检出" in candidate:
         return False
     return candidate in source
@@ -509,21 +522,6 @@ def _format_source(source: dict) -> str:
     name = str(source.get("source", "未知来源")).strip() or "未知来源"
     article_number = str(source.get("article_number") or "").strip()
     return f"{name} {article_number}".strip()
-
-
-def _parse_risk_json(text: str) -> list[dict]:
-    """从 LLM 文本中提取 JSON 数组，容错代码块围栏与前后噪声。"""
-    cleaned = re.sub(r"```(?:json)?|```", "", text).strip()
-    start, end = cleaned.find("["), cleaned.rfind("]")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("LLM 输出未找到 JSON 数组")
-    try:
-        data = json.loads(cleaned[start:end + 1])
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"JSON 解析失败：{exc}") from exc
-    if not isinstance(data, list):
-        raise ValueError("LLM 输出不是 JSON 数组")
-    return data
 
 
 def _normalize(r: dict, agent: str) -> dict:

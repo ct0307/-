@@ -9,6 +9,7 @@ from app.services.audit.protocol import (
     AgentReviewResult,
     ReviewIssue,
     RiskCandidate,
+    ReviewedRiskCandidate,
     RiskEnvelope,
     SecondaryDecision,
     SecondaryEnvelope,
@@ -61,7 +62,7 @@ EXPECTED_REVIEW_ISSUE_CODES = {
 
 
 def test_protocol_constants_define_json_object_contract():
-    assert AUDIT_PROTOCOL_VERSION == "candidate-v1"
+    assert AUDIT_PROTOCOL_VERSION == "candidate-v2"
     assert AUDIT_JSON_FORMAT == {"type": "json_object"}
 
 
@@ -387,7 +388,7 @@ def test_agent_review_result_defaults_are_independent():
     assert second.candidates == []
     assert second.issues == []
 
-    first.candidates.append(RiskCandidate.model_validate(risk_payload()))
+    first.candidates.append(ReviewedRiskCandidate(**risk_payload(), source_window_id="window-1"))
     first.issues.append(ReviewIssue.model_validate(review_issue_payload()))
 
     assert second.candidates == []
@@ -460,7 +461,7 @@ def test_agent_review_result_keeps_explicit_inconsistent_completion_invalid():
 
 def test_agent_review_result_and_risk_envelope_json_round_trip():
     agent_result = AgentReviewResult(
-        candidates=[RiskCandidate.model_validate(risk_payload())],
+        candidates=[ReviewedRiskCandidate(**risk_payload(), source_window_id="window-1", source_clause_ids=["第一条"])],
         complete=True,
     )
     risk_envelope = RiskEnvelope(risks=[RiskCandidate.model_validate(risk_payload())])
@@ -474,3 +475,9 @@ def test_agent_review_result_and_risk_envelope_json_round_trip():
 
     assert restored_agent_result == agent_result
     assert restored_risk_envelope == risk_envelope
+
+
+@pytest.mark.parametrize("field,value", [("source_window_id", "forged"), ("source_clause_ids", ["伪造条款"])])
+def test_model_envelope_cannot_supply_system_provenance(field, value):
+    with pytest.raises(ValidationError):
+        RiskEnvelope.model_validate({"risks": [risk_payload(**{field: value})]})

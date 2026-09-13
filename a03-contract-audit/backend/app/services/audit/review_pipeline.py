@@ -11,7 +11,7 @@ from app.services.audit.protocol import (
     AUDIT_JSON_FORMAT,
     AgentReviewResult,
     ReviewIssue,
-    RiskCandidate,
+    ReviewedRiskCandidate,
     RiskEnvelope,
     parse_risk_envelope,
 )
@@ -27,8 +27,8 @@ class ReviewWindow:
 
 @dataclass(frozen=True)
 class WindowReviewRequest:
-    contract_id: int | str
-    audit_job_id: int | str
+    contract_id: int | str | None
+    audit_job_id: int | str | None
     audit_generation: int
     agent: str
     dimensions: tuple[str, ...]
@@ -129,7 +129,7 @@ class WindowReviewer:
         return result
 
     def _review_uncached(self, request: WindowReviewRequest) -> AgentReviewResult:
-        candidates: list[RiskCandidate] = []
+        candidates: list[ReviewedRiskCandidate] = []
         for page in range(1, self._max_pages + 1):
             outcome = self._review_page(request, page)
             if outcome.kind == "truncated":
@@ -150,7 +150,14 @@ class WindowReviewer:
                 )
 
             assert outcome.envelope is not None
-            candidates.extend(outcome.envelope.risks)
+            candidates.extend(
+                ReviewedRiskCandidate(
+                    **candidate.model_dump(),
+                    source_window_id=request.review_window.window.window_id,
+                    source_clause_ids=list(request.review_window.window.clause_ids),
+                )
+                for candidate in outcome.envelope.risks
+            )
             if not outcome.envelope.has_more:
                 return AgentReviewResult(
                     candidates=self._deduplicate(request.agent, candidates),
@@ -341,9 +348,9 @@ class WindowReviewer:
     @staticmethod
     def _deduplicate(
         agent: str,
-        candidates: list[RiskCandidate],
-    ) -> list[RiskCandidate]:
-        unique: list[RiskCandidate] = []
+        candidates: list[ReviewedRiskCandidate],
+    ) -> list[ReviewedRiskCandidate]:
+        unique: list[ReviewedRiskCandidate] = []
         seen: set[str] = set()
         for candidate in candidates:
             identity = f"{agent}\0{candidate.category}\0{candidate.quote}"

@@ -52,7 +52,7 @@ def test_penalty_calculation_is_decimal_and_cap_aware():
 
 
 def test_audit_contract_surfaces_deterministic_logic_conflicts(monkeypatch):
-    monkeypatch.setattr(auditor, "_agent_audit", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(auditor, "_agent_audit", lambda *_args, **_kwargs: auditor.AgentAuditResult([], [], 1, 1))
     text = """第一条 甲方应在验收合格后10日内支付合同款。
 第二条 甲方应在验收合格后30日内完成付款。"""
 

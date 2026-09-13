@@ -40,7 +40,7 @@ class RagGroundingTests(unittest.TestCase):
         self.assertEqual(auditor.classify_tier(risk), "yellow")
 
     def test_selected_dimension_skips_unrelated_agent(self):
-        with patch.object(auditor, "_agent_audit", return_value=[]) as agent_audit:
+        with patch.object(auditor, "_agent_audit", return_value=auditor.AgentAuditResult([], [], 1, 1)) as agent_audit:
             auditor.audit_contract({}, "合同正文", dimensions=["payment"])
 
         called_roles = [call.args[0] for call in agent_audit.call_args_list]

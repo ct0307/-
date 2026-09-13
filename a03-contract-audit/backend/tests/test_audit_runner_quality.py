@@ -1,15 +1,13 @@
 import json
 
 import pytest
-from types import SimpleNamespace
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Query, Session
+from sqlalchemy.orm import Query, Session, sessionmaker
 
 from app.db.session import Base
 from app.llm.base import LLMError
 from app.models.models import AuditBatch, AuditBatchItem, Contract, ContractClause, Risk, User
 from app.services.audit import runner
-from app.services.audit.auditor import _record_llm_call
 from app.services.audit.runner import run_audit
 from app.services.parser.extractor import DocumentBlock, DocumentParseResult, SourceAnchor
 
@@ -367,35 +365,50 @@ def test_run_audit_logs_structured_stage_timings_without_contract_text(monkeypat
     assert sensitive_text not in repr(fields)
 
 
-def test_llm_call_log_joins_caller_transaction_without_committing():
-    class FakeSession:
-        def __init__(self):
-            self.flushed = False
-            self.committed = False
+@pytest.mark.parametrize("audit_job_id", [None, 12])
+def test_window_calls_have_one_log_each_and_only_jobs_persist_checkpoints(
+    monkeypatch, db: Session, audit_job_id,
+):
+    from app.llm.base import LLMResponse
+    from app.models.models import AuditWindowRun, LLMCallLog
+    from app.services.audit import auditor
+    from app.services.audit.window_repository import SqlAlchemyWindowCheckpoint
 
-        def add(self, _row):
-            pass
+    contract = _contract(db, "window-log.txt")
+    contract_id = contract.id
+    db.commit()
+    factory = sessionmaker(bind=db.get_bind())
+    calls = []
 
-        def commit(self):
-            self.committed = True
+    class Adapter:
+        def chat(self, *_args, **_kwargs):
+            calls.append(1)
+            return LLMResponse(
+                text='{"risks": [], "has_more": false}', model="test",
+                prompt_tokens=10, completion_tokens=5,
+            )
 
-        def rollback(self):
-            pass
-
-        def close(self):
-            pass
-
-    db = FakeSession()
-    response = SimpleNamespace(
-        model="test-model",
-        prompt_tokens=10,
-        completion_tokens=5,
-        latency_ms=20,
+    monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
+    monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        auditor, "SqlAlchemyWindowCheckpoint",
+        lambda: SqlAlchemyWindowCheckpoint(session_factory=factory),
     )
-
-    _record_llm_call(1, "legal", response, session_factory=lambda: db)
-
-    assert db.committed is True
+    for _ in range(2):
+        result = auditor.audit_contract(
+            {}, "第一条 合同正文", contract_id=contract_id, dimensions=["legal"],
+            audit_job_id=audit_job_id, audit_generation=7,
+        )
+    logs = db.query(LLMCallLog).all()
+    assert len(logs) == len(calls) == (2 if audit_job_id is None else 1)
+    assert all(row.validation_status == "valid" for row in logs)
+    assert all(row.contract_id == contract_id for row in logs)
+    assert all(row.window_id and row.dimension == "legal" for row in logs)
+    windows = db.query(AuditWindowRun).all()
+    assert len(windows) == (0 if audit_job_id is None else 1)
+    if windows:
+        assert windows[0].audit_generation == 7
+    assert result["coverage"] == {"planned": 1, "completed": 1}
 
 
 def test_llm_error_propagates_without_creating_a_fake_risk(monkeypatch):
