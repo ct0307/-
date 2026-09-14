@@ -3,6 +3,22 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { createBatchStore, type BatchApi, type AuditBatch } from '../src/stores/batch'
 
+function progressStage(status: AuditBatch['items'][number]['status']): AuditBatch['items'][number]['progress_stage'] {
+  switch (status) {
+    case 'queued':
+    case 'parsing':
+    case 'reviewing':
+      return status
+    case 'validating':
+      return 'persisting'
+    case 'done':
+    case 'review_required':
+      return 'completed'
+    case 'failed':
+      return 'failed'
+  }
+}
+
 function batch(
   status: AuditBatch['status'],
   itemStatuses: AuditBatch['items'][number]['status'][],
@@ -29,11 +45,7 @@ function batch(
       filename: `contract-${index}.pdf`,
       status: itemStatus,
       progress: itemStatus === 'done' || itemStatus === 'review_required' ? 100 : 15,
-      progress_stage: itemStatus === 'failed'
-        ? 'failed'
-        : itemStatus === 'done' || itemStatus === 'review_required'
-          ? 'completed'
-          : itemStatus,
+      progress_stage: progressStage(itemStatus),
       error: itemStatus === 'failed' ? 'OCR 置信度不足' : null,
       attempts: 0,
       started_at: null,
@@ -53,6 +65,10 @@ function fakeApi(responses: AuditBatch[]): BatchApi {
 }
 
 test.beforeEach(() => setActivePinia(createPinia()))
+
+test('maps validating fixture items to the persisted stage contract', () => {
+  expect(batch('running', ['validating']).items[0].progress_stage).toBe('persisting')
+})
 
 test('stops polling when every item is terminal', async () => {
   const useStore = createBatchStore(fakeApi([batch('partial_failed', ['done', 'failed'])]))

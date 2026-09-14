@@ -159,6 +159,69 @@ test('renders an active batch progress in the neutral state without failed items
   await expect(batchProgress).not.toHaveClass(/is-exception/)
 })
 
+test('advances persisted progress through polling without reloading the page', async ({ page }) => {
+  let batchGetCalls = 0
+  const reviewingItem = auditBatch().items[0]
+  const responses = [
+    auditBatch({
+      total: 1,
+      items: [{ ...reviewingItem, progress: 43 }],
+    }),
+    auditBatch({
+      total: 1,
+      progress: 72,
+      items: [{ ...reviewingItem, progress: 72 }],
+    }),
+    auditBatch({
+      status: 'done',
+      total: 1,
+      completed: 1,
+      progress: 100,
+      items: [{
+        ...reviewingItem,
+        status: 'done',
+        progress: 100,
+        progress_stage: 'completed',
+        finished_at: '2026-09-14T08:03:00Z',
+      }],
+    }),
+  ]
+
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/runtime/status')) {
+      return fulfillJson(route, { status: 'online', checked_at: '2026-09-14T08:00:00Z' })
+    }
+    if (isLookup(path)) return fulfillJson(route, [])
+    if (path.endsWith('/batches/77')) {
+      const response = responses[Math.min(batchGetCalls, responses.length - 1)]
+      batchGetCalls += 1
+      return fulfillJson(route, response)
+    }
+    return fulfillJson(route, [])
+  })
+
+  await openAudit(page, '/audit?batch=77')
+
+  const batchProgress = page.locator('.batch-result > .batch-result-progress')
+  const itemProgressRow = page.locator('.batch-result-item-progress-row')
+  const itemProgress = itemProgressRow.locator('.el-progress')
+  await expect(batchProgress).toHaveAttribute('aria-valuenow', '43')
+  await expect(itemProgress).toHaveAttribute('aria-valuenow', '43')
+  await expect(itemProgressRow.getByText('正在审查', { exact: true })).toBeVisible()
+
+  await expect(batchProgress).toHaveAttribute('aria-valuenow', '72', { timeout: 4_000 })
+  await expect(itemProgress).toHaveAttribute('aria-valuenow', '72')
+  await expect(itemProgressRow.getByText('正在审查', { exact: true })).toBeVisible()
+
+  await expect(batchProgress).toHaveAttribute('aria-valuenow', '100', { timeout: 4_000 })
+  await expect(batchProgress).toHaveClass(/is-success/)
+  await expect(itemProgress).toHaveAttribute('aria-valuenow', '100')
+  await expect(itemProgress).toHaveClass(/is-success/)
+  await expect(itemProgressRow.getByText('审查完成', { exact: true })).toBeVisible()
+  expect(batchGetCalls).toBeGreaterThanOrEqual(3)
+})
+
 test('keeps a failed item percentage and persisted failure detail visible', async ({ page }) => {
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname
