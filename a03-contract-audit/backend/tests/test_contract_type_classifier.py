@@ -181,3 +181,17 @@ def test_plain_confidentiality_agreement_filename_remains_trusted():
     assert result.suggested_type == "保密协议"
     assert result.candidates[0].score >= 6
     assert result.auto_ready_eligible is True
+
+
+def test_title_and_lead_are_disjoint_while_later_lead_signals_remain():
+    result = classify_contract_type(
+        filename="scan.pdf", text="采购合同\n销售产品并收取销售货款",
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert [(item.contract_type, item.score) for item in result.candidates] == [
+        ("采购合同", 6),
+        ("销售合同", 3),
+    ]
+    assert result.confidence < 0.85
+    assert result.auto_ready_eligible is False

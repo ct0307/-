@@ -80,14 +80,19 @@ def classify_contract_type(
     name = Path(filename).stem.lower()
     lines = text[:8000].splitlines()
     title = next((line.strip().lower() for line in lines if line.strip()), "")[:100]
-    heading = text[:1800].lower()
+    title_start = text.lower().find(title) if title else -1
+    title_end = title_start + len(title) if title_start >= 0 else 0
+    title_markers = ("附件", "条款")
+    title_is_contract_type = not any(marker in title for marker in title_markers) and any(
+        value.lower() in title for value in available_types
+    )
+    heading = text[title_end if title_is_contract_type else 0:1800].lower()
     body = text[1800:8000].lower()
     types = list(dict.fromkeys(available_types))
     scores: dict[str, float] = {value: 0.0 for value in types}
     evidence: dict[str, list[str]] = {value: [] for value in types}
     primary: set[str] = set()
 
-    title_markers = ("附件", "条款")
     trusted_name = name if not any(marker in name for marker in title_markers) else ""
     trusted_title = title if not any(marker in title for marker in title_markers) else ""
     for source in (trusted_name, trusted_title):
