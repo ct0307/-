@@ -448,6 +448,45 @@ def test_confirm_retry_remove_and_delete_have_distinct_semantics(monkeypatch, tm
     assert db.query(AuditLog).filter(AuditLog.action == "contract_draft_delete").count() == 1
 
 
+@pytest.mark.parametrize(
+    ("confirmed", "initial_status", "contract_type", "expected_status"),
+    [
+        (False, "awaiting_confirmation", "采购合同", "awaiting_confirmation"),
+        (True, "awaiting_confirmation", "采购合同", "ready"),
+        (False, "failed", "", "awaiting_confirmation"),
+    ],
+)
+def test_restore_contract_draft_only_recovers_confirmed_type_as_ready(
+    tmp_path, confirmed, initial_status, contract_type, expected_status,
+):
+    db = _session()
+    legal = _user(db)
+    admin = _user(db, username="restore-admin", role="admin", department="管理部")
+    contract = Contract(
+        filename="采购合同.txt", storage_path=str(tmp_path / "draft.txt"),
+        uploaded_by=legal.id, department=legal.department, status="parsed",
+        suggested_type="采购合同", type_confidence=0.99, contract_type=contract_type,
+    )
+    batch = ImportBatch(owner_id=legal.id, idempotency_key=f"restore-{confirmed}-{initial_status}")
+    item = ImportBatchItem(filename=contract.filename, contract=contract, status=initial_status)
+    batch.items.append(item)
+    db.add(batch)
+    db.commit()
+    if confirmed:
+        imports.confirm_item(
+            batch.id, item.id,
+            ConfirmImportItem(contract_type="采购合同", department=legal.department), db, legal,
+        )
+
+    assert imports.delete_contract_draft(batch.id, item.id, db, legal).status == "deleted"
+    restored = imports.restore_contract_draft(batch.id, item.id, db, admin)
+
+    assert restored.status == expected_status
+    assert db.get(ImportBatchItem, item.id).status == expected_status
+    assert db.get(ImportBatch, batch.id).ready == (1 if confirmed else 0)
+    assert db.get(Contract, contract.id).deleted_at is None
+
+
 def test_import_item_out_recovers_stable_failure_metadata_from_error_code(tmp_path):
     db = _session()
     legal = _user(db)

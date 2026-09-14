@@ -50,8 +50,8 @@ def classify_contract_type(
     name = Path(filename).stem.lower()
     lines = text[:8000].splitlines()
     title = next((line.strip().lower() for line in lines if line.strip()), "")[:100]
-    heading = text[:240].lower()
-    body = text[:8000].lower()
+    heading = text[:1800].lower()
+    body = text[1800:8000].lower()
     types = list(dict.fromkeys(available_types))
     scores: dict[str, float] = {value: 0.0 for value in types}
     evidence: dict[str, list[str]] = {value: [] for value in types}
@@ -69,14 +69,17 @@ def classify_contract_type(
 
     for value in types:
         keywords = _TRADE_SIGNALS.get(value, ())
-        hits = [keyword for keyword in keywords if keyword.lower() in body]
+        hits = [keyword for keyword in keywords if keyword.lower() in heading or keyword.lower() in body]
         if not hits and value == "技术开发合同" and "软件开发外包合同" not in types:
-            hits = [keyword for keyword in _TRADE_SIGNALS["软件开发外包合同"] if keyword in body]
+            hits = [
+                keyword for keyword in _TRADE_SIGNALS["软件开发外包合同"]
+                if keyword in heading or keyword in body
+            ]
         if hits:
             scores[value] += 3 if any(keyword.lower() in heading for keyword in hits) else 1
             evidence[value].extend(hits)
             primary.add(value)
-        elif value == "保密协议" and any(word in body for word in ("保密", "商业秘密")):
+        elif value == "保密协议" and any(word in heading or word in body for word in ("保密", "商业秘密")):
             scores[value] += 0.25
             evidence[value].append("保密")
 
@@ -90,7 +93,10 @@ def classify_contract_type(
 
     best = ranked[0]
     confidence = 0.20 if best.score <= 0.25 else 0.50 if best.score < 3 else 0.70 if best.score < 6 else 0.90
+    margin = best.score - ranked[1].score if len(ranked) > 1 else best.score
+    if margin < 4:
+        confidence = min(confidence, 0.40 if margin == 0 else 0.55 if margin <= 1 else 0.70)
     return TypeSuggestion(
         best.contract_type, confidence, list(best.evidence), ranked,
-        best.contract_type in primary and best.score >= 6,
+        best.contract_type in primary and best.score >= 6 and margin >= 4,
     )

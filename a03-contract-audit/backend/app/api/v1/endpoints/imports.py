@@ -600,7 +600,11 @@ def restore_contract_draft(
         raise HTTPException(status.HTTP_410_GONE, "合同草稿已超过恢复期限")
     contract.deleted_at = None
     contract.deleted_by = None
-    item.status = "awaiting_confirmation" if not contract.contract_type else "ready"
+    item.status = (
+        "ready"
+        if contract.contract_type and contract.type_confirmed_by and contract.type_confirmed_at
+        else "awaiting_confirmation"
+    )
     db.add(AuditLog(user_id=user.id, action="contract_draft_restore", target=f"contract:{contract.id}"))
     _refresh_batch(batch)
     db.commit()

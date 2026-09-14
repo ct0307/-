@@ -90,3 +90,37 @@ def test_candidates_are_stably_sorted_and_exclude_nonpositive_scores():
 
     assert result.candidates == tuple(sorted(result.candidates, key=lambda item: (-item.score, item.contract_type)))
     assert all(candidate.score > 0 for candidate in result.candidates)
+
+
+def test_trade_signal_at_character_300_is_in_lead_not_body():
+    result = classify_contract_type(
+        filename="扫描件.pdf", text="背景\n" + "甲" * 300 + "采购设备",
+        available_types=["采购合同"],
+    )
+
+    assert result.candidates[0].score == 3
+
+
+def test_trade_signal_after_lead_is_only_body_weight():
+    result = classify_contract_type(
+        filename="扫描件.pdf", text="背景\n" + "甲" * 1800 + "采购设备",
+        available_types=["采购合同"],
+    )
+
+    assert result.candidates[0].score == 1
+
+
+@pytest.mark.parametrize(
+    "body", ["双方订立本合同。", "背景\n" + "甲" * 1800 + "采购设备"],
+    ids=["tied", "near-tied"],
+)
+def test_tied_or_near_tied_types_cannot_auto_ready(body):
+    result = classify_contract_type(
+        filename="采购合同-销售合同.pdf", text=body,
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert result.candidates[0].score >= 6
+    assert result.candidates[1].score >= 6
+    assert result.confidence < 0.85
+    assert result.auto_ready_eligible is False
