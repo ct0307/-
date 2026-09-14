@@ -30,11 +30,11 @@ from app.services import masking
 from app.services.audit.jobs import AuditJobConflict, create_single_audit_job
 from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
 from app.services.audit.runner import apply_parse_quality, run_audit
+from app.services.imports.errors import parse_failure, pdf_text_empty_failure
 from app.services.parser.extractor import (
     extract_document,
     extract_elements,
 )
-from app.services.parser.ocr import OCRError, OCRUnavailable
 from app.tasks.dispatcher import dispatch_audit_item
 
 router = APIRouter()
@@ -65,52 +65,22 @@ def _raise_upload_validation_error(error: FileValidationError) -> None:
 _LEVEL_RANK = {"high": 2, "medium": 1, "low": 0}
 _LEVEL_ZH = {2: "高风险", 1: "中风险", 0: "低风险"}
 
-_PARSE_ERROR_DETAILS = {
-    "PDF_TEXT_ENCODING_ERROR": (
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        "PDF 文本编码异常，请重新导出 PDF 后重试",
-    ),
-    "PDF_TEXT_EMPTY": (
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        "未能从文件中提取有效文本，请上传含文本层的文件",
-    ),
-    "OCR_UNAVAILABLE": (
-        status.HTTP_503_SERVICE_UNAVAILABLE,
-        "OCR 服务暂不可用，请稍后重试或上传含文本层的文件",
-    ),
-    "OCR_PROCESSING_ERROR": (
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        "OCR 未能识别文件内容，请检查文件清晰度后重试",
-    ),
-    "PARSE_INTERNAL_ERROR": (
-        status.HTTP_500_INTERNAL_SERVER_ERROR,
-        "合同解析失败，请稍后重试",
-    ),
-}
-
-
-def _parse_error_code(exc: Exception) -> str:
-    if isinstance(exc, UnicodeError):
-        return "PDF_TEXT_ENCODING_ERROR"
-    if isinstance(exc, OCRUnavailable):
-        return "OCR_UNAVAILABLE"
-    if isinstance(exc, OCRError):
-        return "OCR_PROCESSING_ERROR"
-    return "PARSE_INTERNAL_ERROR"
-
-
-def _raise_parse_error(contract_id: int, exc: Exception, *, code: str | None = None) -> None:
-    error_code = code or _parse_error_code(exc)
-    status_code, detail = _PARSE_ERROR_DETAILS[error_code]
+def _raise_parse_error(contract_id: int, exc: Exception, *, failure=None) -> None:
+    failure = failure or parse_failure(exc)
     log.error(
         "contract.parse_failed",
         contract_id=contract_id,
-        code=error_code,
+        code=failure.code,
         exception_type=type(exc).__name__,
     )
     raise HTTPException(
-        status_code=status_code,
-        detail={"code": error_code, "detail": detail},
+        status_code=failure.http_status,
+        detail={
+            "code": failure.code,
+            "detail": failure.message,
+            "action": failure.action,
+            "correlation_id": f"contract:{contract_id}",
+        },
     ) from exc
 
 
@@ -409,7 +379,7 @@ def parse_contract(
         if not parsed.text.strip():
             empty_error = ValueError("empty document text")
             db.rollback()
-            _raise_parse_error(contract_id, empty_error, code="PDF_TEXT_EMPTY")
+            _raise_parse_error(contract_id, empty_error, failure=pdf_text_empty_failure())
         apply_parse_quality(contract, parsed)
         # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
         elements = extract_elements(parsed.text)

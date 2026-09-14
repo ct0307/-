@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.crypto import encrypt_bytes
 from app.db.session import Base
 from app.models.models import Contract, ImportBatch, ImportBatchItem, LookupItem, User
+from app.services.parser.ocr import OCRUnavailable
 from app.tasks import import_tasks
 
 
@@ -74,6 +75,62 @@ def test_parse_import_item_hides_parser_failure_details(monkeypatch, tmp_path):
         item = db.get(ImportBatchItem, item_id)
         assert result["status"] == "failed"
         assert item.status == "failed"
-        assert item.error_code == "PARSE_FAILED"
-        assert item.error_message == "合同解析失败，请重新解析或删除草稿"
+        assert item.error_code == "PARSE_INTERNAL_ERROR"
+        assert item.error_message == "合同解析失败，请稍后重试"
         assert "missing.pdf" not in item.error_message
+
+
+def test_parse_import_item_persists_ocr_unavailable_code_and_whitelisted_log_fields(monkeypatch, tmp_path):
+    engine = _db()
+    with Session(engine) as db:
+        user = User(username="ocr-legal", password_hash="x", role="legal", department="法务部")
+        db.add(user)
+        db.flush()
+        contract = Contract(
+            filename="scan.pdf",
+            storage_path=str(tmp_path / "private.pdf"),
+            uploaded_by=user.id,
+            department=user.department,
+        )
+        batch = ImportBatch(owner_id=user.id, idempotency_key="task-ocr-unavailable", total=1)
+        batch.items.append(ImportBatchItem(filename=contract.filename, contract=contract, status="queued"))
+        db.add(batch)
+        db.commit()
+        item_id = batch.items[0].id
+
+    class CaptureLogger:
+        def __init__(self):
+            self.events = []
+
+        def error(self, event, **fields):
+            self.events.append((event, fields))
+
+    logger = CaptureLogger()
+    monkeypatch.setattr(import_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(
+        import_tasks,
+        "extract_document",
+        lambda _path: (_ for _ in ()).throw(OCRUnavailable("C:/secret/models/private.pdf")),
+    )
+    monkeypatch.setattr(import_tasks, "log", logger, raising=False)
+
+    result = import_tasks.parse_import_item.run(item_id)
+
+    with Session(engine) as db:
+        item = db.get(ImportBatchItem, item_id)
+        assert result["status"] == "failed"
+        assert item.error_code == "OCR_UNAVAILABLE"
+        assert item.error_message == "OCR 服务暂不可用，请联系管理员修复后重试"
+        assert logger.events == [
+            (
+                "import.parse_failed",
+                {
+                    "item_id": item_id,
+                    "contract_id": item.contract_id,
+                    "code": "OCR_UNAVAILABLE",
+                    "exception_type": "OCRUnavailable",
+                    "attempts": 1,
+                },
+            )
+        ]
+        assert "secret" not in repr(logger.events).lower()

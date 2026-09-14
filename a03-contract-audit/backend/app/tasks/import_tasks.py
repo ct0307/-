@@ -4,13 +4,17 @@ import json
 from datetime import datetime, timezone
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from app.models.models import ImportBatchItem, LookupItem
 from app.services.audit.runner import apply_parse_quality
 from app.services.imports.classifier import classify_contract_type
+from app.services.imports.errors import parse_failure
 from app.services.imports.service import summarize_import, target_status
 from app.services.parser.extractor import extract_document, extract_elements
 from app.tasks.celery_app import celery_app
+
+log = get_logger("imports")
 
 
 def refresh_import_batch(batch) -> None:
@@ -61,10 +65,19 @@ def parse_import_item(item_id: int) -> dict:
             item.status = target_status(suggestion.suggested_type, suggestion.confidence)
             item.error_code = None
             item.error_message = None
-        except Exception:
+        except Exception as exc:
+            failure = parse_failure(exc)
             item.status = "failed"
-            item.error_code = "PARSE_FAILED"
-            item.error_message = "合同解析失败，请重新解析或删除草稿"
+            item.error_code = failure.code
+            item.error_message = failure.message
+            log.error(
+                "import.parse_failed",
+                item_id=item.id,
+                contract_id=item.contract_id,
+                code=failure.code,
+                exception_type=type(exc).__name__,
+                attempts=item.attempts,
+            )
         refresh_import_batch(item.batch)
         db.commit()
         return {"item_id": item.id, "status": item.status}

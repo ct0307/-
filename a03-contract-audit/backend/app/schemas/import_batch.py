@@ -25,6 +25,9 @@ class ImportItemOut(BaseModel):
     status: ImportItemStatus
     error_code: str | None = None
     error_message: str | None = None
+    error_action: str | None = None
+    retryable: bool = False
+    correlation_id: str | None = None
     suggested_type: str = ""
     confidence: float | None = None
     confirmed_type: str = ""

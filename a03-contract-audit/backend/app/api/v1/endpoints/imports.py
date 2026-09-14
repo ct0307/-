@@ -28,6 +28,7 @@ from app.models.models import (
 from app.schemas.import_batch import ConfirmImportItem, ImportBatchOut, ImportItemOut
 from app.services.batch.service import ACTIVE_AUDIT_ITEM_STATUSES
 from app.services.imports.file_validation import FileValidationError, validate_upload
+from app.services.imports.errors import failure_for_code
 from app.services.imports.service import summarize_import
 from app.tasks.dispatcher import dispatch_import_item
 
@@ -166,6 +167,7 @@ def _dispatch_import_item(item_id: int) -> str:
 
 def _item_out(item: ImportBatchItem) -> ImportItemOut:
     contract = item.contract
+    failure = failure_for_code(item.error_code)
     return ImportItemOut(
         id=item.id,
         contract_id=item.contract_id,
@@ -173,6 +175,9 @@ def _item_out(item: ImportBatchItem) -> ImportItemOut:
         status=item.status,
         error_code=item.error_code,
         error_message=item.error_message,
+        error_action=failure.action if failure else None,
+        retryable=failure.retryable if failure else False,
+        correlation_id=f"import-item:{item.id}" if item.error_code else None,
         suggested_type=contract.suggested_type if contract else "",
         confidence=contract.type_confidence if contract else None,
         confirmed_type=contract.contract_type if contract else "",

@@ -142,6 +142,8 @@ class ParseResponse(BaseModel):
 class ParseErrorDetail(BaseModel):
     code: str
     detail: str
+    action: str
+    correlation_id: str
 
 
 class ParseErrorResponse(BaseModel):

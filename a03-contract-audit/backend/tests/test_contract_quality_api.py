@@ -19,7 +19,7 @@ from app.schemas.contract import LookupItemCreate
 from app.schemas.contract import AuditRequest
 from app.schemas.contract import ParseErrorResponse
 from app.services.parser.extractor import DocumentParseResult
-from app.services.parser.ocr import OCRUnavailable
+from app.services.parser.ocr import OCRError, OCRLimitExceeded, OCRTimeout, OCRUnavailable
 from app.services import audit_log
 
 
@@ -599,6 +599,7 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
             {
                 "code": "PDF_TEXT_ENCODING_ERROR",
                 "detail": "PDF 文本编码异常，请重新导出 PDF 后重试",
+                "action": "重新导出 PDF 后重试",
             },
         ),
         (
@@ -606,7 +607,35 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
             503,
             {
                 "code": "OCR_UNAVAILABLE",
-                "detail": "OCR 服务暂不可用，请稍后重试或上传含文本层的文件",
+                "detail": "OCR 服务暂不可用，请联系管理员修复后重试",
+                "action": "联系管理员修复后重试",
+            },
+        ),
+        (
+            OCRTimeout("C:/secret/contracts/timeout.pdf"),
+            503,
+            {
+                "code": "OCR_TIMEOUT",
+                "detail": "OCR 处理超时，请稍后重试或拆分文件",
+                "action": "稍后重试或拆分文件",
+            },
+        ),
+        (
+            OCRLimitExceeded("C:/secret/contracts/large.pdf"),
+            422,
+            {
+                "code": "OCR_LIMIT_EXCEEDED",
+                "detail": "文件超出 OCR 处理限制，请拆分或压缩文件后重试",
+                "action": "拆分或压缩文件后重试",
+            },
+        ),
+        (
+            OCRError("C:/secret/third-party-error"),
+            503,
+            {
+                "code": "OCR_PROTOCOL_ERROR",
+                "detail": "OCR 服务响应异常，请稍后重试",
+                "action": "稍后重试",
             },
         ),
         (
@@ -615,6 +644,7 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
             {
                 "code": "PARSE_INTERNAL_ERROR",
                 "detail": "合同解析失败，请稍后重试",
+                "action": "稍后重试",
             },
         ),
         (
@@ -623,6 +653,7 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
             {
                 "code": "PARSE_INTERNAL_ERROR",
                 "detail": "合同解析失败，请稍后重试",
+                "action": "稍后重试",
             },
         ),
     ],
@@ -650,7 +681,10 @@ def test_parse_contract_maps_exceptions_to_safe_errors(
             contracts.parse_contract(contract.id, db=db, user=user)
 
         assert context.value.status_code == expected_status
-        assert context.value.detail == expected_detail
+        assert context.value.detail == {
+            **expected_detail,
+            "correlation_id": f"contract:{contract.id}",
+        }
         assert "secret" not in repr(context.value.detail).lower()
         assert logger.events == [
             (
@@ -685,7 +719,9 @@ def test_parse_contract_rejects_empty_text_with_safe_error(monkeypatch, tmp_path
         assert context.value.status_code == 422
         assert context.value.detail == {
             "code": "PDF_TEXT_EMPTY",
-            "detail": "未能从文件中提取有效文本，请上传含文本层的文件",
+            "detail": "未能从文件中提取有效文本，请重新导出 PDF 后重试",
+            "action": "重新导出 PDF 后重试",
+            "correlation_id": f"contract:{contract.id}",
         }
         assert logger.events[0][1]["exception_type"] == "ValueError"
     engine.dispose()
@@ -741,9 +777,21 @@ def test_parse_contract_documents_safe_error_envelope():
         500: ParseErrorResponse,
     }
     assert ParseErrorResponse.model_validate(
-        {"detail": {"code": "PDF_TEXT_EMPTY", "detail": "安全中文说明"}}
+        {
+            "detail": {
+                "code": "PDF_TEXT_EMPTY",
+                "detail": "安全中文说明",
+                "action": "重新导出 PDF 后重试",
+                "correlation_id": "contract:1",
+            }
+        }
     ).model_dump() == {
-        "detail": {"code": "PDF_TEXT_EMPTY", "detail": "安全中文说明"}
+        "detail": {
+            "code": "PDF_TEXT_EMPTY",
+            "detail": "安全中文说明",
+            "action": "重新导出 PDF 后重试",
+            "correlation_id": "contract:1",
+        }
     }
 
 

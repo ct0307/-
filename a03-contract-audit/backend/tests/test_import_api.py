@@ -448,6 +448,37 @@ def test_confirm_retry_remove_and_delete_have_distinct_semantics(monkeypatch, tm
     assert db.query(AuditLog).filter(AuditLog.action == "contract_draft_delete").count() == 1
 
 
+def test_import_item_out_recovers_stable_failure_metadata_from_error_code(tmp_path):
+    db = _session()
+    legal = _user(db)
+    batch = ImportBatch(owner_id=legal.id, idempotency_key="failure-metadata")
+    known = ImportBatchItem(
+        filename="timeout.pdf",
+        contract=Contract(
+            filename="timeout.pdf",
+            storage_path=str(tmp_path / "timeout.pdf"),
+            uploaded_by=legal.id,
+            department=legal.department,
+        ),
+        status="failed",
+        error_code="OCR_TIMEOUT",
+    )
+    legacy = ImportBatchItem(filename="legacy.pdf", status="failed", error_code="PARSE_FAILED")
+    batch.items.extend([known, legacy])
+    db.add(batch)
+    db.commit()
+
+    known_out = imports._item_out(known)
+    legacy_out = imports._item_out(legacy)
+
+    assert known_out.error_action == "稍后重试或拆分文件"
+    assert known_out.retryable is True
+    assert known_out.correlation_id == f"import-item:{known.id}"
+    assert legacy_out.error_action is None
+    assert legacy_out.retryable is False
+    assert legacy_out.correlation_id == f"import-item:{legacy.id}"
+
+
 @pytest.mark.parametrize(
     "audit_status",
     ["queued", "parsing", "reviewing", "validating", "auditing"],
