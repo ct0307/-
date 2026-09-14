@@ -38,6 +38,7 @@ from app.services.audit.contract_logic import (
     validate_candidate_facts,
 )
 from app.services.audit.protocol import ReviewIssue
+from app.services.audit.progress import ProgressCallback
 from app.services.audit.review_pipeline import (
     NullWindowCheckpoint,
     ReviewWindow,
@@ -122,6 +123,7 @@ def audit_contract(
     audit_generation: int = 0,
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     """多智能体主从协同审查。dimensions 为空/None 时全量审查。"""
     all_risks: list[dict] = []
@@ -148,8 +150,27 @@ def audit_contract(
         "grounding_ms": 0,
     }
 
+    active_roles = [
+        role
+        for role in _AGENT_ORDER
+        if not canonical_dimensions
+        or set(canonical_dimensions).intersection(_ROLE_DIMENSIONS[role])
+    ]
+    top_level_windows = build_contract_windows(contract_text, max_chars=8000)
+    planned_units = len(active_roles) * len(top_level_windows)
+    completed_units = 0
+
+    def report_window_complete() -> None:
+        nonlocal completed_units
+        completed_units += 1
+        if progress_callback is not None and planned_units:
+            progress_callback(
+                15 + (60 * completed_units // planned_units),
+                "reviewing",
+            )
+
     for role in _AGENT_ORDER:
-        if canonical_dimensions and not set(canonical_dimensions).intersection(_ROLE_DIMENSIONS[role]):
+        if role not in active_roles:
             log.info("audit.agent_skipped", agent=role, dimensions=canonical_dimensions)
             continue
         result = _agent_audit(
@@ -162,6 +183,7 @@ def audit_contract(
             audit_generation=audit_generation,
             deadline=deadline,
             clock=clock,
+            window_completed_callback=report_window_complete,
         )
         log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(result.risks))
         all_risks.extend(result.risks)
@@ -169,6 +191,11 @@ def audit_contract(
         planned += result.planned
         completed += result.completed
         shared_context[role] = _summarize_for_context(role, result.risks, elements)
+
+    if progress_callback is not None:
+        if planned_units == 0:
+            progress_callback(75, "reviewing")
+        progress_callback(82, "verifying")
 
     cross_checks = detect_conflicts(shared_context, elements)
     cross_checks.extend(build_logic_cross_checks(contract_text))
@@ -196,6 +223,8 @@ def audit_contract(
     ]
     all_issues.extend(secondary_issues)
     all_issues.extend(_unbound_conflict_issues(all_risks, cross_checks))
+    if progress_callback is not None:
+        progress_callback(90, "verifying")
     for r in all_risks:
         r["tier"] = classify_tier(r, exact_conflict_claim_ids)
 
@@ -344,6 +373,7 @@ def _agent_audit(
     audit_generation: int = 0,
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    window_completed_callback: Callable[[], None] | None = None,
 ) -> AgentAuditResult:
     """单个 Agent 的窗口审查、原文核验和逐项 RAG 依据校验。"""
     agent_started = time.perf_counter()
@@ -446,6 +476,8 @@ def _agent_audit(
             build_user_prompt=build_user_prompt,
             deadline=deadline,
         ))
+        if result.complete and window_completed_callback is not None:
+            window_completed_callback()
         planned += result.planned_windows
         completed += result.completed_windows
         issues.extend(result.issues)

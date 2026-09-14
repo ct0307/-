@@ -96,6 +96,74 @@ def test_native_high_quality_contract_finishes_without_quality_risk(
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
 
 
+def test_run_audit_reports_parse_and_persists_terminal_progress(
+    monkeypatch, db: Session
+):
+    contract = _contract(db, "progress.txt")
+    contract.status = "reviewing"
+    contract.audit_generation = 1
+    batch = AuditBatch(
+        owner_id=1,
+        department=contract.department,
+        idempotency_key="progress-runner",
+    )
+    db.add(batch)
+    db.flush()
+    item = AuditBatchItem(
+        batch_id=batch.id,
+        contract_id=contract.id,
+        filename=contract.filename,
+        status="reviewing",
+        audit_generation=1,
+        execution_token="progress-token",
+    )
+    db.add(item)
+    db.commit()
+
+    monkeypatch.setattr(
+        runner,
+        "extract_document",
+        lambda _path: DocumentParseResult(
+            text="有效合同正文" * 60,
+            source="native",
+        ),
+    )
+
+    def fake_audit(*_args, progress_callback=None, **_kwargs):
+        assert progress_callback is not None
+        progress_callback(45, "reviewing")
+        progress_callback(90, "verifying")
+        return {
+            "risks": [],
+            "cross_checks": [],
+            "issues": [],
+            "coverage": {"planned": 1, "completed": 1},
+        }
+
+    monkeypatch.setattr(runner, "audit_contract", fake_audit)
+    events = []
+
+    result = run_audit(
+        db,
+        contract,
+        generation=1,
+        batch_item_id=item.id,
+        execution_token="progress-token",
+        progress_callback=lambda value, stage: events.append((value, stage)),
+    )
+
+    db.expire_all()
+    saved_item = db.get(AuditBatchItem, item.id)
+    assert events == [
+        (15, "parsing"),
+        (45, "reviewing"),
+        (90, "verifying"),
+    ]
+    assert result["status"] == "done"
+    assert saved_item.progress == 100
+    assert saved_item.progress_stage == "completed"
+
+
 def test_cross_dimension_candidate_requires_review_instead_of_done(
     monkeypatch, db: Session
 ):
@@ -674,11 +742,15 @@ def test_window_calls_have_one_log_each_and_only_jobs_persist_checkpoints(
         auditor, "SqlAlchemyWindowCheckpoint",
         lambda: SqlAlchemyWindowCheckpoint(session_factory=factory),
     )
+    progress_runs = []
     for _ in range(2):
+        progress_events = []
         result = auditor.audit_contract(
             {}, "第一条 合同正文", contract_id=contract_id, dimensions=["legal"],
             audit_job_id=audit_job_id, audit_generation=7,
+            progress_callback=lambda value, stage: progress_events.append((value, stage)),
         )
+        progress_runs.append(progress_events)
     logs = db.query(LLMCallLog).all()
     assert len(logs) == len(calls) == (2 if audit_job_id is None else 1)
     assert all(row.validation_status == "valid" for row in logs)
@@ -689,6 +761,10 @@ def test_window_calls_have_one_log_each_and_only_jobs_persist_checkpoints(
     if windows:
         assert windows[0].audit_generation == 7
     assert result["coverage"] == {"planned": 1, "completed": 1}
+    assert progress_runs == [
+        [(75, "reviewing"), (82, "verifying"), (90, "verifying")],
+        [(75, "reviewing"), (82, "verifying"), (90, "verifying")],
+    ]
 
 
 def test_llm_error_propagates_without_creating_a_fake_risk(monkeypatch):

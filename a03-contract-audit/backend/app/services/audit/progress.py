@@ -1,4 +1,5 @@
-"""审查进度的纯领域规则。"""
+"""审查进度的领域规则与持久化发布。"""
+from collections.abc import Callable
 from typing import Literal
 
 from sqlalchemy import case, or_
@@ -17,6 +18,7 @@ ProgressStage = Literal[
     "completed",
     "failed",
 ]
+ProgressCallback = Callable[[int, ProgressStage], None]
 PROGRESS_STAGES = frozenset({
     "queued",
     "claimed",

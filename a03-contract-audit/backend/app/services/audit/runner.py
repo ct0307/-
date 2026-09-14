@@ -19,6 +19,7 @@ from app.services.audit.evidence_persistence import (
     replace_contract_clauses,
 )
 from app.services.audit.protocol import ReviewIssue
+from app.services.audit.progress import ProgressCallback
 from app.services.audit.result_quality import AuditCoverage, decide_audit_status
 from app.services.parser.extractor import (
     DocumentParseResult,
@@ -69,6 +70,7 @@ def run_audit(
     execution_token: str | None = None,
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     """领取 generation 后计算，并以短事务原子发布审查结果。"""
     total_started = time.perf_counter()
@@ -114,6 +116,7 @@ def run_audit(
             audit_generation=claimed_generation,
             deadline=deadline,
             clock=clock,
+            progress_callback=progress_callback,
         )
         # 计算阶段不持有合同锁；完成候选计算后先单独发布 validating 阶段。
         if db.in_transaction():
@@ -146,6 +149,8 @@ def run_audit(
         validating.status = "validating"
         if validating_item is not None:
             validating_item.status = "validating"
+            validating_item.progress = max(validating_item.progress, 95)
+            validating_item.progress_stage = "persisting"
         db.commit()
 
         decision = decide_audit_status(risk_payloads, issues, coverage)
@@ -211,6 +216,11 @@ def run_audit(
         publishing.status = decision.status
         if item is not None:
             item.status = "failed" if decision.status == "audit_failed" else decision.status
+            if decision.status in {"done", "review_required"}:
+                item.progress = 100
+                item.progress_stage = "completed"
+            else:
+                item.progress_stage = "failed"
             item.error = None
             item.error_code = None
             item.result_json = json.dumps(
@@ -283,10 +293,13 @@ def _compute_audit(
     audit_generation: int = 0,
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     """计算审查结果，不修改合同或风险表。"""
     parse_started = time.perf_counter()
     parsed = extract_document(storage_path)
+    if progress_callback is not None:
+        progress_callback(15, "parsing")
     parse_ms = round((time.perf_counter() - parse_started) * 1000)
     text = parsed.text
     cross_checks: list[dict] = []
@@ -325,6 +338,7 @@ def _compute_audit(
             audit_generation=audit_generation,
             deadline=deadline,
             clock=clock,
+            progress_callback=progress_callback,
         )
         risk_payloads.extend(result["risks"])
         cross_checks = result["cross_checks"]
