@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile, ZipInfo
 
 import fitz
 import pytest
@@ -40,17 +40,91 @@ def _docx_bytes_with_corrupt_deflated_member() -> bytes:
     return bytes(content)
 
 
+def _docx_bytes_with_invalid_utf8_member_name() -> bytes:
+    output = BytesIO()
+    member_name = "\u4e2d.xml"
+    with ZipFile(output, "w", ZIP_STORED) as archive:
+        archive.writestr("[Content_Types].xml", "<xml />")
+        archive.writestr("word/document.xml", "<xml />")
+        archive.writestr(member_name, "<xml />")
+
+    content = bytearray(output.getvalue())
+    name_offset = content.rfind(member_name.encode("utf-8"))
+    content[name_offset] = 0xFF
+    return bytes(content)
+
+
+def _docx_bytes_with_highly_compressed_member() -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<xml />")
+        archive.writestr("word/document.xml", "<xml />")
+        archive.writestr("unrelated.bin", b"x" * (16 * 1024 * 1024))
+    return output.getvalue()
+
+
+def _replace_zipfile_with_members(monkeypatch, members: list[ZipInfo]):
+    class FakeZipFile:
+        testzip_called = False
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            pass
+
+        def infolist(self) -> list[ZipInfo]:
+            return members
+
+        def testzip(self):
+            self.testzip_called = True
+            pytest.fail("资源边界拒绝前不应执行 CRC 校验")
+
+    monkeypatch.setattr(file_validation, "ZipFile", FakeZipFile)
+    return FakeZipFile
+
+
 def _validation_error(filename: str, content: bytes) -> FileValidationError:
     with pytest.raises(FileValidationError) as raised:
         validate_upload(filename, content)
     return raised.value
 
 
-def test_accepts_valid_pdf_and_closes_document():
-    result = validate_upload("CONTRACT.PDF", _valid_pdf_bytes())
+def test_accepts_valid_pdf_and_closes_document(monkeypatch):
+    content = _valid_pdf_bytes()
+    original_open = fitz.open
+    opened_documents = []
+
+    class TrackingDocument:
+        def __init__(self, document) -> None:
+            self._document = document
+            self.closed = False
+
+        def __getattr__(self, name):
+            return getattr(self._document, name)
+
+        def __len__(self) -> int:
+            return len(self._document)
+
+        def close(self) -> None:
+            self.closed = True
+            self._document.close()
+
+    def open_document(**kwargs):
+        document = TrackingDocument(original_open(**kwargs))
+        opened_documents.append(document)
+        return document
+
+    monkeypatch.setattr(file_validation.fitz, "open", open_document)
+
+    result = validate_upload("CONTRACT.PDF", content)
 
     assert result.extension == ".pdf"
     assert result.text_encoding is None
+    assert opened_documents[0].closed is True
 
 
 def test_rejects_nonempty_corrupt_pdf_without_exposing_content():
@@ -169,6 +243,58 @@ def test_rejects_docx_when_deflate_member_raises_zlib_error():
     error = _validation_error("contract.docx", _docx_bytes_with_corrupt_deflated_member())
 
     assert error.code == "DOCX_CORRUPT"
+
+
+def test_rejects_docx_with_invalid_utf8_member_metadata():
+    error = _validation_error("contract.docx", _docx_bytes_with_invalid_utf8_member_name())
+
+    assert error.code == "DOCX_CORRUPT"
+
+
+def test_rejects_highly_compressed_docx_member_before_crc(monkeypatch):
+    content = _docx_bytes_with_highly_compressed_member()
+    with ZipFile(BytesIO(content)) as archive:
+        member = archive.getinfo("unrelated.bin")
+    assert member.file_size == 16 * 1024 * 1024
+    assert member.file_size / member.compress_size > 200
+
+    monkeypatch.setattr(
+        file_validation.ZipFile,
+        "testzip",
+        lambda _archive: pytest.fail("资源边界拒绝前不应执行 CRC 校验"),
+    )
+
+    error = _validation_error("contract.docx", content)
+
+    assert error.code == "DOCX_STRUCTURE_INVALID"
+    assert error.message == "DOCX 压缩结构超过安全限制"
+
+
+def test_rejects_docx_with_too_many_members_before_crc(monkeypatch):
+    members = [ZipInfo(f"extra/{index}") for index in range(4097)]
+    members[0] = ZipInfo("[Content_Types].xml")
+    members[1] = ZipInfo("word/document.xml")
+    fake_zipfile = _replace_zipfile_with_members(monkeypatch, members)
+
+    error = _validation_error("contract.docx", b"PK\x03\x04")
+
+    assert error.code == "DOCX_STRUCTURE_INVALID"
+    assert fake_zipfile.testzip_called is False
+
+
+def test_rejects_docx_over_total_uncompressed_size_before_crc(monkeypatch):
+    content_types = ZipInfo("[Content_Types].xml")
+    content_types.file_size = 64 * 1024 * 1024 + 1
+    content_types.compress_size = content_types.file_size
+    document = ZipInfo("word/document.xml")
+    document.file_size = 64 * 1024 * 1024 + 1
+    document.compress_size = document.file_size
+    fake_zipfile = _replace_zipfile_with_members(monkeypatch, [content_types, document])
+
+    error = _validation_error("contract.docx", b"PK\x03\x04")
+
+    assert error.code == "DOCX_STRUCTURE_INVALID"
+    assert fake_zipfile.testzip_called is False
 
 
 @pytest.mark.parametrize("filename", ("contract.exe", "contract", ".hidden"))
