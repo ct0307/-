@@ -91,7 +91,10 @@ def _mark_dispatch_pending(item: AuditBatchItem, exc: Exception) -> None:
 
 
 def _refresh_batch(batch: AuditBatch) -> None:
-    progress = summarize([item.status for item in batch.items])
+    progress = summarize(
+        [item.status for item in batch.items],
+        progresses=[item.progress for item in batch.items],
+    )
     batch.status = progress.status
     batch.total = progress.total
     batch.completed = progress.completed

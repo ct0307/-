@@ -98,6 +98,19 @@ def test_audit_reliability_fields_round_trip():
     assert audit_payload.retryable is True
 
 
+def test_batch_item_schema_falls_back_for_historical_progress_fields():
+    payload = BatchItemOut.model_validate({
+        "id": 1,
+        "contract_id": 2,
+        "filename": "historical.txt",
+        "status": "validating",
+        "attempts": 0,
+    })
+
+    assert payload.progress == 90
+    assert payload.progress_stage == "persisting"
+
+
 def test_audit_response_exposes_typed_quality_fields_without_shared_defaults():
     first = AuditResponse(
         contract_id=1,

@@ -30,12 +30,38 @@ PROGRESS_STAGES = frozenset({
     "failed",
 })
 _TERMINAL_ITEM_STATUSES = ("done", "review_required", "failed")
+_STATUS_PROGRESS_FALLBACK = {
+    "queued": 0,
+    "parsing": 5,
+    "reviewing": 15,
+    "validating": 90,
+    "done": 100,
+    "review_required": 100,
+    "failed": 0,
+}
+_STATUS_STAGE_FALLBACK: dict[str, ProgressStage] = {
+    "queued": "queued",
+    "parsing": "parsing",
+    "reviewing": "reviewing",
+    "validating": "persisting",
+    "done": "completed",
+    "review_required": "completed",
+    "failed": "failed",
+}
 
 
 def normalize_progress(value: int, *, terminal_success: bool = False) -> int:
     """限制进度范围；成功终态发布前不得提前返回 100%。"""
     upper_bound = 100 if terminal_success else 99
     return max(0, min(upper_bound, int(value)))
+
+
+def progress_from_status(status: str) -> int:
+    return _STATUS_PROGRESS_FALLBACK.get(status, 0)
+
+
+def stage_from_status(status: str) -> ProgressStage:
+    return _STATUS_STAGE_FALLBACK.get(status, "queued")
 
 
 def publish_progress(

@@ -279,6 +279,54 @@ def test_get_batch_rejects_other_department():
     assert exc_info.value.status_code == 403
 
 
+def test_get_batch_returns_authoritative_item_and_batch_progress():
+    db = _session()
+    user = _user(db)
+    contracts = [
+        Contract(
+            filename=f"progress-{index}.txt",
+            storage_path=f"/progress-{index}.txt",
+            department=user.department,
+            uploaded_by=user.id,
+        )
+        for index in range(2)
+    ]
+    batch = AuditBatch(
+        owner_id=user.id,
+        department=user.department,
+        idempotency_key="batch-progress",
+    )
+    db.add_all([*contracts, batch])
+    db.flush()
+    batch.items.extend([
+        AuditBatchItem(
+            contract_id=contracts[0].id,
+            filename=contracts[0].filename,
+            status="reviewing",
+            progress=50,
+            progress_stage="reviewing",
+        ),
+        AuditBatchItem(
+            contract_id=contracts[1].id,
+            filename=contracts[1].filename,
+            status="failed",
+            progress=35,
+            progress_stage="failed",
+        ),
+    ])
+    db.commit()
+
+    response = batches.get_batch(batch.id, db=db, user=user)
+
+    assert response.progress == 75
+    assert response.completed == 1
+    assert response.failed == 1
+    assert response.items[0].progress == 50
+    assert response.items[0].progress_stage == "reviewing"
+    assert response.items[1].progress == 35
+    assert response.items[1].progress_stage == "failed"
+
+
 def test_create_batch_cleans_files_when_database_flush_fails(monkeypatch, tmp_path):
     db = _session()
     user = _user(db)

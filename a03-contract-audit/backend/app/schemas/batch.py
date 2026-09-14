@@ -5,6 +5,12 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.services.audit.result_snapshot import quality_snapshot
+from app.services.audit.progress import (
+    ProgressStage,
+    progress_from_status,
+    stage_from_status,
+)
+from app.services.batch.service import summarize
 
 BatchStatus = Literal[
     "queued", "running", "done", "review_required", "partial_failed", "failed",
@@ -19,6 +25,8 @@ class BatchItemOut(BaseModel):
     contract_id: int
     filename: str
     status: BatchItemStatus
+    progress: int = Field(default=0, ge=0, le=100)
+    progress_stage: ProgressStage = "queued"
     error: str | None = None
     error_code: str | None = None
     attempts: int
@@ -32,8 +40,13 @@ class BatchItemOut(BaseModel):
     @classmethod
     def read_historical_quality_snapshot(cls, value):
         if isinstance(value, dict):
-            return value
+            data = dict(value)
+            status = str(data.get("status", "queued"))
+            data.setdefault("progress", progress_from_status(status))
+            data.setdefault("progress_stage", stage_from_status(status))
+            return data
         quality = quality_snapshot(value, getattr(value, "contract", None))
+        status = getattr(value, "status")
         return {
             field: getattr(value, field)
             for field in (
@@ -41,6 +54,10 @@ class BatchItemOut(BaseModel):
                 "attempts", "started_at", "finished_at",
             )
         } | {
+            "progress": getattr(value, "progress", progress_from_status(status)),
+            "progress_stage": getattr(
+                value, "progress_stage", stage_from_status(status),
+            ),
             "requires_review": quality.requires_review,
             "ocr_confidence": quality.ocr_confidence,
             "review_reason": quality.review_reason,
@@ -55,9 +72,18 @@ class BatchOut(BaseModel):
     total: int
     completed: int
     failed: int
+    progress: int = Field(default=0, ge=0, le=100)
     created_at: datetime
     updated_at: datetime
     items: list[BatchItemOut] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def calculate_progress(self):
+        self.progress = summarize(
+            [item.status for item in self.items],
+            progresses=[item.progress for item in self.items],
+        ).progress
+        return self
 
     model_config = {"from_attributes": True}
 
