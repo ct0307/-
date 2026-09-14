@@ -90,7 +90,9 @@ function auditBatch(overrides: Record<string, unknown> = {}) {
   }
 }
 
-test('renders authoritative running batch and item progress without a success state', async ({ page }) => {
+test('restores authoritative batch and item progress after reload without a success state', async ({ page }) => {
+  let batchGetCalls = 0
+
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/runtime/status')) {
@@ -98,7 +100,8 @@ test('renders authoritative running batch and item progress without a success st
     }
     if (isLookup(path)) return fulfillJson(route, [])
     if (path.endsWith('/batches/77')) {
-      return fulfillJson(route, auditBatch({ items: [auditBatch().items[0]] }))
+      batchGetCalls += 1
+      return fulfillJson(route, auditBatch({ failed: 1 }))
     }
     return fulfillJson(route, [])
   })
@@ -110,10 +113,25 @@ test('renders authoritative running batch and item progress without a success st
   await expect(batchProgress).toHaveAttribute('aria-valuenow', '43')
   await expect(batchProgress).not.toHaveClass(/is-success/)
   await expect(page.getByText('正在审查', { exact: true })).toBeVisible()
-  const itemProgressRow = page.locator('.batch-result-item-progress-row')
+  const itemProgressRow = page.locator('.batch-result-item')
+    .filter({ hasText: '正在审查的超长合同文件名用于验证移动端换行不遮挡.pdf' })
+    .locator('.batch-result-item-progress-row')
   await expect(itemProgressRow.locator('.el-progress')).toHaveAttribute('aria-valuenow', '43')
   await expect(itemProgressRow.getByText('43%', { exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+
+  await page.reload()
+  await page.waitForLoadState('networkidle')
+
+  await expect(batchProgress).toHaveAttribute('aria-valuenow', '43')
+  await expect(batchProgress).not.toHaveClass(/is-success/)
+  const failedProgressRow = page.locator('.batch-result-item')
+    .filter({ hasText: '失败合同.pdf' })
+    .locator('.batch-result-item-progress-row')
+  await expect(failedProgressRow.locator('.el-progress')).toHaveAttribute('aria-valuenow', '68')
+  await expect(failedProgressRow.getByText('68%', { exact: true })).toBeVisible()
+  await expect(failedProgressRow.getByText('审查失败', { exact: true })).toBeVisible()
+  expect(batchGetCalls).toBeGreaterThanOrEqual(2)
 })
 
 test('keeps a failed item percentage and persisted failure detail visible', async ({ page }) => {
