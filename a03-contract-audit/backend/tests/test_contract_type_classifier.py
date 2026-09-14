@@ -124,3 +124,36 @@ def test_tied_or_near_tied_types_cannot_auto_ready(body):
     assert result.candidates[1].score >= 6
     assert result.confidence < 0.85
     assert result.auto_ready_eligible is False
+
+
+@pytest.mark.parametrize("heading", ["保密协议（附件）", "附件：保密协议", "保密协议条款"])
+def test_attachment_or_clause_heading_does_not_override_later_trade(heading):
+    result = classify_contract_type(
+        filename="scan.pdf", text=heading + "\n" + "甲" * 1800 + "采购设备交付",
+        available_types=["采购合同", "保密协议"],
+    )
+
+    assert result.suggested_type == "采购合同"
+    assert result.auto_ready_eligible is False
+    assert result.confidence < 0.85
+
+
+def test_custom_purchase_type_is_reached_by_controlled_trade_alias():
+    result = classify_contract_type(
+        filename="scan.pdf", text="双方采购设备并约定交付。",
+        available_types=["设备采购合同"],
+    )
+
+    assert result.suggested_type == "设备采购合同"
+    assert result.candidates[0].score == 3
+
+
+def test_purchase_order_filename_suggests_available_standard_type_without_auto_ready():
+    result = classify_contract_type(
+        filename="设备采购订单.pdf", text="双方约定付款期限。",
+        available_types=["采购合同", "销售合同", "保密协议"],
+    )
+
+    assert result.suggested_type == "采购合同"
+    assert result.candidates[0].score == 6
+    assert result.auto_ready_eligible is False

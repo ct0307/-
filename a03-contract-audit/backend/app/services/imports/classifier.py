@@ -38,6 +38,36 @@ _TRADE_SIGNALS: dict[str, tuple[str, ...]] = {
     "劳务合同": ("劳务", "劳务报酬", "劳务人员"),
 }
 
+_TYPE_FAMILY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("软件开发外包合同", ("软件开发", "软件外包", "系统开发")),
+    ("技术服务合同", ("技术服务", "技术支持", "技术维护")),
+    ("技术开发合同", ("技术开发", "研发")),
+    ("采购合同", ("采购", "购置")),
+    ("销售合同", ("销售", "出售")),
+    ("劳动合同", ("劳动",)),
+    ("劳务合同", ("劳务",)),
+    ("租赁合同", ("租赁", "承租", "出租")),
+    ("框架协议", ("框架",)),
+    ("合作协议", ("合作协议",)),
+    ("合作合同", ("合作合同",)),
+    ("服务协议", ("服务协议",)),
+    ("服务合同", ("服务合同",)),
+    ("保密协议", ("保密协议",)),
+)
+
+
+def _family_for_type(contract_type: str) -> str | None:
+    if contract_type in _TRADE_SIGNALS:
+        return contract_type
+    return next(
+        (
+            family
+            for family, aliases in _TYPE_FAMILY_ALIASES
+            if any(alias in contract_type for alias in aliases)
+        ),
+        None,
+    )
+
 
 def classify_contract_type(
     *,
@@ -57,7 +87,8 @@ def classify_contract_type(
     evidence: dict[str, list[str]] = {value: [] for value in types}
     primary: set[str] = set()
 
-    for source in (name, title):
+    trusted_title = title if not any(marker in title for marker in ("附件", "条款")) else ""
+    for source in (name, trusted_title):
         matches = [value for value in types if value.lower() in source]
         # 同一标题中较长的类型优先，避免“技术服务合同”同时命中“服务合同”。
         for value in matches:
@@ -67,8 +98,18 @@ def classify_contract_type(
             evidence[value].append(value)
             primary.add(value)
 
+    # 文件名中的受控交易别名可以产生建议，但不足以单独自动放行。
     for value in types:
-        keywords = _TRADE_SIGNALS.get(value, ())
+        family = _family_for_type(value)
+        if family and scores[value] == 0:
+            name_hits = [keyword for keyword in _TRADE_SIGNALS[family] if keyword.lower() in name]
+            if name_hits:
+                scores[value] += 6
+                evidence[value].extend(name_hits)
+
+    for value in types:
+        family = _family_for_type(value)
+        keywords = _TRADE_SIGNALS.get(family, ())
         hits = [keyword for keyword in keywords if keyword.lower() in heading or keyword.lower() in body]
         if not hits and value == "技术开发合同" and "软件开发外包合同" not in types:
             hits = [
