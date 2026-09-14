@@ -125,6 +125,16 @@ def test_payment_amount_conflict_requires_review_but_clear_multi_node_schedule_d
     assert all(item.validation == "ambiguous" for item in result.evidence["payment_terms"])
 
 
+def test_unscoped_distinct_reconciliation_and_payment_nodes_remain_valid():
+    result = extract_element_result(_parsed(
+        "付款安排：\n1. 每月25日前对账；\n2. 确认收票后45日付款。"
+    ))
+
+    assert result.values["payment_terms"] == ["每月25日前对账", "确认收票后45日付款"]
+    assert "payment_terms" not in result.review_fields
+    assert all(item.validation == "valid" for item in result.evidence["payment_terms"])
+
+
 @pytest.mark.parametrize(
     "text",
     [

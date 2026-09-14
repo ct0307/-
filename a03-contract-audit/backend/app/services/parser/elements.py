@@ -281,6 +281,10 @@ def _payment_conflicts(candidates: list[_Candidate]) -> bool:
     grouped: dict[str, set[str]] = {}
     for item in candidates:
         stage = next((word for word in stages if word in item.value), "__unscoped__")
+        if stage == "__unscoped__":
+            # 无明确付款阶段的节点通常描述不同动作（如对账、收票后付款），
+            # 文本不同本身不足以证明互斥冲突。
+            continue
         grouped.setdefault(stage, set()).add(_normalized(item.value))
     return any(len(values) > 1 for values in grouped.values())
 
