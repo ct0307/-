@@ -266,3 +266,43 @@ def test_party_performance_narrative_ending_in_type_is_not_a_title(text):
 
     assert result.candidates[0].score == 3
     assert result.auto_ready_eligible is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "本项目由供应商销售产品拟签订采购合同",
+        "我司向客户销售产品并签订采购合同",
+    ],
+)
+def test_open_ended_narrative_cannot_hide_competing_lead_signal(text):
+    result = classify_contract_type(
+        filename="scan.pdf", text=text,
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert [(item.contract_type, item.score) for item in result.candidates] == [
+        ("采购合同", 6),
+        ("销售合同", 3),
+    ]
+    assert result.confidence < 0.85
+    assert result.auto_ready_eligible is False
+
+
+def test_title_candidate_does_not_repeat_matching_lead_score():
+    result = classify_contract_type(
+        filename="scan.pdf", text="采购合同\n甲方向乙方采购设备并约定交付。",
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert result.candidates[0].contract_type == "采购合同"
+    assert result.candidates[0].score == 6
+
+
+def test_filename_and_first_line_same_title_only_score_once():
+    result = classify_contract_type(
+        filename="采购合同.pdf", text="采购合同\n双方约定付款期限。",
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert result.candidates[0].score == 6

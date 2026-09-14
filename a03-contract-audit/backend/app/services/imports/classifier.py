@@ -102,16 +102,15 @@ def classify_contract_type(
     lines = text[:8000].splitlines()
     first_line = next((line.strip().lower() for line in lines if line.strip()), "")
     title = first_line[:100]
-    title_start = text.lower().find(title) if title else -1
-    title_end = title_start + len(title) if title_start >= 0 else 0
     title_markers = ("附件", "条款")
     title_is_contract_type = _is_contract_title(first_line, available_types)
-    heading = text[title_end if title_is_contract_type else 0:1800].lower()
+    heading = text[:1800].lower()
     body = text[1800:8000].lower()
     types = list(dict.fromkeys(available_types))
     scores: dict[str, float] = {value: 0.0 for value in types}
     evidence: dict[str, list[str]] = {value: [] for value in types}
     primary: set[str] = set()
+    headline_scored: set[str] = set()
 
     trusted_name = name if not any(marker in name for marker in title_markers) else ""
     trusted_title = title if title_is_contract_type else ""
@@ -121,9 +120,12 @@ def classify_contract_type(
         for value in matches:
             if any(value != longer and value in longer for longer in matches):
                 continue
+            if value in headline_scored:
+                continue
             scores[value] += 6
             evidence[value].append(value)
             primary.add(value)
+            headline_scored.add(value)
 
     # 文件名中的受控交易别名可以产生建议，但不足以单独自动放行。
     for value in types:
@@ -136,6 +138,7 @@ def classify_contract_type(
             if name_hits:
                 scores[value] += 6
                 evidence[value].extend(name_hits)
+                headline_scored.add(value)
 
     for value in types:
         family = _family_for_type(value)
@@ -147,11 +150,13 @@ def classify_contract_type(
                 if keyword in heading or keyword in body
             ]
         if hits:
-            scores[value] += 3 if any(keyword.lower() in heading for keyword in hits) else 1
+            if value not in headline_scored:
+                scores[value] += 3 if any(keyword.lower() in heading for keyword in hits) else 1
             evidence[value].extend(hits)
             primary.add(value)
         elif value == "保密协议" and any(word in heading or word in body for word in ("保密", "商业秘密")):
-            scores[value] += 0.25
+            if value not in headline_scored:
+                scores[value] += 0.25
             evidence[value].append("保密")
 
     ranked = tuple(
