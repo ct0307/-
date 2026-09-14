@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     # 合同导入分类与草稿生命周期。
     CONTRACT_TYPE_CONFIRM_THRESHOLD: float = 0.60
     CONTRACT_TYPE_READY_THRESHOLD: float = 0.85
+    CONTRACT_TYPE_AUTO_READY_ENABLED: bool = False
     CONTRACT_TRASH_RETENTION_DAYS: int = 30
 
     # OCR 资源门槛：防止超大扫描件耗尽 worker 内存或长期占用执行槽。

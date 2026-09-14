@@ -1,6 +1,14 @@
 """基于本地规则的合同类型初筛。"""
 
 from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class TypeCandidate:
+    contract_type: str
+    score: float
+    evidence: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -8,15 +16,27 @@ class TypeSuggestion:
     suggested_type: str
     confidence: float
     evidence: list[str]
+    candidates: tuple[TypeCandidate, ...] = ()
+    auto_ready_eligible: bool = False
 
 
-_FAMILIES = (
-    (("采购", "购置", "供货", "设备"), ("采购",)),
-    (("软件开发", "系统开发", "源代码", "技术开发"), ("软件开发", "技术开发")),
-    (("劳动合同", "劳动关系", "试用期"), ("劳动",)),
-    (("租赁", "出租方", "承租方"), ("租赁",)),
-    (("保密", "商业秘密", "保密义务"), ("保密",)),
-)
+# 仅列主交易行为；保密、违约和争议条款不能作为其他合同的主交易证据。
+_TRADE_SIGNALS: dict[str, tuple[str, ...]] = {
+    "软件开发外包合同": ("软件开发", "系统开发", "源代码", "软件外包"),
+    "技术服务合同": ("技术服务", "技术支持", "技术维护"),
+    "采购合同": ("采购", "购置", "供货", "设备"),
+    "销售合同": ("销售", "出售", "售卖"),
+    "劳动合同": ("劳动关系", "试用期", "工资"),
+    "租赁合同": ("租赁", "承租", "出租"),
+    "保密协议": ("专项保密协议",),
+    "合作协议": ("合作项目",),
+    "服务协议": ("提供服务",),
+    "框架协议": ("框架合作", "框架采购"),
+    "技术开发合同": ("技术开发", "研发", "技术成果"),
+    "合作合同": ("合作项目",),
+    "服务合同": ("提供服务",),
+    "劳务合同": ("劳务", "劳务报酬", "劳务人员"),
+}
 
 
 def classify_contract_type(
@@ -25,27 +45,52 @@ def classify_contract_type(
     text: str,
     available_types: list[str],
 ) -> TypeSuggestion:
-    """只在后台可用类型中选择最匹配项，并返回可解释的命中词。"""
+    """在可用类型中排序候选，并仅把主交易证据标为自动就绪资格。"""
 
-    material = f"{filename}\n{text[:8000]}".lower()
-    best_type = ""
-    best_hits: list[str] = []
-    for keywords, type_aliases in _FAMILIES:
-        candidate = next(
-            (
-                value
-                for value in available_types
-                if any(alias in value for alias in type_aliases)
-            ),
-            "",
-        )
-        if not candidate:
-            continue
-        hits = [keyword for keyword in keywords if keyword.lower() in material]
-        if len(hits) > len(best_hits):
-            best_type, best_hits = candidate, hits
+    name = Path(filename).stem.lower()
+    lines = text[:8000].splitlines()
+    title = next((line.strip().lower() for line in lines if line.strip()), "")[:100]
+    heading = text[:240].lower()
+    body = text[:8000].lower()
+    types = list(dict.fromkeys(available_types))
+    scores: dict[str, float] = {value: 0.0 for value in types}
+    evidence: dict[str, list[str]] = {value: [] for value in types}
+    primary: set[str] = set()
 
-    if not best_hits:
+    for source in (name, title):
+        matches = [value for value in types if value.lower() in source]
+        # 同一标题中较长的类型优先，避免“技术服务合同”同时命中“服务合同”。
+        for value in matches:
+            if any(value != longer and value in longer for longer in matches):
+                continue
+            scores[value] += 6
+            evidence[value].append(value)
+            primary.add(value)
+
+    for value in types:
+        keywords = _TRADE_SIGNALS.get(value, ())
+        hits = [keyword for keyword in keywords if keyword.lower() in body]
+        if not hits and value == "技术开发合同" and "软件开发外包合同" not in types:
+            hits = [keyword for keyword in _TRADE_SIGNALS["软件开发外包合同"] if keyword in body]
+        if hits:
+            scores[value] += 3 if any(keyword.lower() in heading for keyword in hits) else 1
+            evidence[value].extend(hits)
+            primary.add(value)
+        elif value == "保密协议" and any(word in body for word in ("保密", "商业秘密")):
+            scores[value] += 0.25
+            evidence[value].append("保密")
+
+    ranked = tuple(
+        TypeCandidate(value, scores[value], tuple(dict.fromkeys(evidence[value])))
+        for value in sorted(types, key=lambda item: (-scores[item], item))
+        if scores[value] > 0
+    )[:3]
+    if not ranked:
         return TypeSuggestion("", 0.0, [])
-    confidence = {1: 0.58, 2: 0.76}.get(len(best_hits), 0.90)
-    return TypeSuggestion(best_type, confidence, best_hits)
+
+    best = ranked[0]
+    confidence = 0.20 if best.score <= 0.25 else 0.50 if best.score < 3 else 0.70 if best.score < 6 else 0.90
+    return TypeSuggestion(
+        best.contract_type, confidence, list(best.evidence), ranked,
+        best.contract_type in primary and best.score >= 6,
+    )

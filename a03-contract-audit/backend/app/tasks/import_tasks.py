@@ -62,7 +62,12 @@ def parse_import_item(item_id: int) -> dict:
                 else ""
             )
             item.contract.status = "parsed"
-            item.status = target_status(suggestion.suggested_type, suggestion.confidence)
+            item.status = target_status(
+                suggestion.suggested_type,
+                suggestion.confidence,
+                auto_ready_eligible=suggestion.auto_ready_eligible,
+                requires_review=parsed.requires_review,
+            )
             item.error_code = None
             item.error_message = None
         except Exception as exc:
