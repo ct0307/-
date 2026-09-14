@@ -25,6 +25,7 @@ from app.schemas.contract import (
     RiskOut,
 )
 from app.services import audit_log
+from app.services.imports.file_validation import FileValidationError, validate_upload
 from app.services import masking
 from app.services.audit.jobs import AuditJobConflict, create_single_audit_job
 from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
@@ -40,6 +41,25 @@ router = APIRouter()
 log = get_logger("contracts")
 
 _ALLOWED_EXT = {".pdf", ".docx", ".txt"}
+
+_UNPROCESSABLE_UPLOAD_CODES = {
+    "PDF_CORRUPT",
+    "PDF_EMPTY",
+    "PDF_ENCRYPTED",
+    "DOCX_CORRUPT",
+    "DOCX_STRUCTURE_INVALID",
+    "TEXT_ENCODING_ERROR",
+    "TEXT_EMPTY",
+}
+
+
+def _raise_upload_validation_error(error: FileValidationError) -> None:
+    status_code = (
+        status.HTTP_422_UNPROCESSABLE_ENTITY
+        if error.code in _UNPROCESSABLE_UPLOAD_CODES
+        else status.HTTP_400_BAD_REQUEST
+    )
+    raise HTTPException(status_code, {"code": error.code, "message": error.message})
 
 # 风险等级聚合：取最高等级
 _LEVEL_RANK = {"high": 2, "medium": 1, "low": 0}
@@ -182,7 +202,7 @@ def batch_upload_contracts(
     results = []
 
     for file in files:
-        fname = file.filename or "unknown"
+        fname = os.path.basename(file.filename or "unknown")
         ext = os.path.splitext(fname)[1].lower()
         stored_path: str | None = None
         contract_id: int | None = None
@@ -194,6 +214,16 @@ def batch_upload_contracts(
             content = file.file.read()
             if len(content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
                 results.append({"filename": fname, "status": "failed", "error": "文件超过大小限制"})
+                continue
+            try:
+                validate_upload(fname, content)
+            except FileValidationError as exc:
+                results.append({
+                    "filename": fname,
+                    "status": "failed",
+                    "error_code": exc.code,
+                    "error": exc.message,
+                })
                 continue
 
             stored_name = f"{uuid.uuid4().hex}{ext}"
@@ -268,13 +298,11 @@ def upload_contract(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Contract:
-    ext = os.path.splitext(file.filename or "")[1].lower()
+    filename = os.path.basename(file.filename or "unknown")
+    ext = os.path.splitext(filename)[1].lower()
     if ext not in _ALLOWED_EXT:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"不支持的文件类型: {ext}")
 
-    os.makedirs(settings.storage_path, exist_ok=True)
-    stored_name = f"{uuid.uuid4().hex}{ext}"
-    stored_path = os.path.join(settings.storage_path, stored_name)
     content = file.file.read()
     if len(content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "文件超过大小限制")
@@ -288,13 +316,23 @@ def upload_contract(
         Contract.upload_idempotency_key == key,
     ).first()
     if existing:
-        if existing.deleted_at is not None:
-            existing.upload_idempotency_key = None
-            db.flush()
-        elif existing.content_sha256 != content_sha256:
+        if existing.deleted_at is None and existing.content_sha256 != content_sha256:
             raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键与文件内容不一致")
-        else:
+        if existing.deleted_at is None:
             return existing
+
+    try:
+        validate_upload(filename, content)
+    except FileValidationError as exc:
+        _raise_upload_validation_error(exc)
+
+    if existing is not None:
+        existing.upload_idempotency_key = None
+        db.flush()
+
+    os.makedirs(settings.storage_path, exist_ok=True)
+    stored_name = f"{uuid.uuid4().hex}{ext}"
+    stored_path = os.path.join(settings.storage_path, stored_name)
 
     # 加密存储：启用 FILE_ENCRYPT_KEY 时落盘前加密，防止明文泄漏
     from app.core.crypto import encrypt_bytes, is_encryption_enabled
@@ -308,7 +346,7 @@ def upload_contract(
         created_path = True
 
         contract = Contract(
-            filename=file.filename or stored_name,
+            filename=filename,
             storage_path=stored_path,
             contract_type=contract_type,
             department=user.department,

@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import Mock
+from zipfile import ZIP_DEFLATED, ZipFile
 
+import fitz
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
@@ -54,6 +56,26 @@ def _upload(filename: str, content: bytes) -> object:
     from fastapi import UploadFile
 
     return UploadFile(filename=filename, file=BytesIO(content))
+
+
+def _docx_with_invalid_structure() -> bytes:
+    content = BytesIO()
+    with ZipFile(content, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("word/other.xml", "<document />")
+    return content.getvalue()
+
+
+def _encrypted_pdf() -> bytes:
+    document = fitz.open()
+    document.new_page().insert_text((72, 72), "test")
+    try:
+        return document.tobytes(
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            owner_pw="owner-password",
+            user_pw="user-password",
+        )
+    finally:
+        document.close()
 
 
 def test_risk_api_returns_trace_and_redacts_business_retrieval_query(tmp_path):
@@ -137,14 +159,14 @@ def test_single_upload_is_idempotent_and_rejects_payload_mismatch(monkeypatch, t
         monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
 
         first = contracts.upload_contract(
-            _upload("contract.pdf", b"same contract"),
+            _upload("contract.txt", b"same contract"),
             contract_type="",
             idempotency_key="upload-request-001",
             db=db,
             user=user,
         )
         repeated = contracts.upload_contract(
-            _upload("contract.pdf", b"same contract"),
+            _upload("contract.txt", b"same contract"),
             contract_type="",
             idempotency_key="upload-request-001",
             db=db,
@@ -158,7 +180,7 @@ def test_single_upload_is_idempotent_and_rejects_payload_mismatch(monkeypatch, t
 
         with pytest.raises(HTTPException) as exc_info:
             contracts.upload_contract(
-                _upload("contract.pdf", b"different contract"),
+                _upload("contract.txt", b"different contract"),
                 contract_type="",
                 idempotency_key="upload-request-001",
                 db=db,
@@ -166,6 +188,120 @@ def test_single_upload_is_idempotent_and_rejects_payload_mismatch(monkeypatch, t
             )
 
         assert exc_info.value.status_code == 409
+        assert db.query(Contract).count() == 1
+        assert len(list(tmp_path.iterdir())) == 1
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "error_code"),
+    [
+        ("broken.pdf", b"%PDF-not-a-document", "PDF_CORRUPT"),
+        ("broken.docx", _docx_with_invalid_structure(), "DOCX_STRUCTURE_INVALID"),
+    ],
+)
+def test_single_upload_rejects_invalid_content_before_persistence(
+    monkeypatch, tmp_path, filename, content, error_code
+):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username=f"invalid-{filename}",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+
+        with pytest.raises(HTTPException) as raised:
+            contracts.upload_contract(
+                _upload(filename, content),
+                contract_type="",
+                idempotency_key=f"invalid-upload-{filename}",
+                db=db,
+                user=user,
+            )
+
+        assert raised.value.status_code == 422
+        assert raised.value.detail["code"] == error_code
+        assert db.query(Contract).count() == 0
+        assert list(tmp_path.iterdir()) == []
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "status_code", "error_code"),
+    [
+        ("empty.txt", b"", 400, "EMPTY_FILE"),
+        ("disguised.pdf", b"plain text", 400, "FILE_TYPE_MISMATCH"),
+        ("encrypted.pdf", _encrypted_pdf(), 422, "PDF_ENCRYPTED"),
+    ],
+)
+def test_single_upload_returns_stable_preflight_error_codes(
+    monkeypatch, tmp_path, filename, content, status_code, error_code
+):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username=f"preflight-{filename}",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+
+        with pytest.raises(HTTPException) as raised:
+            contracts.upload_contract(
+                _upload(filename, content),
+                contract_type="",
+                idempotency_key=f"preflight-upload-{filename}",
+                db=db,
+                user=user,
+            )
+
+        assert raised.value.status_code == status_code
+        assert raised.value.detail["code"] == error_code
+        assert db.query(Contract).count() == 0
+        assert list(tmp_path.iterdir()) == []
+    engine.dispose()
+
+
+def test_legacy_batch_upload_isolates_invalid_content(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username="legacy-invalid-content",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+
+        result = contracts.batch_upload_contracts(
+            files=[_upload("broken.pdf", b"%PDF-not-a-document"), _upload("valid.txt", b"valid")],
+            contract_type="采购合同",
+            db=db,
+            user=user,
+        )
+
+        assert result[0] == {
+            "filename": "broken.pdf",
+            "status": "failed",
+            "error_code": "PDF_CORRUPT",
+            "error": "PDF 文件损坏或无法打开",
+        }
+        assert result[1]["filename"] == "valid.txt"
+        assert result[1]["status"] == "success"
+        assert result[1]["contract_id"] is not None
         assert db.query(Contract).count() == 1
         assert len(list(tmp_path.iterdir())) == 1
     engine.dispose()
@@ -198,7 +334,7 @@ def test_deleted_contract_does_not_block_reupload_with_same_idempotency_key(monk
         monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
 
         uploaded = contracts.upload_contract(
-            _upload("contract.pdf", b"replacement contract"),
+            _upload("contract.txt", b"replacement contract"),
             contract_type="采购合同",
             idempotency_key="reupload-request-001",
             db=db,
@@ -230,7 +366,7 @@ def test_upload_keeps_committed_file_when_response_refresh_fails(monkeypatch, tm
         monkeypatch.setattr(db, "refresh", fail_refresh)
         with pytest.raises(HTTPException) as exc_info:
             contracts.upload_contract(
-                _upload("contract.pdf", b"committed contract"),
+                _upload("contract.txt", b"committed contract"),
                 contract_type="",
                 idempotency_key="upload-request-refresh-failure",
                 db=db,

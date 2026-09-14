@@ -27,6 +27,7 @@ from app.models.models import (
 )
 from app.schemas.import_batch import ConfirmImportItem, ImportBatchOut, ImportItemOut
 from app.services.batch.service import ACTIVE_AUDIT_ITEM_STATUSES
+from app.services.imports.file_validation import FileValidationError, validate_upload
 from app.services.imports.service import summarize_import
 from app.tasks.dispatcher import dispatch_import_item
 
@@ -119,6 +120,11 @@ def _append_prepared_uploads(
             error_code, error_message = "FILE_TOO_LARGE", "文件超过大小限制"
         elif total_bytes > _MAX_TOTAL_BYTES:
             error_code, error_message = "BATCH_TOO_LARGE", "批次总大小超过 500MB"
+        else:
+            try:
+                validate_upload(upload.filename, content)
+            except FileValidationError as exc:
+                error_code, error_message = exc.code, exc.message
         filenames.add(upload.filename)
 
         if error_code:
