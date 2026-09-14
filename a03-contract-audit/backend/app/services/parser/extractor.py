@@ -511,10 +511,10 @@ _SIGN_DATE_PATTERN = (
 
 def extract_elements(text: str) -> dict:
     """兼容旧调用方的扁平结果；新解析链路使用 ``extract_element_result``。"""
-    from app.services.parser.elements import extract_element_result
+    from app.services.parser.elements import extract_element_result, legacy_element_values
 
     result = extract_element_result(DocumentParseResult(text=text, source="native"))
-    elements = dict(result.values)
+    elements = legacy_element_values(result.values)
     sign_date = re.search(_SIGN_DATE_PATTERN, text)
     elements["sign_date"] = sign_date.group(1).strip() if sign_date else None
 

@@ -31,7 +31,11 @@ from app.services.audit.jobs import AuditJobConflict, create_single_audit_job
 from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
 from app.services.audit.runner import apply_parse_quality, run_audit
 from app.services.imports.errors import parse_failure, pdf_text_empty_failure
-from app.services.parser.elements import extract_element_result, merge_element_review
+from app.services.parser.elements import (
+    extract_element_result,
+    legacy_element_values,
+    merge_element_review,
+)
 from app.services.parser.extractor import (
     extract_document,
 )
@@ -218,7 +222,7 @@ def batch_upload_contracts(
                 parsed = extract_document(stored_path)
                 apply_parse_quality(contract, parsed)
                 element_result = extract_element_result(parsed)
-                elements = element_result.values
+                elements = legacy_element_values(element_result.values)
                 requires_review, review_reason = merge_element_review(parsed, element_result)
                 contract.requires_review = requires_review
                 contract.review_reason = review_reason
@@ -387,7 +391,7 @@ def parse_contract(
         apply_parse_quality(contract, parsed)
         # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
         element_result = extract_element_result(parsed)
-        elements = element_result.values
+        elements = legacy_element_values(element_result.values)
         requires_review, review_reason = merge_element_review(parsed, element_result)
         contract.requires_review = requires_review
         contract.review_reason = review_reason

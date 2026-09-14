@@ -11,7 +11,11 @@ from app.services.audit.runner import apply_parse_quality
 from app.services.imports.classifier import classify_contract_type
 from app.services.imports.errors import parse_failure
 from app.services.imports.service import summarize_import, target_status
-from app.services.parser.elements import extract_element_result, merge_element_review
+from app.services.parser.elements import (
+    extract_element_result,
+    legacy_element_values,
+    merge_element_review,
+)
 from app.services.parser.extractor import extract_document
 from app.tasks.celery_app import celery_app
 
@@ -41,7 +45,7 @@ def parse_import_item(item_id: int) -> dict:
             parsed = extract_document(item.contract.storage_path)
             apply_parse_quality(item.contract, parsed)
             element_result = extract_element_result(parsed)
-            elements = element_result.values
+            elements = legacy_element_values(element_result.values)
             requires_review, review_reason = merge_element_review(parsed, element_result)
             item.contract.requires_review = requires_review
             item.contract.review_reason = review_reason

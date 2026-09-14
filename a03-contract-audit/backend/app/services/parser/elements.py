@@ -115,36 +115,50 @@ def _collect_subjects(text: str) -> list[_Candidate]:
 def _collect_amounts(text: str) -> list[_Candidate]:
     candidates: list[_Candidate] = []
     for match in _AMOUNT_PATTERN.finditer(text):
-        context = text[max(0, match.start() - 12):match.start(1)]
-        if any(term in context for term in _EXCLUDED_AMOUNT_TERMS):
+        sentence_start = max(
+            (text.rfind(mark, 0, match.start()) for mark in "。！？\n；;"),
+            default=-1,
+        ) + 1
+        sentence_ends = [
+            index
+            for mark in "。！？\n；;"
+            if (index := text.find(mark, match.end())) >= 0
+        ]
+        sentence_end = min(sentence_ends, default=len(text))
+        sentence = text[sentence_start:sentence_end]
+        local_prefix = text[max(sentence_start, match.start() - 16):match.start(1)]
+        excluded_in_sentence = any(term in sentence for term in _EXCLUDED_AMOUNT_TERMS)
+        excluded_near_label = any(term in local_prefix for term in _EXCLUDED_AMOUNT_TERMS)
+        if excluded_near_label or excluded_in_sentence:
             continue
         candidates.append(_candidate(match, 0.98))
     return candidates
 
 
 def _collect_durations(text: str) -> list[_Candidate]:
+    candidates: list[_Candidate] = []
     for pattern in _DURATION_PATTERNS:
-        candidates = _collect_scalar(pattern, text, 0.95)
-        if candidates:
-            return candidates
-    return []
+        for candidate in _collect_scalar(pattern, text, 0.95):
+            if any(
+                candidate.start < existing.end and existing.start < candidate.end
+                for existing in candidates
+            ):
+                continue
+            candidates.append(candidate)
+    return sorted(candidates, key=lambda item: item.start)
 
 
 def _payment_section_end(text: str, start: int) -> int:
     end = min(len(text), start + 1200)
     heading = re.search(
-        r"\n\s*(?:第[一二三四五六七八九十\d]+条\s*)?(?:违约责任|争议解决|合同期限|保密|知识产权)[：:]?",
+        r"\n\s*(?:第[一二三四五六七八九十\d]+条(?:\s*[^\n]*)?"
+        r"|(?:违约责任|争议解决|合同期限|保密|知识产权)[：:]?)",
         text[start:end],
     )
     return start + heading.start() if heading else end
 
 
-def _collect_payment_terms(text: str) -> list[_Candidate]:
-    header = _PAYMENT_HEADER.search(text)
-    if header is None:
-        return []
-    section_start = header.end()
-    section_end = _payment_section_end(text, section_start)
+def _collect_payment_section(text: str, section_start: int, section_end: int) -> list[_Candidate]:
     section = text[section_start:section_end]
     nodes = [
         _Candidate(
@@ -175,6 +189,37 @@ def _collect_payment_terms(text: str) -> list[_Candidate]:
     return candidates
 
 
+def _collect_payment_terms(text: str) -> list[_Candidate]:
+    """按标题顺序收集付款节点；规范化后完全重复的节点只保留首次出现。"""
+    headers = list(_PAYMENT_HEADER.finditer(text))
+    candidates: list[_Candidate] = []
+    seen: set[str] = set()
+    for index, header in enumerate(headers):
+        next_header = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+        section_end = min(_payment_section_end(text, header.end()), next_header)
+        for candidate in _collect_payment_section(text, header.end(), section_end):
+            normalized = _normalized(candidate.value)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append(candidate)
+    return candidates
+
+
+def legacy_element_values(
+    values: dict[str, str | list[str] | None],
+) -> dict[str, str | None]:
+    """把结构化值转换为现有持久化、API、报表和前端可消费的扁平形状。"""
+    legacy: dict[str, str | None] = {}
+    for field, value in values.items():
+        if isinstance(value, list):
+            rendered = "；".join(item.strip() for item in value if item.strip())
+            legacy[field] = rendered or None
+        else:
+            legacy[field] = value
+    return legacy
+
+
 def _block_spans(parsed: DocumentParseResult) -> list[tuple[int, int, int | None]]:
     spans: list[tuple[int, int, int | None]] = []
     cursor = 0
@@ -184,7 +229,21 @@ def _block_spans(parsed: DocumentParseResult) -> list[tuple[int, int, int | None
             continue
         start = parsed.text.find(block.text, cursor)
         if start < 0:
-            start = parsed.text.find(block.text)
+            compact_block = "".join(char for char in block.text if not char.isspace())
+            compact_source: list[str] = []
+            source_offsets: list[int] = []
+            for source_index, char in enumerate(parsed.text[cursor:], start=cursor):
+                if char.isspace():
+                    continue
+                compact_source.append(char)
+                source_offsets.append(source_index)
+            compact_start = "".join(compact_source).find(compact_block)
+            if compact_start >= 0 and compact_block:
+                start = source_offsets[compact_start]
+                end = source_offsets[compact_start + len(compact_block) - 1] + 1
+                spans.append((start, end, block.anchor.page_number))
+                cursor = end
+                continue
         if start < 0:
             continue
         end = start + len(block.text)
