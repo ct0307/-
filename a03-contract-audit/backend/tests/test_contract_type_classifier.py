@@ -394,3 +394,54 @@ def test_unstructured_material_filename_keeps_real_body_trade_candidate():
     assert result.suggested_type == "采购合同"
     assert result.candidates[0].score >= 3
     assert result.auto_ready_eligible is False
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "采购合同（审查报告）.pdf",
+        "采购合同（风险清单）.pdf",
+        "评审报告项目采购合同.pdf",
+        "参考样本工程采购合同.pdf",
+    ],
+)
+def test_material_structure_cannot_masquerade_as_contract_title(monkeypatch, filename):
+    result = classify_contract_type(
+        filename=filename, text="审查正文包含普通保密条款。",
+        available_types=["采购合同", "销售合同", "保密协议"],
+    )
+    monkeypatch.setattr(
+        import_service,
+        "settings",
+        type("Config", (), {
+            "CONTRACT_TYPE_AUTO_READY_ENABLED": True,
+            "CONTRACT_TYPE_READY_THRESHOLD": 0.85,
+        })(),
+    )
+
+    assert result.auto_ready_eligible is False
+    assert target_status(
+        result.suggested_type, result.confidence,
+        auto_ready_eligible=result.auto_ready_eligible,
+    ) == "awaiting_confirmation"
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "采购合同（2026年）.pdf",
+        "采购合同（编号A03-2026）.pdf",
+        "采购合同V2.1.pdf",
+        "浙江某公司采购合同.pdf",
+        "滨江数据中心项目采购合同.pdf",
+    ],
+)
+def test_controlled_suffix_and_named_prefix_contract_titles_remain_trusted(filename):
+    result = classify_contract_type(
+        filename=filename, text="双方约定付款期限。",
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert result.suggested_type == "采购合同"
+    assert result.candidates[0].score == 6
+    assert result.auto_ready_eligible is True

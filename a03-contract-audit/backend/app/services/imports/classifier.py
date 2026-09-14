@@ -56,13 +56,23 @@ _TYPE_FAMILY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("保密协议", ("保密协议",)),
 )
 
-_MATERIAL_SEMANTICS = re.compile(r"审核|说明|模板|范本|复核|选用|记录|意见")
+_MATERIAL_SEMANTICS = re.compile(
+    r"审核|审查|评审|说明|报告|模板|范本|复核|选用|记录|意见|参考|样本|材料|清单"
+)
 _BUSINESS_QUALIFIER = r"(?:设备|软件|系统|技术|服务|采购|销售|租赁|劳动|劳务|框架|合作)"
+_CONTROLLED_TITLE_SUFFIX = (
+    r"(?:"
+    r"[（(](?:\d{4}(?:年|版)?|编号[A-Za-z0-9._-]{1,20}|(?:版本|修订)?[Vv]?\d+(?:\.\d+)*)[）)]"
+    r"|(?:[Vv](?:ersion)?\d+(?:\.\d+)*|\d{4}版)"
+    r")?"
+)
 
 
 def _is_trusted_title_prefix(prefix: str) -> bool:
     if not prefix:
         return True
+    if _MATERIAL_SEMANTICS.search(prefix):
+        return False
     if re.fullmatch(rf"{_BUSINESS_QUALIFIER}{{1,2}}", prefix):
         return True
     return bool(re.fullmatch(
@@ -92,10 +102,9 @@ def _is_contract_title(line: str, available_types: list[str]) -> bool:
         or _MATERIAL_SEMANTICS.search(normalized)
     ):
         return False
-    suffix = r"(?:[（(][^）)\r\n]{1,20}[）)]|(?:v(?:ersion)?)?\d+(?:\.\d+)*版?)?"
     for value in available_types:
         match = re.fullmatch(
-            rf"(?P<prefix>.*){re.escape(''.join(value.lower().split()))}{suffix}",
+            rf"(?P<prefix>.*){re.escape(''.join(value.lower().split()))}{_CONTROLLED_TITLE_SUFFIX}",
             normalized,
         )
         if match and _is_trusted_title_prefix(match.group("prefix")):
