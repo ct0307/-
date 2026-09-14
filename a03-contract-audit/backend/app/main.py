@@ -19,6 +19,7 @@ from app.core.logging import get_logger, setup_logging
 from app.db.init_db import init_db
 from app.db.session import engine
 from app.api.v1.endpoints.runtime import _get_cached_runtime_status, _get_runtime_status_snapshot
+from app.services.parser.readiness import probe_ocr_runtime
 
 setup_logging(settings.DEBUG)
 log = get_logger("main")
@@ -71,34 +72,46 @@ def health_live() -> dict:
     return {"status": "ok", "app": settings.APP_NAME}
 
 
-def collect_readiness(*, refresh_model: bool = True) -> dict[str, dict[str, object]]:
+def collect_database_readiness() -> dict[str, object]:
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
-        database = {"ready": True}
+        return {"ready": True}
     except Exception:
-        database = {"ready": False, "error_code": "database_unavailable"}
+        return {"ready": False, "error_code": "database_unavailable"}
 
+
+def collect_model_readiness(*, refresh: bool) -> dict[str, object]:
     try:
         validate_llm_configuration(settings)
         runtime = (
             _get_cached_runtime_status(force_refresh=True)
-            if refresh_model
+            if refresh
             else _get_runtime_status_snapshot()
         )
         model = {"ready": runtime.status == "online", "status": runtime.status}
         if runtime.status != "online":
             model["error_code"] = runtime.error_code or "probe_failed"
     except ValueError:
-        model = {"ready": False, "error_code": "invalid_configuration"}
+        return {"ready": False, "error_code": "invalid_configuration"}
     except Exception:
-        model = {"ready": False, "error_code": "probe_failed"}
-    return {"database": database, "model": model}
+        return {"ready": False, "error_code": "probe_failed"}
+    return model
+
+
+def collect_readiness(
+    *, refresh_model: bool = True, strict_ocr: bool = False
+) -> dict[str, dict[str, object]]:
+    return {
+        "database": collect_database_readiness(),
+        "model": collect_model_readiness(refresh=refresh_model),
+        "ocr": probe_ocr_runtime(strict=strict_ocr).to_dict(),
+    }
 
 
 @app.get("/health/ready", tags=["系统"])
 def health_ready(response: Response) -> dict:
-    checks = collect_readiness(refresh_model=False)
+    checks = collect_readiness(refresh_model=False, strict_ocr=False)
     ready = bool(checks.get("database", {}).get("ready"))
     if not ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -107,7 +120,7 @@ def health_ready(response: Response) -> dict:
 
 @app.get("/health/preflight", tags=["系统"])
 def health_preflight(response: Response) -> dict:
-    checks = collect_readiness()
+    checks = collect_readiness(refresh_model=True, strict_ocr=True)
     ready = all(bool(check.get("ready")) for check in checks.values())
     if not ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
