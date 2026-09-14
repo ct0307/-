@@ -1,3 +1,5 @@
+import type { AuditProgressStage } from '@/api/types'
+
 export type AuditUiState = 'idle' | 'running' | 'done' | 'failed'
 
 export interface AuditProgressDisplay {
@@ -28,6 +30,16 @@ const AUDIT_PENDING_STATUSES = new Set([
 ])
 const AUDIT_SUCCESS_STATUSES = new Set(['done', 'review_required'])
 const AUDIT_FAILURE_STATUSES = new Set(['audit_failed', 'failed'])
+const BATCH_ITEM_PROGRESS_LABELS: Record<AuditProgressStage, string> = {
+  queued: '等待审查',
+  claimed: '已领取任务',
+  parsing: '正在解析',
+  reviewing: '正在审查',
+  verifying: '正在校验',
+  persisting: '正在保存',
+  completed: '审查完成',
+  failed: '审查失败',
+}
 
 export class AuditTaskError extends Error {
   code: string
@@ -95,4 +107,19 @@ export function auditProgressDisplay(state: AuditUiState): AuditProgressDisplay 
     return { label: '审查失败，请重试', percentage: 0, indeterminate: false }
   }
   return { label: '', percentage: null, indeterminate: false }
+}
+
+export function batchItemProgressDisplay(
+  progress: number | null | undefined,
+  progressStage: AuditProgressStage,
+): AuditProgressDisplay {
+  const percentage = Number.isFinite(progress)
+    ? Math.min(100, Math.max(0, progress as number))
+    : 0
+
+  return {
+    label: BATCH_ITEM_PROGRESS_LABELS[progressStage],
+    percentage,
+    indeterminate: false,
+  }
 }

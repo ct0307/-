@@ -8,6 +8,7 @@ import { ElMessage } from 'element-plus'
 import { getLookups } from '@/api/admin'
 
 import type { RiskOut } from '@/api/types'
+import type { AuditBatchItem } from '@/api/batches'
 import { useAuditSessionStore } from '@/stores/audit-session'
 import { useRectifyStore } from '@/stores/rectify'
 import { useNotifyStore } from '@/stores/notify'
@@ -17,7 +18,11 @@ import { useImportInboxStore } from '@/stores/import-inbox'
 import ContractInbox from '@/components/audit/ContractInbox.vue'
 import RiskReviewDrawer from '@/components/audit/RiskReviewDrawer.vue'
 import AnnotationModal from '@/components/audit/AnnotationModal.vue'
-import { auditProgressDisplay, type AuditUiState } from '@/utils/audit-progress'
+import {
+  auditProgressDisplay,
+  batchItemProgressDisplay,
+  type AuditUiState,
+} from '@/utils/audit-progress'
 import { formatOcrConfidence, reviewStatusLabel } from '@/utils/ocr-quality'
 import { evidenceMeta } from '@/utils/risk-evidence'
 
@@ -221,6 +226,21 @@ const batchItemStatusType = {
   failed: 'danger',
 } as const
 
+const batchProgressStatus = computed(() => {
+  const batch = batchStore.batch
+  if (!batch) return undefined
+  if (batch.status === 'failed' || batch.status === 'partial_failed' || batch.failed > 0) {
+    return 'exception'
+  }
+  if (batch.status === 'done') return 'success'
+  if (batch.status === 'review_required') return 'warning'
+  return undefined
+})
+
+function batchItemProgress(item: AuditBatchItem) {
+  return batchItemProgressDisplay(item.progress, item.progress_stage)
+}
+
 async function retryAuditBatch() {
   try {
     const result = await batchStore.retry(
@@ -392,36 +412,63 @@ const onboardSteps = [
               @click="retryAuditBatch"
             >重试失败项</el-button>
           </div>
-          <el-progress :percentage="batchStore.progress" :status="batchStore.batch.failed ? 'exception' : 'success'" />
+          <el-progress
+            class="batch-result-progress"
+            :percentage="batchStore.progress"
+            :status="batchProgressStatus"
+          />
           <p class="batch-summary mono">
             已处理 {{ batchStore.batch.completed }} / {{ batchStore.batch.total }}，失败 {{ batchStore.batch.failed }}
           </p>
-          <div class="batch-items">
-            <div v-for="item in batchStore.batch.items" :key="item.id" class="batch-item">
-              <div class="batch-item-main">
-                <strong>{{ item.filename }}</strong>
-                <span v-if="item.error" class="batch-item-error">{{ item.error }}</span>
-                <span
-                  v-else-if="item.status === 'review_required' && item.review_reason"
-                  class="batch-item-review-reason"
-                >{{ item.review_reason }}</span>
+          <div class="batch-result-items">
+            <div
+              v-for="item in batchStore.batch.items"
+              :key="item.id"
+              class="batch-result-item"
+              :class="{ 'is-failed': item.progress_stage === 'failed' }"
+            >
+              <div class="batch-result-item-top">
+                <div class="batch-result-item-main">
+                  <strong>{{ item.filename }}</strong>
+                  <span v-if="item.error" class="batch-result-item-error">{{ item.error }}</span>
+                  <span
+                    v-else-if="item.status === 'review_required' && item.review_reason"
+                    class="batch-result-item-review-reason"
+                  >{{ item.review_reason }}</span>
+                </div>
+                <div class="batch-result-item-meta">
+                  <el-tag :type="batchItemStatusType[item.status]" size="small">
+                    {{ batchItemStatusLabel[item.status] }}
+                  </el-tag>
+                  <el-button
+                    v-if="item.status === 'done' || item.status === 'review_required'"
+                    class="batch-result-item-action"
+                    type="primary"
+                    plain
+                    :icon="View"
+                    :loading="openingContractId === item.contract_id"
+                    :disabled="openingContractId !== null && openingContractId !== item.contract_id"
+                    :aria-label="`查看 ${item.filename} 的审查结果`"
+                    @click="openBatchResult(item.contract_id, item.filename, item.id)"
+                  >
+                    查看审查结果
+                  </el-button>
+                </div>
               </div>
-              <el-tag :type="batchItemStatusType[item.status]" size="small">
-                {{ batchItemStatusLabel[item.status] }}
-              </el-tag>
-              <el-button
-                v-if="item.status === 'done' || item.status === 'review_required'"
-                class="batch-result-action"
-                type="primary"
-                plain
-                :icon="View"
-                :loading="openingContractId === item.contract_id"
-                :disabled="openingContractId !== null && openingContractId !== item.contract_id"
-                :aria-label="`查看 ${item.filename} 的审查结果`"
-                @click="openBatchResult(item.contract_id, item.filename, item.id)"
-              >
-                查看审查结果
-              </el-button>
+              <div class="batch-result-item-progress-row">
+                <el-progress
+                  class="batch-result-item-progress"
+                  :percentage="batchItemProgress(item).percentage ?? 0"
+                  :status="item.progress_stage === 'failed'
+                    ? 'exception'
+                    : item.progress_stage === 'completed'
+                      ? 'success'
+                      : undefined"
+                  :show-text="false"
+                />
+                <span class="batch-result-item-stage">{{ batchItemProgress(item).label }}</span>
+                <span class="batch-result-item-percentage mono">{{ batchItemProgress(item).percentage }}%</span>
+              </div>
             </div>
           </div>
         </section>
@@ -577,7 +624,7 @@ const onboardSteps = [
   border-bottom: 1px solid var(--line);
 }
 .batch-result-head,
-.batch-item {
+.batch-result-item-top {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -590,42 +637,81 @@ const onboardSteps = [
   margin: 3px 0 0;
   font-size: 18px;
 }
-.batch-items {
+.batch-result-items {
   margin-top: 10px;
   border-top: 1px solid var(--line);
 }
-.batch-item {
-  min-height: 52px;
-  padding: 8px 0;
+.batch-result-item {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 0;
   border-bottom: 1px solid var(--line);
 }
-.batch-item-main {
+.batch-result-item-top {
+  justify-content: space-between;
+  min-width: 0;
+}
+.batch-result-item-main {
   flex: 1;
   min-width: 0;
 }
-.batch-item-main strong,
-.batch-item-error,
-.batch-item-review-reason {
+.batch-result-item-main strong,
+.batch-result-item-error,
+.batch-result-item-review-reason {
   display: block;
   overflow-wrap: anywhere;
 }
-.batch-item-main strong {
+.batch-result-item-main strong {
   font-size: 13px;
 }
-.batch-item-error {
+.batch-result-item-error {
   margin-top: 3px;
   color: var(--seal);
   font-size: 12px;
 }
-.batch-item-review-reason {
+.batch-result-item-review-reason {
   margin-top: 3px;
   color: var(--amber);
   font-size: 12px;
   line-height: 1.5;
 }
-.batch-result-action {
+.batch-result-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: none;
+}
+.batch-result-item-action {
   min-width: 118px;
+}
+.batch-result-item-progress-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 1fr) auto 4ch;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.batch-result-item-progress {
+  min-width: 0;
+}
+.batch-result-item-stage,
+.batch-result-item-percentage {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.batch-result-item-stage {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.batch-result-item-percentage {
+  width: 4ch;
+  color: var(--brass);
+  text-align: right;
+}
+.batch-result-item.is-failed .batch-result-item-stage,
+.batch-result-item.is-failed .batch-result-item-percentage {
+  color: var(--seal);
 }
 .upload-panel :deep(.el-upload-dragger) {
   min-height: 156px;
@@ -1193,15 +1279,32 @@ const onboardSteps = [
     align-items: flex-start;
     flex-wrap: wrap;
   }
-  .batch-item {
+  .batch-result-item-top {
     align-items: flex-start;
-    flex-wrap: wrap;
+    flex-direction: column;
   }
-  .batch-item-main {
-    flex-basis: calc(100% - 112px);
-  }
-  .batch-result-action {
+  .batch-result-item-main,
+  .batch-result-item-meta {
     width: 100%;
+  }
+  .batch-result-item-meta {
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+  .batch-result-item-action {
+    width: 100%;
+  }
+  .batch-result-item-progress-row {
+    grid-template-columns: minmax(0, 1fr) 4ch;
+  }
+  .batch-result-item-stage {
+    grid-column: 1;
+    white-space: normal;
+  }
+  .batch-result-item-percentage {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    align-self: center;
   }
   .onboard {
     flex-direction: column;

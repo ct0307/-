@@ -38,7 +38,7 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 }
 
-async function openAudit(page: Page) {
+async function openAudit(page: Page, path = '/audit') {
   await page.addInitScript(() => {
     localStorage.setItem('token', 'test-token')
     localStorage.setItem('role', 'legal')
@@ -46,9 +46,105 @@ async function openAudit(page: Page) {
     localStorage.setItem('department', '法务部')
     localStorage.setItem('authorized_departments', JSON.stringify(['法务部']))
   })
-  await page.goto(`${baseUrl}/audit`)
+  await page.goto(`${baseUrl}${path}`)
   await page.waitForLoadState('networkidle')
 }
+
+function auditBatch(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 77,
+    status: 'running',
+    total: 2,
+    completed: 0,
+    failed: 0,
+    progress: 43,
+    created_at: '2026-09-14T08:00:00Z',
+    updated_at: '2026-09-14T08:00:00Z',
+    items: [
+      {
+        id: 701,
+        contract_id: 901,
+        filename: '正在审查的超长合同文件名用于验证移动端换行不遮挡.pdf',
+        status: 'reviewing',
+        progress: 43,
+        progress_stage: 'reviewing',
+        error: null,
+        attempts: 1,
+        started_at: '2026-09-14T08:00:00Z',
+        finished_at: null,
+      },
+      {
+        id: 702,
+        contract_id: 902,
+        filename: '失败合同.pdf',
+        status: 'failed',
+        progress: 68,
+        progress_stage: 'failed',
+        error: '模型响应超时，请稍后重试',
+        attempts: 1,
+        started_at: '2026-09-14T08:00:00Z',
+        finished_at: '2026-09-14T08:01:00Z',
+      },
+    ],
+    ...overrides,
+  }
+}
+
+test('renders authoritative running batch and item progress without a success state', async ({ page }) => {
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/runtime/status')) {
+      return fulfillJson(route, { status: 'online', checked_at: '2026-09-14T08:00:00Z' })
+    }
+    if (isLookup(path)) return fulfillJson(route, [])
+    if (path.endsWith('/batches/77')) {
+      return fulfillJson(route, auditBatch({ items: [auditBatch().items[0]] }))
+    }
+    return fulfillJson(route, [])
+  })
+
+  await page.setViewportSize({ width: 375, height: 800 })
+  await openAudit(page, '/audit?batch=77')
+
+  const batchProgress = page.locator('.batch-result > .batch-result-progress')
+  await expect(batchProgress).toHaveAttribute('aria-valuenow', '43')
+  await expect(batchProgress).not.toHaveClass(/is-success/)
+  await expect(page.getByText('正在审查', { exact: true })).toBeVisible()
+  const itemProgressRow = page.locator('.batch-result-item-progress-row')
+  await expect(itemProgressRow.locator('.el-progress')).toHaveAttribute('aria-valuenow', '43')
+  await expect(itemProgressRow.getByText('43%', { exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
+
+test('keeps a failed item percentage and persisted failure detail visible', async ({ page }) => {
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/runtime/status')) {
+      return fulfillJson(route, { status: 'online', checked_at: '2026-09-14T08:00:00Z' })
+    }
+    if (isLookup(path)) return fulfillJson(route, [])
+    if (path.endsWith('/batches/77')) {
+      return fulfillJson(route, auditBatch({
+        status: 'partial_failed',
+        completed: 1,
+        failed: 1,
+        progress: 84,
+      }))
+    }
+    return fulfillJson(route, [])
+  })
+
+  await openAudit(page, '/audit?batch=77')
+
+  await expect(page.getByText('审查失败', { exact: true })).toBeVisible()
+  await expect(page.getByText('模型响应超时，请稍后重试', { exact: true })).toBeVisible()
+  const failedProgressRow = page.locator('.batch-result-item')
+    .filter({ hasText: '失败合同.pdf' })
+    .locator('.batch-result-item-progress-row')
+  const failedProgress = failedProgressRow.locator('.el-progress')
+  await expect(failedProgress).toHaveAttribute('aria-valuenow', '68')
+  await expect(failedProgressRow.getByText('68%', { exact: true })).toBeVisible()
+})
 
 function isLookup(path: string) {
   return path.includes('/admin/lookups/')

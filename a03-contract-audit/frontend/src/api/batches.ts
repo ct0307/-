@@ -1,5 +1,9 @@
 import client from './client'
-import type { AuditBatchStatus, AuditItemStatus } from './types'
+import type {
+  AuditBatchStatus,
+  AuditItemStatus,
+  AuditProgressStage,
+} from './types'
 
 export type BatchStatus = AuditBatchStatus
 export type BatchItemStatus = AuditItemStatus
@@ -9,6 +13,8 @@ export interface AuditBatchItem {
   contract_id: number
   filename: string
   status: BatchItemStatus
+  progress: number
+  progress_stage: AuditProgressStage
   error: string | null
   error_code?: string | null
   attempts: number
@@ -25,6 +31,7 @@ export interface AuditBatch {
   total: number
   completed: number
   failed: number
+  progress: number
   created_at: string
   updated_at: string
   items: AuditBatchItem[]

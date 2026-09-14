@@ -75,8 +75,7 @@ export function createBatchStore(
     }
 
     const progress = computed(() => {
-      if (!batch.value?.total) return 0
-      return Math.round((batch.value.completed / batch.value.total) * 100)
+      return batch.value?.progress ?? 0
     })
     const isTerminal = computed(() => Boolean(batch.value && TERMINAL_STATUSES.has(batch.value.status)))
 

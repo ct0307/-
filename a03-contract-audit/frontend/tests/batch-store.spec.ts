@@ -3,7 +3,15 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { createBatchStore, type BatchApi, type AuditBatch } from '../src/stores/batch'
 
-function batch(status: AuditBatch['status'], itemStatuses: AuditBatch['items'][number]['status'][]): AuditBatch {
+function batch(
+  status: AuditBatch['status'],
+  itemStatuses: AuditBatch['items'][number]['status'][],
+  progress = Math.round((
+    itemStatuses.filter((item) => (
+      item === 'done' || item === 'review_required' || item === 'failed'
+    )).length / Math.max(itemStatuses.length, 1)
+  ) * 100),
+): AuditBatch {
   return {
     id: 1,
     status,
@@ -12,6 +20,7 @@ function batch(status: AuditBatch['status'], itemStatuses: AuditBatch['items'][n
       item === 'done' || item === 'review_required' || item === 'failed'
     )).length,
     failed: itemStatuses.filter((item) => item === 'failed').length,
+    progress,
     created_at: '2026-07-26T10:00:00Z',
     updated_at: '2026-07-26T10:00:00Z',
     items: itemStatuses.map((itemStatus, index) => ({
@@ -19,6 +28,12 @@ function batch(status: AuditBatch['status'], itemStatuses: AuditBatch['items'][n
       contract_id: index + 10,
       filename: `contract-${index}.pdf`,
       status: itemStatus,
+      progress: itemStatus === 'done' || itemStatus === 'review_required' ? 100 : 15,
+      progress_stage: itemStatus === 'failed'
+        ? 'failed'
+        : itemStatus === 'done' || itemStatus === 'review_required'
+          ? 'completed'
+          : itemStatus,
       error: itemStatus === 'failed' ? 'OCR 置信度不足' : null,
       attempts: 0,
       started_at: null,
@@ -59,6 +74,17 @@ test('keeps polling while an item is running', async () => {
 
   expect(store.polling).toBe(true)
   expect(store.progress).toBe(50)
+})
+
+test('uses authoritative backend batch progress while items are active', async () => {
+  const useStore = createBatchStore(fakeApi([
+    batch('running', ['reviewing'], 43),
+  ]))
+  const store = useStore()
+
+  await store.pollOnce(1)
+
+  expect(store.progress).toBe(43)
 })
 
 test('review_required is terminal and does not count as failed', async () => {

@@ -17,6 +17,16 @@ export type AuditBatchStatus =
   | 'partial_failed'
   | 'failed'
 
+export type AuditProgressStage =
+  | 'queued'
+  | 'claimed'
+  | 'parsing'
+  | 'reviewing'
+  | 'verifying'
+  | 'persisting'
+  | 'completed'
+  | 'failed'
+
 export type AuditStatus = Exclude<AuditItemStatus, 'failed'> | 'audit_failed'
 
 export type ContractStatus =

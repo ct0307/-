@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test'
 import {
   AUDIT_POLLING_MAX_ATTEMPTS,
   auditProgressDisplay,
+  batchItemProgressDisplay,
   waitForAuditTerminal,
 } from '../src/utils/audit-progress'
 import { PARSE_TIMEOUT_MS } from '../src/api/contract'
@@ -31,6 +32,54 @@ test('single audit only reports completion after the request finishes', () => {
     percentage: 100,
     indeterminate: false,
   })
+})
+
+test('batch item displays each persisted progress stage with the backend percentage', () => {
+  expect(batchItemProgressDisplay(0, 'queued')).toEqual({
+    label: '等待审查',
+    percentage: 0,
+    indeterminate: false,
+  })
+  expect(batchItemProgressDisplay(12, 'claimed')).toEqual({
+    label: '已领取任务',
+    percentage: 12,
+    indeterminate: false,
+  })
+  expect(batchItemProgressDisplay(25, 'parsing')).toEqual({
+    label: '正在解析',
+    percentage: 25,
+    indeterminate: false,
+  })
+  expect(batchItemProgressDisplay(48, 'reviewing')).toEqual({
+    label: '正在审查',
+    percentage: 48,
+    indeterminate: false,
+  })
+  expect(batchItemProgressDisplay(72, 'verifying')).toEqual({
+    label: '正在校验',
+    percentage: 72,
+    indeterminate: false,
+  })
+  expect(batchItemProgressDisplay(91, 'persisting')).toEqual({
+    label: '正在保存',
+    percentage: 91,
+    indeterminate: false,
+  })
+  expect(batchItemProgressDisplay(100, 'completed')).toEqual({
+    label: '审查完成',
+    percentage: 100,
+    indeterminate: false,
+  })
+})
+
+test('batch item preserves persisted failure progress and clamps backend percentages', () => {
+  expect(batchItemProgressDisplay(68, 'failed')).toEqual({
+    label: '审查失败',
+    percentage: 68,
+    indeterminate: false,
+  })
+  expect(batchItemProgressDisplay(-5, 'parsing').percentage).toBe(0)
+  expect(batchItemProgressDisplay(128, 'persisting').percentage).toBe(100)
 })
 
 test('single audit waits for persisted terminal status', async () => {
