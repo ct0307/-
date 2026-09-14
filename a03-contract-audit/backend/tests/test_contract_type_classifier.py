@@ -2,7 +2,9 @@
 
 import pytest
 
+from app.services.imports import service as import_service
 from app.services.imports.classifier import classify_contract_type
+from app.services.imports.service import target_status
 
 
 TYPES = ["采购合同", "软件开发外包合同", "劳动合同", "租赁合同", "保密协议"]
@@ -282,7 +284,7 @@ def test_open_ended_narrative_cannot_hide_competing_lead_signal(text):
     )
 
     assert [(item.contract_type, item.score) for item in result.candidates] == [
-        ("采购合同", 6),
+        ("采购合同", 3),
         ("销售合同", 3),
     ]
     assert result.confidence < 0.85
@@ -338,4 +340,57 @@ def test_material_filename_does_not_block_body_trade_candidate():
 
     assert result.suggested_type == "采购合同"
     assert result.candidates[0].score == 3
+    assert result.auto_ready_eligible is False
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "采购合同审查报告.pdf",
+        "评审报告采购合同.pdf",
+        "参考样本采购合同.pdf",
+        "补充材料采购合同.pdf",
+    ],
+)
+def test_unstructured_material_filename_never_auto_readies(monkeypatch, filename):
+    result = classify_contract_type(
+        filename=filename, text="审查正文载明普通保密和违约条款。",
+        available_types=["采购合同", "销售合同", "保密协议"],
+    )
+    monkeypatch.setattr(
+        import_service,
+        "settings",
+        type("Config", (), {
+            "CONTRACT_TYPE_AUTO_READY_ENABLED": True,
+            "CONTRACT_TYPE_READY_THRESHOLD": 0.85,
+        })(),
+    )
+
+    assert result.auto_ready_eligible is False
+    assert target_status(
+        result.suggested_type, result.confidence,
+        auto_ready_eligible=result.auto_ready_eligible,
+    ) == "awaiting_confirmation"
+
+
+@pytest.mark.parametrize("filename", ["采购合同.pdf", "某公司采购合同V2.1.pdf"])
+def test_structured_contract_filename_remains_trusted(filename):
+    result = classify_contract_type(
+        filename=filename, text="双方约定付款期限。",
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert result.suggested_type == "采购合同"
+    assert result.candidates[0].score == 6
+    assert result.auto_ready_eligible is True
+
+
+def test_unstructured_material_filename_keeps_real_body_trade_candidate():
+    result = classify_contract_type(
+        filename="参考样本采购合同.pdf", text="甲方采购设备并约定交付。",
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert result.suggested_type == "采购合同"
+    assert result.candidates[0].score >= 3
     assert result.auto_ready_eligible is False

@@ -56,11 +56,19 @@ _TYPE_FAMILY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("保密协议", ("保密协议",)),
 )
 
-_NARRATIVE_TITLE_PATTERN = re.compile(
-    r"(?:甲乙双方|双方|甲方|乙方).{0,24}"
-    r"(?:约定|签订|订立|向|由|承担|交付|支付|收取|提供|销售)"
-)
 _MATERIAL_SEMANTICS = re.compile(r"审核|说明|模板|范本|复核|选用|记录|意见")
+_BUSINESS_QUALIFIER = r"(?:设备|软件|系统|技术|服务|采购|销售|租赁|劳动|劳务|框架|合作)"
+
+
+def _is_trusted_title_prefix(prefix: str) -> bool:
+    if not prefix:
+        return True
+    if re.fullmatch(rf"{_BUSINESS_QUALIFIER}{{1,2}}", prefix):
+        return True
+    return bool(re.fullmatch(
+        rf".{{1,32}}(?:公司|集团|中心|部门|项目|工程){_BUSINESS_QUALIFIER}{{0,2}}",
+        prefix,
+    ))
 
 
 def _family_for_type(contract_type: str) -> str | None:
@@ -82,14 +90,17 @@ def _is_contract_title(line: str, available_types: list[str]) -> bool:
         len(normalized) > 64
         or any(marker in normalized for marker in ("附件", "条款"))
         or _MATERIAL_SEMANTICS.search(normalized)
-        or _NARRATIVE_TITLE_PATTERN.search(normalized)
     ):
         return False
     suffix = r"(?:[（(][^）)\r\n]{1,20}[）)]|(?:v(?:ersion)?)?\d+(?:\.\d+)*版?)?"
-    return any(
-        re.fullmatch(rf".*{re.escape(''.join(value.lower().split()))}{suffix}", normalized)
-        for value in available_types
-    )
+    for value in available_types:
+        match = re.fullmatch(
+            rf"(?P<prefix>.*){re.escape(''.join(value.lower().split()))}{suffix}",
+            normalized,
+        )
+        if match and _is_trusted_title_prefix(match.group("prefix")):
+            return True
+    return False
 
 
 def classify_contract_type(
@@ -113,8 +124,9 @@ def classify_contract_type(
     evidence: dict[str, list[str]] = {value: [] for value in types}
     primary: set[str] = set()
     headline_scored: set[str] = set()
+    trusted_headline_scored: set[str] = set()
 
-    trusted_name = name if not any(marker in name for marker in title_markers) else ""
+    trusted_name = name if _is_contract_title(name, types) else ""
     material_name = bool(_MATERIAL_SEMANTICS.search(name))
     material_title = bool(_MATERIAL_SEMANTICS.search(first_line))
     trusted_title = title if title_is_contract_type else ""
@@ -132,6 +144,7 @@ def classify_contract_type(
             if scores[value] > 0:
                 primary.add(value)
                 headline_scored.add(value)
+                trusted_headline_scored.add(value)
 
     # 文件名中的受控交易别名可以产生建议，但不足以单独自动放行。
     for value in types:
@@ -139,7 +152,7 @@ def classify_contract_type(
         if family and scores[value] == 0:
             name_hits = [
                 keyword for keyword in _TRADE_SIGNALS[family]
-                if keyword.lower() in trusted_name
+                if keyword.lower() in name
             ]
             if name_hits and not material_name:
                 scores[value] += 6
@@ -178,7 +191,12 @@ def classify_contract_type(
     margin = best.score - ranked[1].score if len(ranked) > 1 else best.score
     if margin < 4:
         confidence = min(confidence, 0.40 if margin == 0 else 0.55 if margin <= 1 else 0.70)
-    eligible = best.contract_type in primary and best.score >= 6 and margin >= 4
+    eligible = (
+        best.contract_type in trusted_headline_scored
+        and best.contract_type in primary
+        and best.score >= 6
+        and margin >= 4
+    )
     if material_name or material_title:
         eligible = False
     return TypeSuggestion(
