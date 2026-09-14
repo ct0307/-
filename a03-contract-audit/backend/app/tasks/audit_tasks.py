@@ -15,12 +15,13 @@ from typing import Callable
 
 from celery.signals import worker_ready
 from sqlalchemy import and_, exists, or_
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.models.models import AuditBatchItem, Contract, ImportBatchItem
 from app.llm.base import LLMError
 from app.services.audit.runner import StaleAuditRun, run_audit
-from app.services.audit.window_repository import TransientPersistenceError
+from app.services.audit.window_repository import TransientPersistenceError, is_transient_database_error
 from app.services.batch.service import (
     ACTIVE_AUDIT_ITEM_STATUSES,
     retry_failed_item,
@@ -43,10 +44,12 @@ def classify_task_error(exc: Exception) -> TaskErrorInfo:
     """把内部异常映射成可持久化、可展示的安全错误。"""
     if isinstance(exc, StaleAuditRun):
         return TaskErrorInfo("STALE_AUDIT_RUN", "审查任务已被更新的运行取代", False)
-    if isinstance(exc, TransientPersistenceError):
+    if isinstance(exc, TransientPersistenceError) or (
+        isinstance(exc, DBAPIError) and is_transient_database_error(exc)
+    ):
         return TaskErrorInfo(
             "AUDIT_PERSISTENCE_UNAVAILABLE",
-            "审查检查点暂时不可用，请稍后重试",
+            "审查数据存储暂时不可用，请稍后重试",
             True,
         )
     if isinstance(exc, LLMError):
@@ -162,7 +165,15 @@ def run_contract_audit(
     db = SessionLocal()
     execution_token: str | None = None
     audit_generation: int | None = None
+    claim_committed = False
     try:
+        # 与结果校验、发布及失败处理保持一致，避免重复投递形成循环等待。
+        contract = (
+            db.query(Contract)
+            .filter(Contract.id == contract_id)
+            .with_for_update()
+            .first()
+        )
         item = (
             db.query(AuditBatchItem)
             .filter(AuditBatchItem.id == batch_item_id)
@@ -173,12 +184,6 @@ def run_contract_audit(
         )
         if item and item.status in {"done", "review_required"}:
             return {"contract_id": contract_id, "status": f"already_{item.status}"}
-        contract = (
-            db.query(Contract)
-            .filter(Contract.id == contract_id)
-            .with_for_update()
-            .first()
-        )
         if not contract:
             if item:
                 item.status = "failed"
@@ -236,6 +241,8 @@ def run_contract_audit(
                 return {"contract_id": contract_id, "status": "stale"}
             db.commit()
 
+            claim_committed = True
+
         if item:
             promoted = db.query(AuditBatchItem).filter(
                 AuditBatchItem.id == item.id,
@@ -288,6 +295,11 @@ def run_contract_audit(
             exception_type=type(exc).__name__,
         )
         retries = int(getattr(self.request, "retries", 0))
+        if batch_item_id and not claim_committed:
+            # 尚未取得任务所有权，只重投瞬时失败，不能修改其他 worker 的状态。
+            if failure.retryable and retries < self.max_retries:
+                raise self.retry(exc=exc, countdown=10)
+            raise
         item = (
             db.query(AuditBatchItem)
             .filter(

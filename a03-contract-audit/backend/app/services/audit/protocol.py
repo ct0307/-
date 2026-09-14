@@ -3,7 +3,7 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-AUDIT_PROTOCOL_VERSION = "candidate-v2"
+AUDIT_PROTOCOL_VERSION = "candidate-v3"
 AUDIT_JSON_FORMAT = {"type": "json_object"}
 
 
@@ -33,8 +33,8 @@ class ReviewedRiskCandidate(RiskCandidate):
 class RiskEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
 
-    risks: list[RiskCandidate] = Field(default_factory=list, max_length=5)
-    has_more: bool = False
+    risks: list[RiskCandidate] = Field(max_length=5)
+    has_more: bool
 
 
 def parse_risk_envelope(text: str) -> RiskEnvelope:

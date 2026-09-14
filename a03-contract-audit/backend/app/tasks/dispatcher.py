@@ -18,6 +18,11 @@ def _run_local(contract_id: int, dimensions: list[str], item_id: int) -> None:
     from app.tasks.audit_tasks import run_contract_audit
 
     for attempt in range(4):
+        # 模拟 eager 执行上下文，使真实 retry 只抛信号而不投递消息队列。
+        run_contract_audit.push_request(
+            called_directly=False, is_eager=True, retries=attempt,
+            args=(contract_id, dimensions, item_id), kwargs={},
+        )
         try:
             run_contract_audit.run(contract_id, dimensions, item_id)
             return
@@ -25,6 +30,8 @@ def _run_local(contract_id: int, dimensions: list[str], item_id: int) -> None:
             if attempt == 3:
                 raise
             _sleep(min(2 ** attempt, 10))
+        finally:
+            run_contract_audit.pop_request()
 
 
 def dispatch_audit_ids(contract_id: int, dimensions: list[str], item_id: int) -> str:

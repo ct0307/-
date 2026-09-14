@@ -536,6 +536,7 @@ def _audit_response_from_item(
     issues = [value for value in issues if isinstance(value, dict)]
     coverage = safe_coverage(result.get("coverage"))
     retryable_codes = {
+        "AUDIT_PERSISTENCE_UNAVAILABLE",
         "DISPATCH_PENDING",
         "MODEL_TIMEOUT",
         "MODEL_UNAVAILABLE",

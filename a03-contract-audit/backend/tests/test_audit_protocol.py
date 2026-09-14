@@ -66,7 +66,7 @@ EXPECTED_REVIEW_ISSUE_CODES = {
 
 
 def test_protocol_constants_define_json_object_contract():
-    assert AUDIT_PROTOCOL_VERSION == "candidate-v2"
+    assert AUDIT_PROTOCOL_VERSION == "candidate-v3"
     assert AUDIT_JSON_FORMAT == {"type": "json_object"}
 
 
@@ -74,7 +74,7 @@ def test_parse_risk_envelope_accepts_valid_object_and_strips_strings():
     envelope = parse_risk_envelope(
         '{"risks":[{"level":" high ","category":" 付款风险 ",'
         '"quote":" 应在约定日期付款 ","reason":" 付款保障不足 ",'
-        '"suggestion":" 增加验收后付款条款 "}]}'
+        '"suggestion":" 增加验收后付款条款 "}],"has_more":false}'
     )
 
     candidate = envelope.risks[0]
@@ -100,13 +100,19 @@ def test_parse_risk_envelope_rejects_non_object_framing(text):
         parse_risk_envelope(text)
 
 
+@pytest.mark.parametrize("text", ['{}', '{"risks":[]}', '{"has_more":false}'])
+def test_parse_risk_envelope_requires_both_model_fields(text):
+    with pytest.raises(ValidationError):
+        parse_risk_envelope(text)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
-        {"unexpected": True},
-        {"risks": [risk_payload()] * 6},
-        {"risks": [risk_payload(level="critical")]},
-        {"risks": [risk_payload(quote="x" * 501)]},
+        {"risks": [], "has_more": False, "unexpected": True},
+        {"risks": [risk_payload()] * 6, "has_more": False},
+        {"risks": [risk_payload(level="critical")], "has_more": False},
+        {"risks": [risk_payload(quote="x" * 501)], "has_more": False},
     ],
 )
 def test_parse_risk_envelope_rejects_invalid_model_payload(payload):
@@ -392,11 +398,11 @@ def test_review_issue_rejects_overlong_window_id():
 
 
 def test_risk_envelope_enforces_exact_risk_limit():
-    envelope = RiskEnvelope.model_validate({"risks": [risk_payload()] * 5})
+    envelope = RiskEnvelope.model_validate({"risks": [risk_payload()] * 5, "has_more": False})
 
     assert len(envelope.risks) == 5
     with pytest.raises(ValidationError):
-        RiskEnvelope.model_validate({"risks": [risk_payload()] * 6})
+        RiskEnvelope.model_validate({"risks": [risk_payload()] * 6, "has_more": False})
 
 
 def test_agent_review_result_defaults_are_independent():
@@ -434,8 +440,8 @@ def test_all_protocol_models_enable_strict_validation(model):
 @pytest.mark.parametrize(
     "text",
     [
-        '{"has_more":"yes"}',
-        '{"has_more":"true"}',
+        '{"risks":[],"has_more":"yes"}',
+        '{"risks":[],"has_more":"true"}',
     ],
 )
 def test_risk_envelope_json_rejects_string_booleans(text):
@@ -485,7 +491,7 @@ def test_agent_review_result_and_risk_envelope_json_round_trip():
         candidates=[ReviewedRiskCandidate(**risk_payload(), source_window_id="window-1", source_clause_ids=["第一条"])],
         complete=True,
     )
-    risk_envelope = RiskEnvelope(risks=[RiskCandidate.model_validate(risk_payload())])
+    risk_envelope = RiskEnvelope(risks=[RiskCandidate.model_validate(risk_payload())], has_more=False)
 
     restored_agent_result = AgentReviewResult.model_validate_json(
         agent_result.model_dump_json()
@@ -501,4 +507,4 @@ def test_agent_review_result_and_risk_envelope_json_round_trip():
 @pytest.mark.parametrize("field,value", [("source_window_id", "forged"), ("source_clause_ids", ["伪造条款"])])
 def test_model_envelope_cannot_supply_system_provenance(field, value):
     with pytest.raises(ValidationError):
-        RiskEnvelope.model_validate({"risks": [risk_payload(**{field: value})]})
+        RiskEnvelope.model_validate({"risks": [risk_payload(**{field: value})], "has_more": False})

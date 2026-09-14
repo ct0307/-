@@ -25,16 +25,18 @@ class TransientPersistenceError(RuntimeError):
     """检查点存储暂时不可用，任务级重试可能恢复。"""
 
 
-def _raise_if_transient(error: DBAPIError) -> None:
+def is_transient_database_error(error: DBAPIError) -> bool:
+    """只识别连接失效和明确的数据库竞争，永久 SQL 错误不可重试。"""
     if error.connection_invalidated:
-        raise TransientPersistenceError("audit checkpoint unavailable") from None
+        return True
+    original = getattr(error, "orig", None)
+    sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    if sqlstate in {"40001", "40P01", "55P03"}:
+        return True
     if not isinstance(error, OperationalError):
-        return
-    details = " ".join(
-        value.lower()
-        for value in (str(error), str(getattr(error, "orig", "")))
-        if value
-    )
+        return False
+    # 包装异常含 SQL 和业务参数，只读取驱动错误，避免合同文本影响分类。
+    details = str(original).lower() if original is not None else ""
     transient_markers = (
         "database is locked",
         "database table is locked",
@@ -45,7 +47,11 @@ def _raise_if_transient(error: DBAPIError) -> None:
         "deadlock detected",
         "deadlock found",
     )
-    if any(marker in details for marker in transient_markers):
+    return any(marker in details for marker in transient_markers)
+
+
+def _raise_if_transient(error: DBAPIError) -> None:
+    if is_transient_database_error(error):
         raise TransientPersistenceError("audit checkpoint unavailable") from None
 
 

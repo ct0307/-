@@ -726,3 +726,244 @@ def test_local_dispatcher_executes_celery_retry_signal(monkeypatch):
     dispatcher._run_local(1, ["legal"], 9)
 
     assert attempts == 2
+
+
+def _task_fixture(*, active=False):
+    db = _session()
+    user = _user(db)
+    contract = Contract(
+        filename="lock-order.pdf", storage_path="/private/lock-order.pdf",
+        uploaded_by=user.id, department=user.department,
+        status="reviewing", audit_generation=1,
+    )
+    batch = AuditBatch(
+        owner_id=user.id, department=user.department, total=1,
+        idempotency_key="lock-order-test", request_fingerprint="a" * 64,
+    )
+    db.add_all([contract, batch])
+    db.flush()
+    item = AuditBatchItem(
+        batch_id=batch.id, contract_id=contract.id, filename=contract.filename,
+        status="reviewing" if active else "queued", audit_generation=1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=30) if active else None,
+        execution_token="original-token" if active else None,
+    )
+    db.add(item)
+    db.commit()
+    engine, contract_id, item_id = db.get_bind(), contract.id, item.id
+    db.close()
+    return engine, contract_id, item_id
+
+
+def test_duplicate_task_locks_contract_before_item_without_changing_owner(monkeypatch):
+    from sqlalchemy import event
+    from app.tasks import audit_tasks
+
+    engine, contract_id, item_id = _task_fixture(active=True)
+    locks = []
+    db = Session(engine)
+
+    def capture_locks(state):
+        if state.is_select and state.statement._for_update_arg is not None:
+            locks.extend(description["entity"] for description in state.statement.column_descriptions)
+
+    event.listen(db, "do_orm_execute", capture_locks)
+    monkeypatch.setattr(audit_tasks, "SessionLocal", lambda: db)
+    try:
+        result = audit_tasks.run_contract_audit.run(contract_id, [], item_id)
+        assert result["status"] == "already_running"
+        assert locks[:2] == [Contract, AuditBatchItem]
+        with Session(engine) as check:
+            item = check.get(AuditBatchItem, item_id)
+            assert item.status == "reviewing"
+            assert item.execution_token == "original-token"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("sqlstate", ["40P01", "40001", "55P03"])
+def test_database_contention_sqlstates_are_safe_and_retryable(sqlstate):
+    from sqlalchemy.exc import DBAPIError
+    from app.tasks.audit_tasks import classify_task_error
+
+    original = Exception("secret database details")
+    original.sqlstate = sqlstate
+    failure = classify_task_error(DBAPIError("secret SQL", {"secret": "value"}, original))
+    assert failure.code == "AUDIT_PERSISTENCE_UNAVAILABLE"
+    assert failure.retryable is True
+    assert "secret" not in failure.message
+
+
+@pytest.mark.parametrize("message", ["database is locked", "deadlock detected", "no such table: missing"])
+def test_database_contention_messages_do_not_retry_schema_errors(message):
+    from sqlalchemy.exc import OperationalError
+    from app.tasks.audit_tasks import classify_task_error
+
+    failure = classify_task_error(OperationalError("query", {}, Exception(message)))
+    assert failure.retryable is (message != "no such table: missing")
+
+
+def test_sql_parameters_cannot_turn_permanent_database_errors_into_retries():
+    from sqlalchemy.exc import OperationalError
+    from app.tasks.audit_tasks import classify_task_error
+
+    error = OperationalError(
+        "query", {"contract_text": "deadlock detected"}, Exception("no such table: missing")
+    )
+    assert classify_task_error(error).retryable is False
+
+
+@pytest.mark.parametrize("retries", [0, 3])
+def test_database_failure_before_claim_retries_without_publishing_failure(monkeypatch, retries):
+    from celery.exceptions import Retry
+    from sqlalchemy.exc import OperationalError
+    from app.tasks import audit_tasks
+
+    engine, contract_id, item_id = _task_fixture()
+    db = Session(engine)
+    real_query = db.query
+    calls = 0
+
+    def fail_first_query(*entities):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OperationalError("query", {}, Exception("deadlock detected"))
+        return real_query(*entities)
+
+    retry_calls = []
+
+    def retry(**kwargs):
+        retry_calls.append(kwargs)
+        raise Retry("retry database contention")
+
+    monkeypatch.setattr(db, "query", fail_first_query)
+    monkeypatch.setattr(audit_tasks, "SessionLocal", lambda: db)
+    monkeypatch.setattr(audit_tasks.run_contract_audit, "retry", retry)
+    audit_tasks.run_contract_audit.push_request(retries=retries)
+    try:
+        expected = Retry if retries == 0 else OperationalError
+        with pytest.raises(expected):
+            audit_tasks.run_contract_audit.run(contract_id, [], item_id)
+        assert len(retry_calls) == (1 if retries == 0 else 0)
+        with Session(engine) as check:
+            assert check.get(AuditBatchItem, item_id).status == "queued"
+            assert check.get(Contract, contract_id).status == "reviewing"
+    finally:
+        audit_tasks.run_contract_audit.pop_request()
+        engine.dispose()
+
+
+def test_database_failure_after_claim_requeues_owned_item(monkeypatch):
+    from celery.exceptions import Retry
+    from sqlalchemy.exc import OperationalError
+    from app.tasks import audit_tasks
+
+    engine, contract_id, item_id = _task_fixture()
+
+    def fail_audit(*args, **kwargs):
+        raise OperationalError("query", {}, Exception("deadlock detected"))
+
+    def retry(**kwargs):
+        raise Retry("retry database contention")
+
+    monkeypatch.setattr(audit_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(audit_tasks, "run_audit", fail_audit)
+    monkeypatch.setattr(audit_tasks.run_contract_audit, "retry", retry)
+    audit_tasks.run_contract_audit.push_request(retries=0)
+    try:
+        with pytest.raises(Retry):
+            audit_tasks.run_contract_audit.run(contract_id, [], item_id)
+        with Session(engine) as check:
+            item = check.get(AuditBatchItem, item_id)
+            assert item.status == "queued"
+            assert item.attempts == 1
+            assert item.execution_token is None
+            assert item.lease_expires_at is None
+            assert item.error_code == "AUDIT_PERSISTENCE_UNAVAILABLE"
+            assert check.get(Contract, contract_id).status != "audit_failed"
+    finally:
+        audit_tasks.run_contract_audit.pop_request()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("operation", ["flush", "commit"])
+def test_database_failure_during_claim_retries_without_publishing_failure(monkeypatch, operation):
+    from celery.exceptions import Retry
+    from sqlalchemy.exc import OperationalError
+    from app.tasks import audit_tasks
+
+    engine, contract_id, item_id = _task_fixture()
+    db = Session(engine)
+    original = getattr(db, operation)
+    failed = False
+
+    def fail_claim(*args, **kwargs):
+        nonlocal failed
+        changing_item = any(isinstance(value, AuditBatchItem) for value in db.dirty)
+        if not failed and (operation == "commit" or changing_item):
+            failed = True
+            raise OperationalError("query", {}, Exception("deadlock detected"))
+        return original(*args, **kwargs)
+
+    def retry(**kwargs):
+        raise Retry("retry database contention")
+
+    monkeypatch.setattr(db, operation, fail_claim)
+    monkeypatch.setattr(audit_tasks, "SessionLocal", lambda: db)
+    monkeypatch.setattr(audit_tasks.run_contract_audit, "retry", retry)
+    audit_tasks.run_contract_audit.push_request(retries=0)
+    try:
+        with pytest.raises(Retry):
+            audit_tasks.run_contract_audit.run(contract_id, [], item_id)
+        assert failed is True
+        with Session(engine) as check:
+            item = check.get(AuditBatchItem, item_id)
+            assert item.status == "queued"
+            assert item.execution_token is None
+            assert item.attempts == 0
+    finally:
+        audit_tasks.run_contract_audit.pop_request()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("failures", [1, 4])
+def test_local_dispatcher_uses_real_celery_retry_without_broker(monkeypatch, failures):
+    from sqlalchemy.exc import OperationalError
+    from app.tasks import audit_tasks, dispatcher
+
+    engine, contract_id, item_id = _task_fixture(active=True)
+    attempts = []
+    initial_request = audit_tasks.run_contract_audit.request
+
+    def session_factory():
+        db = Session(engine)
+        query = db.query
+        attempts.append(audit_tasks.run_contract_audit.request.retries)
+
+        def query_with_failure(*entities):
+            if len(attempts) <= failures:
+                raise OperationalError("query", {}, Exception("database is locked"))
+            return query(*entities)
+
+        db.query = query_with_failure
+        return db
+
+    def reject_broker(*args, **kwargs):
+        pytest.fail("本地重试不应向消息队列投递任务")
+
+    monkeypatch.setattr(audit_tasks, "SessionLocal", session_factory)
+    monkeypatch.setattr(audit_tasks.run_contract_audit, "apply_async", reject_broker)
+    monkeypatch.setattr(dispatcher, "_sleep", lambda _seconds: None)
+    try:
+        if failures == 4:
+            with pytest.raises(OperationalError):
+                dispatcher._run_local(contract_id, [], item_id)
+        else:
+            dispatcher._run_local(contract_id, [], item_id)
+        assert attempts == list(range(min(failures + 1, 4)))
+        assert audit_tasks.run_contract_audit.request is initial_request
+        with Session(engine) as check:
+            assert check.get(AuditBatchItem, item_id).execution_token == "original-token"
+    finally:
+        engine.dispose()

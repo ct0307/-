@@ -120,6 +120,13 @@ def test_protocol_version_is_isolated(store):
     assert repository(store, protocol_version="candidate-v1").load_valid(request()) == result()
 
 
+def test_current_protocol_does_not_reuse_permissive_v2_checkpoint(store):
+    repository(store, protocol_version="candidate-v2").save_valid(
+        request(), AgentReviewResult(complete=True)
+    )
+    assert repository(store).load_valid(request()) is None
+
+
 def test_default_repository_ignores_legacy_candidates_without_provenance(store):
     from app.services.audit.window_repository import dimensions_hash
 
@@ -147,7 +154,7 @@ def test_default_repository_ignores_legacy_candidates_without_provenance(store):
     assert current_repository.load_valid(current_request) == result()
     with store() as db:
         rows = db.scalars(select(models.AuditWindowRun)).all()
-        assert {row.protocol_version for row in rows} == {"candidate-v1", "candidate-v2"}
+        assert {row.protocol_version for row in rows} == {"candidate-v1", "candidate-v3"}
         legacy_row = next(row for row in rows if row.protocol_version == "candidate-v1")
         assert legacy_row.result_json == legacy_json
 

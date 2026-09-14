@@ -77,6 +77,24 @@ class MemoryCheckpoint:
         )
 
 
+@pytest.mark.parametrize("text", ['{}', '{"risks":[]}', '{"has_more":false}'])
+def test_missing_envelope_fields_never_complete_or_save_checkpoint(text):
+    from app.services.audit.review_pipeline import WindowReviewer
+    from app.services.audit.result_quality import AuditCoverage, decide_audit_status
+
+    adapter = FakeAdapter([LLMResponse(text=text, model="test")] * 2)
+    checkpoint = MemoryCheckpoint()
+    result = WindowReviewer(adapter, checkpoint=checkpoint).review(_request())
+
+    assert result.complete is False
+    assert result.completed_windows == 0
+    assert [issue.code for issue in result.issues] == ["INVALID_MODEL_OUTPUT"]
+    assert len(adapter.calls) == 2
+    assert checkpoint.saved == []
+    decision = decide_audit_status([], result.issues, AuditCoverage(1, 0))
+    assert decision.status != "done"
+
+
 def _window(text=None, window_id="window-root", clause_ids=None):
     return ContractWindow(
         window_id=window_id,
