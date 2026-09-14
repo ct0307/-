@@ -70,6 +70,7 @@ _AMOUNT_PATTERN = re.compile(
     r"((?:人民币\s*)?[￥¥]?\s*\d[\d,]*(?:\.\d+)?\s*(?:万元|元))"
 )
 _EXCLUDED_AMOUNT_TERMS = ("违约金", "赔偿", "保证金", "注册资本", "单价")
+_EXPLICIT_CONTRACT_AMOUNT_LABELS = ("合同总价", "合同金额", "合同总额", "合同价款")
 
 _DURATION_PATTERNS = (
     re.compile(
@@ -127,9 +128,13 @@ def _collect_amounts(text: str) -> list[_Candidate]:
         sentence_end = min(sentence_ends, default=len(text))
         sentence = text[sentence_start:sentence_end]
         local_prefix = text[max(sentence_start, match.start() - 16):match.start(1)]
+        label = text[match.start():match.start(1)]
         excluded_in_sentence = any(term in sentence for term in _EXCLUDED_AMOUNT_TERMS)
         excluded_near_label = any(term in local_prefix for term in _EXCLUDED_AMOUNT_TERMS)
-        if excluded_near_label or excluded_in_sentence:
+        explicit_contract_amount = any(
+            item in label for item in _EXPLICIT_CONTRACT_AMOUNT_LABELS
+        )
+        if excluded_near_label or (excluded_in_sentence and not explicit_contract_amount):
             continue
         candidates.append(_candidate(match, 0.98))
     return candidates
