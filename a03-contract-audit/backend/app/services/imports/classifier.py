@@ -87,8 +87,10 @@ def classify_contract_type(
     evidence: dict[str, list[str]] = {value: [] for value in types}
     primary: set[str] = set()
 
-    trusted_title = title if not any(marker in title for marker in ("附件", "条款")) else ""
-    for source in (name, trusted_title):
+    title_markers = ("附件", "条款")
+    trusted_name = name if not any(marker in name for marker in title_markers) else ""
+    trusted_title = title if not any(marker in title for marker in title_markers) else ""
+    for source in (trusted_name, trusted_title):
         matches = [value for value in types if value.lower() in source]
         # 同一标题中较长的类型优先，避免“技术服务合同”同时命中“服务合同”。
         for value in matches:
@@ -102,7 +104,10 @@ def classify_contract_type(
     for value in types:
         family = _family_for_type(value)
         if family and scores[value] == 0:
-            name_hits = [keyword for keyword in _TRADE_SIGNALS[family] if keyword.lower() in name]
+            name_hits = [
+                keyword for keyword in _TRADE_SIGNALS[family]
+                if keyword.lower() in trusted_name
+            ]
             if name_hits:
                 scores[value] += 6
                 evidence[value].extend(name_hits)

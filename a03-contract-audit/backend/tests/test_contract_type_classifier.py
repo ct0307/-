@@ -157,3 +157,27 @@ def test_purchase_order_filename_suggests_available_standard_type_without_auto_r
     assert result.suggested_type == "采购合同"
     assert result.candidates[0].score == 6
     assert result.auto_ready_eligible is False
+
+
+@pytest.mark.parametrize("filename", ["保密协议附件.pdf", "保密协议条款.pdf"])
+def test_attachment_or_clause_filename_is_only_weak_confidentiality_evidence(filename):
+    result = classify_contract_type(
+        filename=filename, text="双方对履约中知悉的信息承担普通保密义务。",
+        available_types=["保密协议", "采购合同"],
+    )
+
+    assert result.suggested_type == "保密协议"
+    assert result.candidates[0].score == 0.25
+    assert result.confidence < 0.60
+    assert result.auto_ready_eligible is False
+
+
+def test_plain_confidentiality_agreement_filename_remains_trusted():
+    result = classify_contract_type(
+        filename="保密协议.pdf", text="双方对履约中知悉的信息承担保密义务。",
+        available_types=["保密协议", "采购合同"],
+    )
+
+    assert result.suggested_type == "保密协议"
+    assert result.candidates[0].score >= 6
+    assert result.auto_ready_eligible is True
