@@ -341,8 +341,14 @@ def test_audit_task_updates_batch_item_and_forwards_dimensions(monkeypatch, tmp_
         batch_item_id=None,
         execution_token=None,
         deadline=None,
+        progress_callback=None,
     ):
         captured.append((dimensions or [], deadline))
+        claimed_item = _db.get(AuditBatchItem, batch_item_id)
+        assert claimed_item.progress == 5
+        assert claimed_item.progress_stage == "claimed"
+        assert progress_callback is not None
+        progress_callback(40, "reviewing")
         cross_checks = [{
             "id": "CC1",
             "from": "legal",
@@ -378,6 +384,8 @@ def test_audit_task_updates_batch_item_and_forwards_dimensions(monkeypatch, tmp_
         assert saved is not None
         assert saved.status == "done"
         assert saved.finished_at is not None
+        assert saved.progress == 40
+        assert saved.progress_stage == "reviewing"
         persisted_result = json.loads(saved.result_json)
         assert persisted_result["risk_count"] == 1
         assert persisted_result["cross_checks"][0]["id"] == "CC1"
@@ -868,6 +876,8 @@ def test_retry_reuses_persisted_dimensions_by_default(monkeypatch, tmp_path):
         contract_id=contract.id,
         filename=contract.filename,
         status="failed",
+        progress=68,
+        progress_stage="failed",
     )
     db.add(item)
     db.commit()
@@ -883,6 +893,9 @@ def test_retry_reuses_persisted_dimensions_by_default(monkeypatch, tmp_path):
     batches.retry_batch(batch.id, dimensions=None, db=db, user=user)
 
     assert dispatched == [["legal", "payment"]]
+    db.refresh(item)
+    assert item.progress == 68
+    assert item.progress_stage == "queued"
 
 
 def test_celery_schedules_periodic_orphan_recovery():

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.models.models import AuditBatchItem, Contract, ImportBatchItem
 from app.llm.base import LLMError
+from app.services.audit.progress import ProgressStage, publish_progress
 from app.services.audit.runner import StaleAuditRun, run_audit
 from app.services.audit.window_repository import TransientPersistenceError, is_transient_database_error
 from app.services.batch.service import (
@@ -73,6 +74,39 @@ def _lease_is_active(expires_at: datetime | None, now: datetime) -> bool:
     return expires_at > now
 
 
+def _progress_reporter(
+    *,
+    item_id: int,
+    contract_id: int,
+    generation: int,
+    execution_token: str,
+) -> Callable[[int, ProgressStage], None]:
+    def report(progress: int, stage: ProgressStage) -> None:
+        progress_db = SessionLocal()
+        try:
+            publish_progress(
+                progress_db,
+                item_id=item_id,
+                contract_id=contract_id,
+                generation=generation,
+                execution_token=execution_token,
+                progress=progress,
+                stage=stage,
+            )
+        except Exception as error:
+            progress_db.rollback()
+            log.warning(
+                "audit.progress_publish_failed",
+                item_id=item_id,
+                contract_id=contract_id,
+                exception_type=type(error).__name__,
+            )
+        finally:
+            progress_db.close()
+
+    return report
+
+
 def recover_orphaned_batch_items(
     *,
     session_factory: Callable[[], Session] | None = None,
@@ -118,6 +152,7 @@ def recover_orphaned_batch_items(
             try:
                 if item.status in ACTIVE_AUDIT_ITEM_STATUSES - {"queued"}:
                     item.status = "queued"
+                    item.progress_stage = "queued"
                     item.lease_expires_at = None
                     item.task_id = None
                     item.execution_token = None
@@ -187,6 +222,7 @@ def run_contract_audit(
         if not contract:
             if item:
                 item.status = "failed"
+                item.progress_stage = "failed"
                 item.error = "合同不存在"
                 item.finished_at = datetime.now(timezone.utc)
                 item.lease_expires_at = None
@@ -214,6 +250,8 @@ def run_contract_audit(
                 )
                 return {"contract_id": contract_id, "status": "stale"}
             item.status = transition_item(item.status, "parsing") if item.status == "queued" else "parsing"
+            item.progress = max(item.progress, 5)
+            item.progress_stage = "claimed"
             item.started_at = item.started_at or now
             item.lease_expires_at = now + timedelta(minutes=30)
             execution_token = uuid.uuid4().hex
@@ -266,6 +304,16 @@ def run_contract_audit(
             batch_item_id=item.id if item else None,
             execution_token=execution_token,
             deadline=audit_deadline,
+            progress_callback=(
+                _progress_reporter(
+                    item_id=item.id,
+                    contract_id=contract_id,
+                    generation=audit_generation,
+                    execution_token=execution_token,
+                )
+                if item and audit_generation is not None and execution_token
+                else None
+            ),
         )
         if item:
             if result["status"] in {"done", "review_required"}:
@@ -327,6 +375,7 @@ def run_contract_audit(
                 raise
             values = {
                 AuditBatchItem.status: failure_status,
+                AuditBatchItem.progress_stage: "failed",
                 AuditBatchItem.error_code: failure.code,
                 AuditBatchItem.error: failure.message,
                 AuditBatchItem.lease_expires_at: None,
@@ -335,6 +384,7 @@ def run_contract_audit(
             if should_retry:
                 decision = retry_failed_item(failure_status, attempts=failure_attempts)
                 values[AuditBatchItem.status] = decision.status
+                values[AuditBatchItem.progress_stage] = "queued"
                 values[AuditBatchItem.attempts] = decision.attempts
             else:
                 values[AuditBatchItem.finished_at] = datetime.now(timezone.utc)
@@ -425,6 +475,7 @@ def _finalize_stale_item(
     ).update(
         {
             AuditBatchItem.status: "failed",
+            AuditBatchItem.progress_stage: "failed",
             AuditBatchItem.error_code: "STALE_AUDIT_RUN",
             AuditBatchItem.error: "审查任务已被更新的运行取代",
             AuditBatchItem.execution_token: None,

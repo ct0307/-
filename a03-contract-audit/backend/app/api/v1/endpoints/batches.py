@@ -443,6 +443,7 @@ def retry_batch(
             continue
         decision = retry_failed_item(item.status, attempts=item.attempts)
         item.status = decision.status
+        item.progress_stage = "queued"
         item.attempts = decision.attempts
         item.error = None
         item.error_code = None

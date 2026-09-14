@@ -12,6 +12,7 @@ from app.models.models import AuditBatch, AuditBatchItem, Contract, LLMCallLog, 
 from app.schemas.batch import BatchItemOut
 from app.schemas.contract import AuditResponse
 from app.schemas.contract import AuditRequest
+from app.services.audit.progress import publish_progress
 
 
 def _session() -> Session:
@@ -753,6 +754,55 @@ def _task_fixture(*, active=False):
     engine, contract_id, item_id = db.get_bind(), contract.id, item.id
     db.close()
     return engine, contract_id, item_id
+
+
+def test_publish_progress_is_monotonic_and_fenced():
+    engine, contract_id, item_id = _task_fixture(active=True)
+    try:
+        with Session(engine) as db:
+            assert publish_progress(
+                db,
+                item_id=item_id,
+                contract_id=contract_id,
+                generation=1,
+                execution_token="original-token",
+                progress=40,
+                stage="reviewing",
+            )
+            assert not publish_progress(
+                db,
+                item_id=item_id,
+                contract_id=contract_id,
+                generation=1,
+                execution_token="original-token",
+                progress=40,
+                stage="reviewing",
+            )
+            assert publish_progress(
+                db,
+                item_id=item_id,
+                contract_id=contract_id,
+                generation=1,
+                execution_token="original-token",
+                progress=20,
+                stage="verifying",
+            )
+            assert not publish_progress(
+                db,
+                item_id=item_id,
+                contract_id=contract_id,
+                generation=1,
+                execution_token="stale-token",
+                progress=80,
+                stage="reviewing",
+            )
+
+        with Session(engine) as db:
+            saved = db.get(AuditBatchItem, item_id)
+            assert saved.progress == 40
+            assert saved.progress_stage == "verifying"
+    finally:
+        engine.dispose()
 
 
 def test_duplicate_task_locks_contract_before_item_without_changing_owner(monkeypatch):
