@@ -306,3 +306,25 @@ def test_filename_and_first_line_same_title_only_score_once():
     )
 
     assert result.candidates[0].score == 6
+
+
+@pytest.mark.parametrize("filename", ["采购合同审核说明.pdf", "采购合同模板范本.pdf"])
+def test_material_filename_cannot_auto_ready(filename):
+    result = classify_contract_type(
+        filename=filename, text="双方承担保密义务和违约责任。",
+        available_types=["采购合同", "保密协议"],
+    )
+
+    assert result.suggested_type != "采购合同" or result.candidates[0].score < 6
+    assert result.auto_ready_eligible is False
+
+
+@pytest.mark.parametrize("title", ["关于选用采购合同", "采购合同复核记录", "采购合同说明"])
+def test_material_title_cannot_auto_ready(title):
+    result = classify_contract_type(
+        filename="scan.pdf", text=title + "\n双方承担保密义务。",
+        available_types=["采购合同", "保密协议"],
+    )
+
+    assert result.suggested_type != "采购合同" or result.candidates[0].score < 6
+    assert result.auto_ready_eligible is False

@@ -60,6 +60,7 @@ _NARRATIVE_TITLE_PATTERN = re.compile(
     r"(?:甲乙双方|双方|甲方|乙方).{0,24}"
     r"(?:约定|签订|订立|向|由|承担|交付|支付|收取|提供|销售)"
 )
+_MATERIAL_SEMANTICS = re.compile(r"审核|说明|模板|范本|复核|选用|记录|意见")
 
 
 def _family_for_type(contract_type: str) -> str | None:
@@ -80,6 +81,7 @@ def _is_contract_title(line: str, available_types: list[str]) -> bool:
     if (
         len(normalized) > 64
         or any(marker in normalized for marker in ("附件", "条款"))
+        or _MATERIAL_SEMANTICS.search(normalized)
         or _NARRATIVE_TITLE_PATTERN.search(normalized)
     ):
         return False
@@ -113,6 +115,8 @@ def classify_contract_type(
     headline_scored: set[str] = set()
 
     trusted_name = name if not any(marker in name for marker in title_markers) else ""
+    material_name = bool(_MATERIAL_SEMANTICS.search(name))
+    material_title = bool(_MATERIAL_SEMANTICS.search(first_line))
     trusted_title = title if title_is_contract_type else ""
     for source in (trusted_name, trusted_title):
         matches = [value for value in types if value.lower() in source]
@@ -122,9 +126,11 @@ def classify_contract_type(
                 continue
             if value in headline_scored:
                 continue
-            scores[value] += 6
+            if not ((source == trusted_name and material_name) or (source == trusted_title and material_title)):
+                scores[value] += 6
             evidence[value].append(value)
-            primary.add(value)
+            if scores[value] > 0:
+                primary.add(value)
             headline_scored.add(value)
 
     # 文件名中的受控交易别名可以产生建议，但不足以单独自动放行。
@@ -135,7 +141,7 @@ def classify_contract_type(
                 keyword for keyword in _TRADE_SIGNALS[family]
                 if keyword.lower() in trusted_name
             ]
-            if name_hits:
+            if name_hits and not material_name:
                 scores[value] += 6
                 evidence[value].extend(name_hits)
                 headline_scored.add(value)
@@ -172,7 +178,10 @@ def classify_contract_type(
     margin = best.score - ranked[1].score if len(ranked) > 1 else best.score
     if margin < 4:
         confidence = min(confidence, 0.40 if margin == 0 else 0.55 if margin <= 1 else 0.70)
+    eligible = best.contract_type in primary and best.score >= 6 and margin >= 4
+    if material_name or material_title:
+        eligible = False
     return TypeSuggestion(
         best.contract_type, confidence, list(best.evidence), ranked,
-        best.contract_type in primary and best.score >= 6 and margin >= 4,
+        eligible,
     )
