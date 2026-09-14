@@ -1,9 +1,12 @@
 """离线 OCR 适配层：限制资源消耗，并保留识别质量信息。"""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import json
 import math
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -90,6 +93,58 @@ class RapidOCREngine:
             scores = [float(line[2]) for line in lines if len(line) >= 3]
         confidence = sum(scores) / len(scores) if scores else 0.0
         return "\n".join(texts).strip(), confidence
+
+
+def _model_sha256(path: Path) -> str:
+    with path.open("rb") as model_file:
+        return hashlib.file_digest(model_file, "sha256").hexdigest()
+
+
+def offline_rapidocr_params(*, model_dir: Path | None = None) -> dict[str, object]:
+    """校验 RapidOCR 3.9.2 包内 ONNX 模型并显式返回本地模型路径。"""
+    import rapidocr
+    from rapidocr.inference_engine.base import FileInfo, InferSession
+    from rapidocr.utils.typings import EngineType, ModelType, OCRVersion, TaskType
+
+    model_dir = model_dir or Path(rapidocr.__file__).resolve().parent / "models"
+    specs = (
+        ("Det.model_path", FileInfo(EngineType.ONNXRUNTIME, OCRVersion.PPOCRV6, TaskType.DET, "ch", ModelType.SMALL)),
+        ("Cls.model_path", FileInfo(EngineType.ONNXRUNTIME, OCRVersion.PPOCRV4, TaskType.CLS, "ch", ModelType.MOBILE)),
+        ("Rec.model_path", FileInfo(EngineType.ONNXRUNTIME, OCRVersion.PPOCRV6, TaskType.REC, "ch", ModelType.SMALL)),
+    )
+    params: dict[str, object] = {}
+    for parameter, file_info in specs:
+        metadata = InferSession.get_model_url(file_info)
+        model_path = model_dir / Path(metadata["model_dir"]).name
+        if not model_path.is_file() or _model_sha256(model_path) != metadata["SHA256"]:
+            raise RuntimeError("OCR 本地模型不可用")
+        params[parameter] = str(model_path)
+    return params
+
+
+@contextmanager
+def block_rapidocr_downloads():
+    """仅在初始化期间拦截 RapidOCR 3.9.2 的实际 HTTP 下载入口。"""
+    from rapidocr.utils.download_file import DownloadFile
+
+    original = DownloadFile.__dict__["_make_http_request"]
+
+    def blocked_download(_cls, *_args, **_kwargs):
+        raise RuntimeError("OCR 初始化禁止联网下载模型")
+
+    DownloadFile._make_http_request = classmethod(blocked_download)
+    try:
+        yield
+    finally:
+        DownloadFile._make_http_request = original
+
+
+def create_offline_ocr_engine(*, model_dir: Path | None = None) -> RapidOCREngine:
+    """创建已验证模型的 OCR 引擎；生产 worker 和自检均使用此路径。"""
+    engine = RapidOCREngine(params=offline_rapidocr_params(model_dir=model_dir))
+    with block_rapidocr_downloads():
+        engine._load()
+    return engine
 
 
 def _recognize(engine: EngineLike, image: bytes) -> tuple[str, float]:

@@ -6,10 +6,16 @@ import importlib.util
 import json
 import subprocess
 import sys
+from threading import Condition, Lock
+from time import monotonic
 
 
 _SELF_TEST_PREFIX = b"A03_OCR_SELF_TEST_V1="
 _SELF_TEST_TIMEOUT_SECONDS = 20
+_STRICT_PROBE_CACHE_TTL_SECONDS = 10.0
+_strict_probe_condition = Condition(Lock())
+_strict_probe_inflight = False
+_strict_probe_cache: tuple[OCRReadiness, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -29,7 +35,44 @@ def probe_ocr_runtime(*, strict: bool = False) -> OCRReadiness:
         return OCRReadiness(False, "ocr_unavailable", "OCR 运行依赖不可用")
     if not strict:
         return OCRReadiness(True)
-    return _probe_ocr_self_test()
+    return _probe_strict_runtime_once()
+
+
+def _probe_strict_runtime_once() -> OCRReadiness:
+    """严格自检单飞，并缓存成功与失败结果十秒。"""
+    global _strict_probe_inflight, _strict_probe_cache
+    with _strict_probe_condition:
+        while True:
+            now = monotonic()
+            if _strict_probe_cache is not None and _strict_probe_cache[1] > now:
+                return _strict_probe_cache[0]
+            if not _strict_probe_inflight:
+                _strict_probe_inflight = True
+                break
+            _strict_probe_condition.wait()
+
+    try:
+        result = _probe_ocr_self_test()
+    except BaseException:
+        with _strict_probe_condition:
+            _strict_probe_inflight = False
+            _strict_probe_condition.notify_all()
+        raise
+
+    with _strict_probe_condition:
+        _strict_probe_cache = (result, monotonic() + _STRICT_PROBE_CACHE_TTL_SECONDS)
+        _strict_probe_inflight = False
+        _strict_probe_condition.notify_all()
+    return result
+
+
+def _reset_strict_probe_cache() -> None:
+    """供测试隔离严格探测缓存；浅探测没有缓存。"""
+    global _strict_probe_inflight, _strict_probe_cache
+    with _strict_probe_condition:
+        _strict_probe_inflight = False
+        _strict_probe_cache = None
+        _strict_probe_condition.notify_all()
 
 
 def _probe_ocr_self_test() -> OCRReadiness:
@@ -48,7 +91,10 @@ def _probe_ocr_self_test() -> OCRReadiness:
     except subprocess.TimeoutExpired:
         _terminate_and_reap(process)
         return OCRReadiness(False, "ocr_self_test_timeout", "OCR 自检超时")
-    except BaseException:
+    except (KeyboardInterrupt, SystemExit):
+        _terminate_and_reap(process)
+        raise
+    except Exception:
         _terminate_and_reap(process)
         return OCRReadiness(False, "ocr_self_test_failed", "OCR 自检失败")
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from dataclasses import asdict
-import hashlib
 import json
-from pathlib import Path
+import os
+import socket
 import sys
 import time
 
@@ -15,6 +15,9 @@ from app.services.parser.ocr import (
     RapidOCREngine,
     _WORKER_RESULT_PREFIX,
     _ocr_pdf_bytes_in_process,
+    block_rapidocr_downloads as _block_rapidocr_downloads,
+    create_offline_ocr_engine,
+    offline_rapidocr_params as _offline_rapidocr_params,
 )
 
 
@@ -69,56 +72,38 @@ def _self_test_image() -> bytes:
         document.close()
 
 
-def _model_sha256(path: Path) -> str:
-    with path.open("rb") as model_file:
-        return hashlib.file_digest(model_file, "sha256").hexdigest()
-
-
-def _offline_rapidocr_params(*, model_dir: Path | None = None) -> dict[str, object]:
-    """使用 RapidOCR 3.9.2 清单校验包内 ONNX 模型，拒绝缺失或损坏模型。"""
-    import rapidocr
-    from rapidocr.inference_engine.base import FileInfo, InferSession
-    from rapidocr.utils.typings import EngineType, ModelType, OCRVersion, TaskType
-
-    model_dir = model_dir or Path(rapidocr.__file__).resolve().parent / "models"
-    specs = (
-        ("Det.model_path", FileInfo(EngineType.ONNXRUNTIME, OCRVersion.PPOCRV6, TaskType.DET, "ch", ModelType.SMALL)),
-        ("Cls.model_path", FileInfo(EngineType.ONNXRUNTIME, OCRVersion.PPOCRV4, TaskType.CLS, "ch", ModelType.MOBILE)),
-        ("Rec.model_path", FileInfo(EngineType.ONNXRUNTIME, OCRVersion.PPOCRV6, TaskType.REC, "ch", ModelType.SMALL)),
-    )
-    params: dict[str, object] = {}
-    for parameter, file_info in specs:
-        metadata = InferSession.get_model_url(file_info)
-        model_path = model_dir / Path(metadata["model_dir"]).name
-        if not model_path.is_file() or _model_sha256(model_path) != metadata["SHA256"]:
-            raise RuntimeError("OCR 自检本地模型不可用")
-        params[parameter] = str(model_path)
-    return params
+def _create_self_test_engine() -> RapidOCREngine:
+    return create_offline_ocr_engine()
 
 
 @contextmanager
-def _block_rapidocr_downloads():
-    """仅在自检初始化期间拦截 RapidOCR 3.9.2 的实际 HTTP 下载入口。"""
-    from rapidocr.utils.download_file import DownloadFile
+def _block_network_when_requested():
+    """测试模式下封锁 socket 连接，并记录任何联网尝试。"""
+    if os.environ.get("A03_OCR_SELF_TEST_BLOCK_NETWORK") != "1":
+        yield None
+        return
 
-    original = DownloadFile.__dict__["_make_http_request"]
+    attempts = 0
+    original_connect = socket.socket.connect
+    original_create_connection = socket.create_connection
 
-    def blocked_download(_cls, *_args, **_kwargs):
-        raise RuntimeError("OCR 自检禁止联网下载模型")
+    def blocked_connect(_socket, *_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise OSError("OCR 自检测试禁止网络连接")
 
-    DownloadFile._make_http_request = classmethod(blocked_download)
+    def blocked_create_connection(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise OSError("OCR 自检测试禁止网络连接")
+
+    socket.socket.connect = blocked_connect
+    socket.create_connection = blocked_create_connection
     try:
-        yield
+        yield lambda: attempts
     finally:
-        DownloadFile._make_http_request = original
-
-
-def _create_self_test_engine() -> RapidOCREngine:
-    params = _offline_rapidocr_params()
-    engine = RapidOCREngine(params=params)
-    with _block_rapidocr_downloads():
-        engine._load()
-    return engine
+        socket.socket.connect = original_connect
+        socket.create_connection = original_create_connection
 
 
 def _run_self_test(engine: RapidOCREngine | None = None) -> dict[str, object]:
@@ -140,7 +125,11 @@ def main() -> int:
     args = parser.parse_args()
     if args.self_test:
         try:
-            _write_self_test_payload(_run_self_test())
+            with _block_network_when_requested() as network_attempts:
+                payload = _run_self_test()
+                if network_attempts is not None:
+                    payload["network_attempts"] = network_attempts()
+            _write_self_test_payload(payload)
             return 0
         except Exception:
             _write_self_test_payload({"ready": False})
@@ -151,7 +140,7 @@ def main() -> int:
     try:
         result = _ocr_pdf_bytes_in_process(
             data,
-            engine=RapidOCREngine(),
+            engine=create_offline_ocr_engine(),
             page_indices=_parse_page_indices(args.page_indices),
             max_pages=args.max_pages,
             max_page_pixels=args.max_page_pixels,

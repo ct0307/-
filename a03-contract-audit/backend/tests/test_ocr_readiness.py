@@ -1,10 +1,16 @@
 import io
+import json
+import os
 import subprocess
+import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 from app.services.parser import ocr_worker
+from app.services.parser import readiness
+from app.services.parser.ocr import OCRResult
 from app.services.parser.readiness import OCRReadiness, probe_ocr_runtime
 
 
@@ -58,6 +64,16 @@ def _dependencies_present(monkeypatch):
     monkeypatch.setattr(
         "app.services.parser.readiness.importlib.util.find_spec", lambda _name: object()
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_strict_probe_cache():
+    reset = getattr(readiness, "_reset_strict_probe_cache", None)
+    if reset is not None:
+        reset()
+    yield
+    if reset is not None:
+        reset()
 
 
 def test_readiness_is_frozen_and_serializable():
@@ -277,3 +293,131 @@ def test_offline_download_guard_blocks_rapidocr_download_entry(monkeypatch):
             DownloadFile._make_http_request("https://example.invalid", object())
 
     assert calls == []
+
+
+def test_production_worker_uses_shared_offline_engine_factory(monkeypatch):
+    engine = object()
+    monkeypatch.setattr(ocr_worker, "create_offline_ocr_engine", lambda: engine)
+    monkeypatch.setattr(
+        ocr_worker,
+        "_ocr_pdf_bytes_in_process",
+        lambda data, *, engine, **_kwargs: OCRResult("ok", 1, 1.0),
+    )
+    monkeypatch.setattr(
+        ocr_worker.sys,
+        "stdin",
+        type("Input", (), {"buffer": io.BytesIO(b"not a real pdf")})(),
+    )
+    monkeypatch.setattr(
+        ocr_worker.sys,
+        "argv",
+        [
+            "ocr_worker",
+            "--max-pages", "1",
+            "--max-page-pixels", "1",
+            "--dpi", "36",
+            "--timeout-seconds", "1",
+            "--min-confidence", "0",
+        ],
+    )
+    stdout = io.BytesIO()
+    monkeypatch.setattr(ocr_worker.sys, "stdout", type("Output", (), {"buffer": stdout})())
+
+    assert ocr_worker.main() == 0
+    assert b'A03_OCR_RESULT_V1={"ok": true' in stdout.getvalue()
+
+
+def test_shared_offline_factory_rejects_missing_model_before_any_download(monkeypatch, tmp_path):
+    from app.services.parser import ocr
+    from rapidocr.utils.download_file import DownloadFile
+
+    calls = []
+    monkeypatch.setattr(
+        DownloadFile,
+        "_make_http_request",
+        classmethod(lambda *_args, **_kwargs: calls.append(True)),
+    )
+
+    with pytest.raises(RuntimeError, match="本地模型"):
+        ocr.create_offline_ocr_engine(model_dir=Path(tmp_path))
+
+    assert calls == []
+
+
+def test_strict_probe_single_flight_and_caches_failed_result(monkeypatch):
+    _dependencies_present(monkeypatch)
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow_failed_probe():
+        calls.append(True)
+        started.set()
+        assert release.wait(timeout=2)
+        return OCRReadiness(False, "ocr_self_test_failed", "OCR 自检失败")
+
+    monkeypatch.setattr(readiness, "_probe_ocr_self_test", slow_failed_probe)
+    results = []
+    first = threading.Thread(target=lambda: results.append(probe_ocr_runtime(strict=True)))
+    second = threading.Thread(target=lambda: results.append(probe_ocr_runtime(strict=True)))
+
+    first.start()
+    assert started.wait(timeout=1)
+    second.start()
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert calls == [True]
+    assert results == [
+        OCRReadiness(False, "ocr_self_test_failed", "OCR 自检失败"),
+        OCRReadiness(False, "ocr_self_test_failed", "OCR 自检失败"),
+    ]
+    assert probe_ocr_runtime(strict=True) == results[0]
+    assert calls == [True]
+    assert probe_ocr_runtime(strict=False) == OCRReadiness(True)
+
+
+@pytest.mark.parametrize("interrupt", (KeyboardInterrupt, SystemExit))
+def test_strict_probe_reaps_and_reraises_process_interrupt(monkeypatch, interrupt):
+    _dependencies_present(monkeypatch)
+
+    class InterruptProcess(_Process):
+        def communicate(self, input=None, timeout=None):
+            self.calls.append((input, timeout))
+            if not self.terminated:
+                raise interrupt()
+            self.returncode = 0
+            return b"", b""
+
+    process = InterruptProcess(returncode=None)
+    monkeypatch.setattr(readiness.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(interrupt):
+        probe_ocr_runtime(strict=True)
+
+    assert process.terminated is True
+    assert process.poll() == 0
+
+
+def test_real_worker_self_test_blocks_all_network_attempts(monkeypatch):
+    environment = os.environ.copy()
+    environment["A03_OCR_SELF_TEST_BLOCK_NETWORK"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-m", "app.services.parser.ocr_worker", "--self-test"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+    line = next(
+        item
+        for item in completed.stdout.splitlines()
+        if item.startswith(b"A03_OCR_SELF_TEST_V1=")
+    )
+    payload = json.loads(line.removeprefix(b"A03_OCR_SELF_TEST_V1=").decode("utf-8"))
+    assert payload["ready"] is True
+    assert payload["network_attempts"] == 0
