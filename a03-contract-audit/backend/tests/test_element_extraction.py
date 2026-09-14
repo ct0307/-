@@ -134,6 +134,9 @@ def test_amount_exclusions_use_the_whole_semantic_sentence_before_selecting_tota
         "合同总价为100万元，其中履约保证金为10万元。",
         "合同金额为100万元，违约金按合同金额的20%计算。",
         "合同总价为100万元，不含履约保证金。",
+        "不含履约保证金的合同总价为100万元。",
+        "扣除履约保证金后，合同总价为100万元。",
+        "注册资本仅用于主体说明，合同金额为100万元。",
     ],
 )
 def test_explicit_contract_total_survives_later_excluded_terms_in_same_sentence(text):

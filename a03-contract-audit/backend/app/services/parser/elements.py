@@ -134,7 +134,7 @@ def _collect_amounts(text: str) -> list[_Candidate]:
         explicit_contract_amount = any(
             item in label for item in _EXPLICIT_CONTRACT_AMOUNT_LABELS
         )
-        if excluded_near_label or (excluded_in_sentence and not explicit_contract_amount):
+        if not explicit_contract_amount and (excluded_near_label or excluded_in_sentence):
             continue
         candidates.append(_candidate(match, 0.98))
     return candidates
