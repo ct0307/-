@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import lzma
 import os
 import re
 import struct
@@ -110,6 +111,7 @@ def _validate_docx(content: bytes) -> None:
         RuntimeError,
         UnicodeDecodeError,
         EOFError,
+        lzma.LZMAError,
         NotImplementedError,
         struct.error,
         zlib.error,

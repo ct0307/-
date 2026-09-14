@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile, ZipInfo
+from zipfile import ZIP_DEFLATED, ZIP_LZMA, ZIP_STORED, ZipFile, ZipInfo
 
 import fitz
 import pytest
@@ -37,6 +37,20 @@ def _docx_bytes_with_corrupt_deflated_member() -> bytes:
         member = archive.getinfo("word/document.xml")
     data_offset = member.header_offset + 30 + len(member.orig_filename) + len(member.extra)
     content[data_offset] ^= 0xFF
+    return bytes(content)
+
+
+def _docx_bytes_with_corrupt_lzma_member() -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_LZMA) as archive:
+        archive.writestr("[Content_Types].xml", "<xml />")
+        archive.writestr("word/document.xml", b"contract body" * 200)
+
+    content = bytearray(output.getvalue())
+    with ZipFile(BytesIO(content)) as archive:
+        member = archive.getinfo("word/document.xml")
+    data_offset = member.header_offset + 30 + len(member.orig_filename) + len(member.extra)
+    content[data_offset + 4] ^= 0xFF
     return bytes(content)
 
 
@@ -241,6 +255,12 @@ def test_rejects_docx_with_corrupt_zip_member():
 
 def test_rejects_docx_when_deflate_member_raises_zlib_error():
     error = _validation_error("contract.docx", _docx_bytes_with_corrupt_deflated_member())
+
+    assert error.code == "DOCX_CORRUPT"
+
+
+def test_rejects_docx_when_lzma_member_raises_lzma_error():
+    error = _validation_error("contract.docx", _docx_bytes_with_corrupt_lzma_member())
 
     assert error.code == "DOCX_CORRUPT"
 
