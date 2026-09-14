@@ -66,18 +66,25 @@ def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
             process.communicate(timeout=2)
             return
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()
+            pass
+        except BaseException:
+            if process.poll() is not None:
+                return
+        process.kill()
+        process.communicate()
     except BaseException:
         return
 
 
 def _parse_self_test_result(stdout: bytes) -> OCRReadiness:
-    lines = stdout.splitlines()
-    if len(lines) != 1 or not lines[0].startswith(_SELF_TEST_PREFIX):
+    line = next(
+        (item for item in reversed(stdout.splitlines()) if item.startswith(_SELF_TEST_PREFIX)),
+        None,
+    )
+    if line is None:
         return OCRReadiness(False, "ocr_self_test_failed", "OCR 自检失败")
     try:
-        payload = json.loads(lines[0][len(_SELF_TEST_PREFIX):].decode("utf-8"))
+        payload = json.loads(line[len(_SELF_TEST_PREFIX):].decode("utf-8"))
         latency_ms = payload["latency_ms"]
         if (
             not isinstance(payload, dict)

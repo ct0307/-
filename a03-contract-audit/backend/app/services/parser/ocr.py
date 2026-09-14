@@ -55,8 +55,9 @@ EngineLike = OCREngine | Callable[[bytes], tuple[str, float]]
 class RapidOCREngine:
     """RapidOCR 3.x 懒加载适配器，避免应用启动时强制加载模型。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, params: dict[str, object] | None = None) -> None:
         self._engine: object | None = None
+        self._params = params
 
     def _load(self) -> object:
         if self._engine is not None:
@@ -68,7 +69,7 @@ class RapidOCREngine:
                 "RapidOCR 未安装，扫描件无法解析；请安装交付清单中固定版本的 OCR 依赖"
             ) from exc
         try:
-            self._engine = RapidOCR()
+            self._engine = RapidOCR(params=self._params)
         except Exception as exc:
             raise OCRUnavailable(f"RapidOCR 模型加载失败: {exc}") from exc
         return self._engine

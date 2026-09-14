@@ -9,6 +9,7 @@ from app.core.config import (
 )
 from app.main import app
 from app.api.v1.endpoints.runtime import PublicRuntimeStatus
+from app.services.parser.readiness import OCRReadiness
 
 
 client = TestClient(app)
@@ -155,6 +156,31 @@ def test_preflight_requests_fresh_model_and_strict_ocr_probe(monkeypatch):
 
     assert response.status_code == 200
     assert calls == [{"refresh_model": True, "strict_ocr": True}]
+
+
+def test_preflight_returns_503_when_strict_ocr_probe_is_not_ready(monkeypatch):
+    model_calls: list[bool] = []
+    ocr_calls: list[bool] = []
+
+    monkeypatch.setattr(main_module, "collect_database_readiness", lambda: {"ready": True})
+
+    def model_readiness(*, refresh):
+        model_calls.append(refresh)
+        return {"ready": True, "status": "online"}
+
+    def ocr_readiness(*, strict):
+        ocr_calls.append(strict)
+        return OCRReadiness(False, "ocr_unavailable", "OCR 运行依赖不可用")
+
+    monkeypatch.setattr(main_module, "collect_model_readiness", model_readiness)
+    monkeypatch.setattr(main_module, "probe_ocr_runtime", ocr_readiness)
+
+    response = client.get("/health/preflight")
+
+    assert response.status_code == 503
+    assert model_calls == [True]
+    assert ocr_calls == [True]
+    assert response.json()["checks"]["ocr"]["error_code"] == "ocr_unavailable"
 
 
 def test_deepseek_configuration_requires_api_key():

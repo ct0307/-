@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import asdict
-from io import BytesIO
+import hashlib
 import json
+from pathlib import Path
 import sys
 import time
 
@@ -54,35 +56,74 @@ def _write_self_test_payload(payload: dict[str, object]) -> None:
     sys.stdout.buffer.flush()
 
 
-def _self_test_font():
-    from PIL import ImageFont
-
-    candidates = (
-        "DejaVuSans.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    )
-    for candidate in candidates:
-        try:
-            return ImageFont.truetype(candidate, 64)
-        except OSError:
-            continue
-    raise RuntimeError("OCR 自检未找到可用字体")
-
-
 def _self_test_image() -> bytes:
-    from PIL import Image, ImageDraw
+    import fitz
 
-    image = Image.new("RGB", (1200, 260), "white")
-    ImageDraw.Draw(image).text((60, 80), "CONTRACT 10000", fill="black", font=_self_test_font())
-    output = BytesIO()
-    image.save(output, format="PNG")
-    return output.getvalue()
+    document = fitz.open()
+    try:
+        page = document.new_page(width=600, height=130)
+        page.insert_text((60, 80), "CONTRACT 10000", fontsize=36, fontname="helv")
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        return pixmap.tobytes("png")
+    finally:
+        document.close()
+
+
+def _model_sha256(path: Path) -> str:
+    with path.open("rb") as model_file:
+        return hashlib.file_digest(model_file, "sha256").hexdigest()
+
+
+def _offline_rapidocr_params(*, model_dir: Path | None = None) -> dict[str, object]:
+    """使用 RapidOCR 3.9.2 清单校验包内 ONNX 模型，拒绝缺失或损坏模型。"""
+    import rapidocr
+    from rapidocr.inference_engine.base import FileInfo, InferSession
+    from rapidocr.utils.typings import EngineType, ModelType, OCRVersion, TaskType
+
+    model_dir = model_dir or Path(rapidocr.__file__).resolve().parent / "models"
+    specs = (
+        ("Det.model_path", FileInfo(EngineType.ONNXRUNTIME, OCRVersion.PPOCRV6, TaskType.DET, "ch", ModelType.SMALL)),
+        ("Cls.model_path", FileInfo(EngineType.ONNXRUNTIME, OCRVersion.PPOCRV4, TaskType.CLS, "ch", ModelType.MOBILE)),
+        ("Rec.model_path", FileInfo(EngineType.ONNXRUNTIME, OCRVersion.PPOCRV6, TaskType.REC, "ch", ModelType.SMALL)),
+    )
+    params: dict[str, object] = {}
+    for parameter, file_info in specs:
+        metadata = InferSession.get_model_url(file_info)
+        model_path = model_dir / Path(metadata["model_dir"]).name
+        if not model_path.is_file() or _model_sha256(model_path) != metadata["SHA256"]:
+            raise RuntimeError("OCR 自检本地模型不可用")
+        params[parameter] = str(model_path)
+    return params
+
+
+@contextmanager
+def _block_rapidocr_downloads():
+    """仅在自检初始化期间拦截 RapidOCR 3.9.2 的实际 HTTP 下载入口。"""
+    from rapidocr.utils.download_file import DownloadFile
+
+    original = DownloadFile.__dict__["_make_http_request"]
+
+    def blocked_download(_cls, *_args, **_kwargs):
+        raise RuntimeError("OCR 自检禁止联网下载模型")
+
+    DownloadFile._make_http_request = classmethod(blocked_download)
+    try:
+        yield
+    finally:
+        DownloadFile._make_http_request = original
+
+
+def _create_self_test_engine() -> RapidOCREngine:
+    params = _offline_rapidocr_params()
+    engine = RapidOCREngine(params=params)
+    with _block_rapidocr_downloads():
+        engine._load()
+    return engine
 
 
 def _run_self_test(engine: RapidOCREngine | None = None) -> dict[str, object]:
     started = time.monotonic()
-    text, confidence = (engine or RapidOCREngine()).recognize(_self_test_image())
+    text, confidence = (engine or _create_self_test_engine()).recognize(_self_test_image())
     if "CONTRACT" not in text.upper() or confidence <= 0:
         raise RuntimeError("OCR 自检识别结果不符合预期")
     return {"ready": True, "latency_ms": round((time.monotonic() - started) * 1000)}

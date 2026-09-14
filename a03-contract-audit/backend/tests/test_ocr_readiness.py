@@ -1,5 +1,6 @@
 import io
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -8,22 +9,39 @@ from app.services.parser.readiness import OCRReadiness, probe_ocr_runtime
 
 
 class _Process:
-    def __init__(self, stdout=b"", stderr=b"", returncode=0, timeout=False, terminate_timeout=False):
+    def __init__(
+        self,
+        stdout=b"",
+        stderr=b"",
+        returncode=0,
+        timeout=False,
+        terminate_timeout=False,
+        pipe_error=False,
+        cleanup_error=False,
+    ):
         self.stdout = stdout
         self.stderr = stderr
         self.returncode = returncode
         self.timeout = timeout
         self.terminate_timeout = terminate_timeout
+        self.pipe_error = pipe_error
+        self.cleanup_error = cleanup_error
         self.terminated = False
         self.killed = False
         self.calls = []
 
     def communicate(self, input=None, timeout=None):
         self.calls.append((input, timeout))
+        if self.pipe_error and not self.terminated:
+            raise RuntimeError("pipe failed")
         if self.timeout and not self.terminated:
             raise subprocess.TimeoutExpired("ocr-self-test", timeout)
         if self.terminate_timeout and self.terminated and not self.killed:
             raise subprocess.TimeoutExpired("ocr-self-test", timeout)
+        if self.cleanup_error and self.terminated and not self.killed:
+            raise RuntimeError("cleanup pipe failed")
+        if self.killed:
+            self.returncode = -9
         return self.stdout, self.stderr
 
     def poll(self):
@@ -81,6 +99,21 @@ def test_shallow_probe_does_not_load_model_when_dependencies_exist(monkeypatch):
     assert probe_ocr_runtime() == OCRReadiness(ready=True)
 
 
+def test_shallow_probe_reports_missing_onnxruntime_without_starting_worker(monkeypatch):
+    def find_spec(name):
+        return None if name == "onnxruntime" else object()
+
+    monkeypatch.setattr("app.services.parser.readiness.importlib.util.find_spec", find_spec)
+    monkeypatch.setattr(
+        "app.services.parser.readiness.subprocess.Popen",
+        lambda *_args, **_kwargs: pytest.fail("shallow probe must not start a worker"),
+    )
+
+    result = probe_ocr_runtime()
+
+    assert result == OCRReadiness(False, "ocr_unavailable", "OCR 运行依赖不可用")
+
+
 def test_strict_probe_runs_self_test_and_parses_fixed_protocol(monkeypatch):
     _dependencies_present(monkeypatch)
     process = _Process(b'A03_OCR_SELF_TEST_V1={"ready":true,"latency_ms":9}\n')
@@ -95,6 +128,25 @@ def test_strict_probe_runs_self_test_and_parses_fixed_protocol(monkeypatch):
     assert result == OCRReadiness(ready=True, latency_ms=9)
     assert commands[0][0][-1:] == ["--self-test"]
     assert process.calls == [(b"", 20)]
+
+
+def test_strict_probe_uses_last_protocol_marker_and_ignores_worker_logs(monkeypatch):
+    _dependencies_present(monkeypatch)
+    process = _Process(
+        b"engine initializing\nA03_OCR_SELF_TEST_V1={\"ready\":false}\n"
+        b"engine done\nA03_OCR_SELF_TEST_V1={\"ready\":true,\"latency_ms\":5}\n"
+    )
+    monkeypatch.setattr("app.services.parser.readiness.subprocess.Popen", lambda *_args, **_kwargs: process)
+
+    assert probe_ocr_runtime(strict=True) == OCRReadiness(ready=True, latency_ms=5)
+
+
+def test_strict_probe_rejects_invalid_protocol_json(monkeypatch):
+    _dependencies_present(monkeypatch)
+    process = _Process(b"A03_OCR_SELF_TEST_V1={not json}\n")
+    monkeypatch.setattr("app.services.parser.readiness.subprocess.Popen", lambda *_args, **_kwargs: process)
+
+    assert probe_ocr_runtime(strict=True) == OCRReadiness(False, "ocr_self_test_failed", "OCR 自检失败")
 
 
 def test_strict_probe_maps_startup_failure_to_unavailable(monkeypatch):
@@ -120,6 +172,19 @@ def test_strict_probe_times_out_and_reaps_process(monkeypatch):
     assert process.terminated is True
     assert process.killed is True
     assert len(process.calls) == 3
+
+
+def test_strict_probe_reaps_process_after_regular_pipe_error(monkeypatch):
+    _dependencies_present(monkeypatch)
+    process = _Process(returncode=None, pipe_error=True, cleanup_error=True)
+    monkeypatch.setattr("app.services.parser.readiness.subprocess.Popen", lambda *_args, **_kwargs: process)
+
+    result = probe_ocr_runtime(strict=True)
+
+    assert result == OCRReadiness(False, "ocr_self_test_failed", "OCR 自检失败")
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.poll() is not None
 
 
 @pytest.mark.parametrize(
@@ -149,7 +214,7 @@ def test_worker_self_test_uses_in_memory_image_and_does_not_read_stdin(monkeypat
             assert image
             return "CONTRACT 10000", 0.99
 
-    monkeypatch.setattr(ocr_worker, "RapidOCREngine", Engine)
+    monkeypatch.setattr(ocr_worker, "_create_self_test_engine", lambda: Engine())
     monkeypatch.setattr(ocr_worker.sys, "stdin", type("BlockedStdin", (), {"buffer": type("B", (), {"read": lambda self: pytest.fail("stdin read")})()})())
     monkeypatch.setattr(ocr_worker.sys, "argv", ["ocr_worker", "--self-test"])
     stdout = io.BytesIO()
@@ -165,10 +230,50 @@ def test_worker_self_test_reports_recognition_failure_with_fixed_protocol(monkey
         def recognize(self, image):
             return "other text", 0.99
 
-    monkeypatch.setattr(ocr_worker, "RapidOCREngine", Engine)
+    monkeypatch.setattr(ocr_worker, "_create_self_test_engine", lambda: Engine())
     monkeypatch.setattr(ocr_worker.sys, "argv", ["ocr_worker", "--self-test"])
     stdout = io.BytesIO()
     monkeypatch.setattr(ocr_worker.sys, "stdout", type("Out", (), {"buffer": stdout})())
 
     assert ocr_worker.main() == 2
     assert stdout.getvalue() == b'A03_OCR_SELF_TEST_V1={"ready": false}\n'
+
+
+def test_self_test_image_does_not_import_system_font_library(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "PIL.ImageFont", None)
+
+    assert ocr_worker._self_test_image().startswith(b"\x89PNG")
+
+
+def test_offline_model_resolution_rejects_missing_model_without_downloading(monkeypatch, tmp_path):
+    calls = []
+
+    def network_request(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("network must not be used")
+
+    from rapidocr.utils.download_file import DownloadFile
+
+    monkeypatch.setattr(DownloadFile, "_make_http_request", classmethod(network_request))
+
+    with pytest.raises(RuntimeError, match="本地模型"):
+        ocr_worker._offline_rapidocr_params(model_dir=Path(tmp_path))
+
+    assert calls == []
+
+
+def test_offline_download_guard_blocks_rapidocr_download_entry(monkeypatch):
+    calls = []
+
+    def network_request(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("network must not be used")
+
+    from rapidocr.utils.download_file import DownloadFile
+
+    monkeypatch.setattr(DownloadFile, "_make_http_request", classmethod(network_request))
+    with ocr_worker._block_rapidocr_downloads():
+        with pytest.raises(RuntimeError, match="禁止联网"):
+            DownloadFile._make_http_request("https://example.invalid", object())
+
+    assert calls == []
