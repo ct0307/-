@@ -328,3 +328,14 @@ def test_material_title_cannot_auto_ready(title):
 
     assert result.suggested_type != "采购合同" or result.candidates[0].score < 6
     assert result.auto_ready_eligible is False
+
+
+def test_material_filename_does_not_block_body_trade_candidate():
+    result = classify_contract_type(
+        filename="采购合同审核说明.pdf", text="甲方采购设备并交付。",
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert result.suggested_type == "采购合同"
+    assert result.candidates[0].score == 3
+    assert result.auto_ready_eligible is False

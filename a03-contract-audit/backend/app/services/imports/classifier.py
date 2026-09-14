@@ -131,7 +131,7 @@ def classify_contract_type(
             evidence[value].append(value)
             if scores[value] > 0:
                 primary.add(value)
-            headline_scored.add(value)
+                headline_scored.add(value)
 
     # 文件名中的受控交易别名可以产生建议，但不足以单独自动放行。
     for value in types:
