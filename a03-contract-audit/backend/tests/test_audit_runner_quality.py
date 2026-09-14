@@ -70,6 +70,34 @@ def test_low_confidence_ocr_requires_review_without_publishing_quality_risk(
     assert risks == []
 
 
+def test_audit_does_not_overwrite_existing_element_review_with_clean_decision(
+    monkeypatch, db: Session
+):
+    contract = _contract(db, "element-conflict.txt")
+    contract.requires_review = True
+    contract.review_reason = "关键要素冲突，请人工确认"
+    contract.status = "review_required"
+    db.commit()
+    parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    monkeypatch.setattr(
+        runner,
+        "audit_contract",
+        lambda *_args, **_kwargs: {
+            "risks": [], "cross_checks": [], "issues": [],
+            "coverage": {"planned": 1, "completed": 1},
+        },
+    )
+
+    result = run_audit(db, contract)
+    db.refresh(contract)
+
+    assert result["status"] == "review_required"
+    assert result["requires_review"] is True
+    assert contract.status == "review_required"
+    assert contract.review_reason == "关键要素冲突，请人工确认"
+
+
 def test_native_high_quality_contract_finishes_without_quality_risk(
     monkeypatch, db: Session
 ):

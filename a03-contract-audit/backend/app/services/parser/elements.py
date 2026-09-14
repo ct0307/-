@@ -40,6 +40,7 @@ class ElementResult:
 @dataclass(frozen=True)
 class _Candidate:
     value: str
+    raw_text: str
     start: int
     end: int
     confidence: float
@@ -47,12 +48,12 @@ class _Candidate:
 
 _PARTY_PATTERNS = {
     "party_a": re.compile(
-        r"(?:甲\s*方|采购方|采购人|委托方|出租方)"
-        r"(?:\s*[（(][^）)\n]{0,20}[）)])?\s*[：:]\s*([^\n，,；;。]{2,80})"
+        r"(?:甲[ \t]*方|采购方|采购人|委托方|出租方)"
+        r"(?:[ \t]*[（(][^）)\n]{0,20}[）)])?[ \t]*[：:][ \t]*([^\n，,；;。]{2,80})"
     ),
     "party_b": re.compile(
-        r"(?:乙\s*方|供应方|供应商|受托方|承租方)"
-        r"(?:\s*[（(][^）)\n]{0,20}[）)])?\s*[：:]\s*([^\n，,；;。]{2,80})"
+        r"(?:乙[ \t]*方|供应方|供应商|受托方|承租方)"
+        r"(?:[ \t]*[（(][^）)\n]{0,20}[）)])?[ \t]*[：:][ \t]*([^\n，,；;。]{2,80})"
     ),
 }
 
@@ -71,6 +72,15 @@ _AMOUNT_PATTERN = re.compile(
 )
 _EXCLUDED_AMOUNT_TERMS = ("违约金", "赔偿", "保证金", "注册资本", "单价")
 _EXPLICIT_CONTRACT_AMOUNT_LABELS = ("合同总价", "合同金额", "合同总额", "合同价款")
+_NON_CONTRACT_AMOUNT_CONTEXT = ("设备清单", "材料清单", "物料清单", "清单")
+_AMOUNT_ALIAS_LABELS = (
+    "成交含税价", "暂估采购额", "定作报酬", "采购额", "含税价", "服务报酬",
+    "开发经费", "签约合同价", "包干总价", "监理酬金", "年度服务费用", "场地使用费",
+    "租赁本金", "转购价", "暂估保险费", "服务费",
+)
+_BARE_MONEY_PATTERN = re.compile(
+    r"((?:人民币\s*)?[￥¥]?\s*\d[\d,]*(?:\.\d+)?\s*(?:万元|元))"
+)
 
 _DURATION_PATTERNS = (
     re.compile(
@@ -93,17 +103,47 @@ _NUMBERED_PAYMENT_NODE = re.compile(
 )
 
 
-def _candidate(match: re.Match[str], confidence: float) -> _Candidate:
+def _normalize_amount(value: str) -> str:
+    return re.sub(r"\s+", "", value)
+
+
+def _normalize_duration(value: str) -> str:
+    value = re.sub(r"\s+", "", value)
+    value = re.sub(
+        r"(\d{4})年(\d{1,2})月(\d{1,2})日?",
+        lambda match: f"{match.group(1)}-{int(match.group(2))}-{int(match.group(3))}",
+        value,
+    )
+    value = value.replace("至", "至").replace("到", "至").replace("—", "至")
+    return value
+
+
+def _candidate(
+    match: re.Match[str],
+    confidence: float,
+    *,
+    normalize=lambda value: value,
+) -> _Candidate:
     start, end = match.span(1)
     raw = match.group(1)
     left_trimmed = len(raw) - len(raw.lstrip())
-    value = raw.strip()
+    raw_text = raw.strip()
+    value = normalize(raw_text)
     start += left_trimmed
-    return _Candidate(value=value, start=start, end=start + len(value), confidence=confidence)
+    return _Candidate(value=value, raw_text=raw_text, start=start, end=start + len(raw_text), confidence=confidence)
 
 
-def _collect_scalar(pattern: re.Pattern[str], text: str, confidence: float) -> list[_Candidate]:
-    return [_candidate(match, confidence) for match in pattern.finditer(text)]
+def _collect_scalar(
+    pattern: re.Pattern[str],
+    text: str,
+    confidence: float,
+    *,
+    normalize=lambda value: value,
+) -> list[_Candidate]:
+    return [
+        _candidate(match, confidence, normalize=normalize)
+        for match in pattern.finditer(text)
+    ]
 
 
 def _collect_subjects(text: str) -> list[_Candidate]:
@@ -127,23 +167,47 @@ def _collect_amounts(text: str) -> list[_Candidate]:
         ]
         sentence_end = min(sentence_ends, default=len(text))
         sentence = text[sentence_start:sentence_end]
-        local_prefix = text[max(sentence_start, match.start() - 16):match.start(1)]
+        local_prefix = text[max(sentence_start, match.start() - 24):match.start(1)]
         label = text[match.start():match.start(1)]
         excluded_in_sentence = any(term in sentence for term in _EXCLUDED_AMOUNT_TERMS)
         excluded_near_label = any(term in local_prefix for term in _EXCLUDED_AMOUNT_TERMS)
         explicit_contract_amount = any(
             item in label for item in _EXPLICIT_CONTRACT_AMOUNT_LABELS
         )
-        if not explicit_contract_amount and (excluded_near_label or excluded_in_sentence):
+        weak_material_context = any(
+            item in text[max(sentence_start, match.start() - 16):match.start()]
+            for item in _NON_CONTRACT_AMOUNT_CONTEXT
+        )
+        if not explicit_contract_amount and (excluded_near_label or excluded_in_sentence or weak_material_context):
             continue
-        candidates.append(_candidate(match, 0.98))
-    return candidates
+        confidence = 0.99 if explicit_contract_amount else 0.90
+        candidate = _candidate(match, confidence, normalize=_normalize_amount)
+        candidates.append(candidate)
+    alias_pattern = re.compile("|".join(map(re.escape, _AMOUNT_ALIAS_LABELS)))
+    for label_match in alias_pattern.finditer(text):
+        segment_end = min(
+            next((text.find(mark, label_match.end()) for mark in "。；;" if text.find(mark, label_match.end()) >= 0), len(text)),
+            label_match.end() + 100,
+        )
+        money_match = _BARE_MONEY_PATTERN.search(text, label_match.end(), segment_end)
+        if money_match is None:
+            continue
+        candidate = _Candidate(
+            value=_normalize_amount(money_match.group(1).strip()),
+            raw_text=money_match.group(1).strip(),
+            start=money_match.start(1),
+            end=money_match.end(1),
+            confidence=0.94,
+        )
+        if not any(existing.start == candidate.start for existing in candidates):
+            candidates.append(candidate)
+    return sorted(candidates, key=lambda item: (-item.confidence, item.start))
 
 
 def _collect_durations(text: str) -> list[_Candidate]:
     candidates: list[_Candidate] = []
     for pattern in _DURATION_PATTERNS:
-        for candidate in _collect_scalar(pattern, text, 0.95):
+        for candidate in _collect_scalar(pattern, text, 0.95, normalize=_normalize_duration):
             if any(
                 candidate.start < existing.end and existing.start < candidate.end
                 for existing in candidates
@@ -168,6 +232,7 @@ def _collect_payment_section(text: str, section_start: int, section_end: int) ->
     nodes = [
         _Candidate(
             value=match.group(1).strip(),
+            raw_text=match.group(1).strip(),
             start=section_start + match.start(1),
             end=section_start + match.start(1) + len(match.group(1).strip()),
             confidence=0.92,
@@ -190,7 +255,7 @@ def _collect_payment_section(text: str, section_start: int, section_end: int) ->
             continue
         left_trimmed = len(part.group(0)) - len(part.group(0).lstrip())
         start = base_start + part.start() + left_trimmed
-        candidates.append(_Candidate(value, start, start + len(value), 0.90))
+        candidates.append(_Candidate(value, value, start, start + len(value), 0.90))
     return candidates
 
 
@@ -211,17 +276,37 @@ def _collect_payment_terms(text: str) -> list[_Candidate]:
     return candidates
 
 
+def _payment_conflicts(candidates: list[_Candidate]) -> bool:
+    stages = ("预付款", "首付款", "启动款", "签约", "发货", "到货", "验收", "终验", "尾款", "质保", "进度")
+    grouped: dict[str, set[str]] = {}
+    for item in candidates:
+        stage = next((word for word in stages if word in item.value), "__unscoped__")
+        grouped.setdefault(stage, set()).add(_normalized(item.value))
+    return any(len(values) > 1 for values in grouped.values())
+
+
 def legacy_element_values(
     values: dict[str, str | list[str] | None],
-) -> dict[str, str | None]:
+    *,
+    text: str | None = None,
+) -> dict[str, object]:
     """把结构化值转换为现有持久化、API、报表和前端可消费的扁平形状。"""
-    legacy: dict[str, str | None] = {}
+    legacy: dict[str, object] = {}
     for field, value in values.items():
         if isinstance(value, list):
             rendered = "；".join(item.strip() for item in value if item.strip())
             legacy[field] = rendered or None
         else:
             legacy[field] = value
+    if text is not None:
+        sign_date = re.search(
+            r"(?:签订|签署)(?:日期|时间|于)?[：:]?\s*(\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2})",
+            text,
+        )
+        legacy["sign_date"] = sign_date.group(1).strip() if sign_date else None
+        legacy["text_length"] = len(text)
+        legacy["has_breach_clause"] = "违约" in text
+        legacy["has_dispute_clause"] = bool(re.search(r"争议(?:解决|处理)|仲裁|诉讼", text))
     return legacy
 
 
@@ -287,10 +372,14 @@ def _scalar_result(
     if not candidates:
         return None, None, False
     selected = candidates[0]
-    ambiguous = len({_normalized(item.value) for item in candidates}) > 1
+    page = _page_for(selected, spans, parsed)
+    ambiguous = (
+        len({_normalized(item.value) for item in candidates}) > 1
+        or (bool(parsed.blocks) and page is None)
+    )
     evidence = ElementEvidence(
-        raw_text=selected.value,
-        page=_page_for(selected, spans, parsed),
+        raw_text=selected.raw_text,
+        page=page,
         start=selected.start,
         end=selected.end,
         confidence=selected.confidence,
@@ -325,18 +414,24 @@ def extract_element_result(parsed: DocumentParseResult) -> ElementResult:
     payment_candidates = _collect_payment_terms(text)
     values["payment_terms"] = [item.value for item in payment_candidates]
     if payment_candidates:
+        payment_conflict = _payment_conflicts(payment_candidates) or any(
+            bool(parsed.blocks) and _page_for(item, spans, parsed) is None
+            for item in payment_candidates
+        )
         evidence["payment_terms"] = [
             ElementEvidence(
-                raw_text=item.value,
+                raw_text=item.raw_text,
                 page=_page_for(item, spans, parsed),
                 start=item.start,
                 end=item.end,
                 confidence=item.confidence,
                 source="rule",
-                validation="valid",
+                validation="ambiguous" if payment_conflict else "valid",
             )
             for item in payment_candidates
         ]
+        if payment_conflict:
+            review_fields.append("payment_terms")
 
     return ElementResult(
         values=values,

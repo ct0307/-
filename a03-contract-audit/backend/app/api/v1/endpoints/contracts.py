@@ -222,7 +222,7 @@ def batch_upload_contracts(
                 parsed = extract_document(stored_path)
                 apply_parse_quality(contract, parsed)
                 element_result = extract_element_result(parsed)
-                elements = legacy_element_values(element_result.values)
+                elements = legacy_element_values(element_result.values, text=parsed.text)
                 requires_review, review_reason = merge_element_review(parsed, element_result)
                 contract.requires_review = requires_review
                 contract.review_reason = review_reason
@@ -391,7 +391,7 @@ def parse_contract(
         apply_parse_quality(contract, parsed)
         # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
         element_result = extract_element_result(parsed)
-        elements = legacy_element_values(element_result.values)
+        elements = legacy_element_values(element_result.values, text=parsed.text)
         requires_review, review_reason = merge_element_review(parsed, element_result)
         contract.requires_review = requires_review
         contract.review_reason = review_reason

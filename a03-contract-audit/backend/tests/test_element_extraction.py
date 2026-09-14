@@ -95,6 +95,36 @@ def test_each_scalar_field_has_a_positive_rule_and_evidence(text, field, expecte
     _assert_evidence(result, field, page=1)
 
 
+def test_party_role_does_not_capture_a_cross_line_legal_representative_label():
+    result = extract_element_result(_parsed("甲方：\n法定代表人：张三\n乙方：乙公司"))
+
+    assert result.values["party_a"] is None
+    assert "party_a" not in result.evidence
+
+
+def test_material_total_is_not_contract_amount_but_later_strong_contract_total_is():
+    result = extract_element_result(_parsed(
+        "设备清单总金额100万元，明细以附件为准。\n本合同总价200万元。"
+    ))
+
+    assert result.values["amount"] == "200万元"
+    assert result.evidence["amount"].validation == "valid"
+
+
+def test_payment_amount_conflict_requires_review_but_clear_multi_node_schedule_does_not():
+    result = extract_element_result(_parsed(
+        "付款方式：合同签订后支付30%预付款。\n"
+        "付款安排：合同签订后支付50%预付款。"
+    ))
+
+    assert result.values["payment_terms"] == [
+        "合同签订后支付30%预付款",
+        "合同签订后支付50%预付款",
+    ]
+    assert "payment_terms" in result.review_fields
+    assert all(item.validation == "ambiguous" for item in result.evidence["payment_terms"])
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -288,6 +318,92 @@ def test_repeated_value_uses_normalized_block_order_to_find_the_correct_page():
     assert result.values["amount"] == "100万元"
     assert evidence.page == 2
     assert result.source_text[evidence.start:evidence.end] == evidence.raw_text
+
+
+def test_cross_block_duration_is_ambiguous_when_no_single_page_contains_the_range():
+    text = "合同期限自2026-10-1至2027-3-31"
+    parsed = DocumentParseResult(
+        text=text,
+        source="native",
+        blocks=(
+            DocumentBlock("p1", "page_text", "合同期限自2026-10-1至", SourceAnchor(page_number=1)),
+            DocumentBlock("p2", "page_text", "2027-3-31", SourceAnchor(page_number=2)),
+        ),
+    )
+
+    result = extract_element_result(parsed)
+
+    assert result.evidence["duration"].page is None
+    assert result.evidence["duration"].validation == "ambiguous"
+    assert "duration" in result.review_fields
+
+
+def test_unmapped_clean_text_evidence_is_ambiguous_not_valid():
+    parsed = DocumentParseResult(
+        text="合同金额：人民币1,286,000元",
+        source="native",
+        blocks=(DocumentBlock(
+            "garbled",
+            "page_text",
+            "合同金 额：人民币1,280,000元",
+            SourceAnchor(page_number=2),
+        ),),
+    )
+
+    result = extract_element_result(parsed)
+
+    assert result.evidence["amount"].page is None
+    assert result.evidence["amount"].validation == "ambiguous"
+    assert "amount" in result.review_fields
+
+
+def test_amount_and_date_values_normalize_equivalent_spacing_and_separators():
+    result = extract_element_result(_parsed(
+        "合同金额：人民币 1,286,000 元。合同期限：2026年10月1日至2027年3月31日。"
+    ))
+
+    assert result.values["amount"] == "人民币1,286,000元"
+    assert result.values["duration"] == "2026-10-1至2027-3-31"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("成交含税价：\n人民币948000元", "人民币948000元"),
+        ("暂估采购额：人民币220万元", "人民币220万元"),
+        ("定作报酬：人民币1320万元（含税）", "人民币1320万元"),
+    ],
+)
+def test_controlled_amount_aliases_capture_following_bare_money(text, expected):
+    result = extract_element_result(_parsed(text))
+
+    assert result.values["amount"] == expected
+    _assert_evidence(result, "amount", page=1)
+
+
+def test_legacy_api_result_retains_signals_when_called_through_structured_result(monkeypatch):
+    parsed = _parsed("甲方：甲公司\n签署日期：2026-10-1\n违约责任：按约承担。")
+    monkeypatch.setattr(contracts, "extract_document", lambda _path: parsed)
+    engine = _db()
+    with Session(engine) as db:
+        user = User(username="compat", password_hash="x", role="legal", department="法务部")
+        db.add(user)
+        db.flush()
+        contract = Contract(
+            filename="compat.txt",
+            storage_path="compat.txt",
+            uploaded_by=user.id,
+            department=user.department,
+        )
+        db.add(contract)
+        db.commit()
+
+        response = contracts.parse_contract(contract.id, db=db, user=user)
+
+        assert response.elements["sign_date"] == "2026-10-1"
+        assert response.elements["text_length"] == len(parsed.text)
+        assert response.elements["has_breach_clause"] is True
+    engine.dispose()
 
 
 def _db():

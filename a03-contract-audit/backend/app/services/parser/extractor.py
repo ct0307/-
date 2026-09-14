@@ -514,14 +514,7 @@ def extract_elements(text: str) -> dict:
     from app.services.parser.elements import extract_element_result, legacy_element_values
 
     result = extract_element_result(DocumentParseResult(text=text, source="native"))
-    elements = legacy_element_values(result.values)
-    sign_date = re.search(_SIGN_DATE_PATTERN, text)
-    elements["sign_date"] = sign_date.group(1).strip() if sign_date else None
-
-    # 附带一些供审查器使用的信号
-    elements["text_length"] = len(text)  # type: ignore[assignment]
-    elements["has_breach_clause"] = bool(re.search(r"违约(?:责任|金|条款)", text))  # type: ignore[assignment]
-    elements["has_dispute_clause"] = bool(re.search(r"争议(?:解决|处理)|仲裁|诉讼", text))  # type: ignore[assignment]
+    elements = legacy_element_values(result.values, text=text)
     fields = [
         field for field in (*result.values, "sign_date")
         if elements[field] not in (None, [])

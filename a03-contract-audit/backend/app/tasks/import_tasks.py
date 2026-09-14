@@ -45,7 +45,7 @@ def parse_import_item(item_id: int) -> dict:
             parsed = extract_document(item.contract.storage_path)
             apply_parse_quality(item.contract, parsed)
             element_result = extract_element_result(parsed)
-            elements = legacy_element_values(element_result.values)
+            elements = legacy_element_values(element_result.values, text=parsed.text)
             requires_review, review_reason = merge_element_review(parsed, element_result)
             item.contract.requires_review = requires_review
             item.contract.review_reason = review_reason
