@@ -344,6 +344,48 @@ def test_shared_offline_factory_rejects_missing_model_before_any_download(monkey
     assert calls == []
 
 
+def test_worker_missing_local_models_reports_unavailable_without_network_or_path(monkeypatch, tmp_path):
+    import rapidocr
+    from app.services.imports.errors import parse_failure
+    from app.services.parser.ocr import _parse_worker_result
+    from rapidocr.utils.download_file import DownloadFile
+
+    downloads = []
+    monkeypatch.setattr(rapidocr, "__file__", str(tmp_path / "rapidocr" / "__init__.py"))
+    monkeypatch.setattr(
+        DownloadFile,
+        "_make_http_request",
+        classmethod(lambda *_args, **_kwargs: downloads.append(True)),
+    )
+    monkeypatch.setattr(
+        ocr_worker.sys,
+        "stdin",
+        type("Input", (), {"buffer": io.BytesIO(b"not a real pdf")})(),
+    )
+    monkeypatch.setattr(
+        ocr_worker.sys,
+        "argv",
+        [
+            "ocr_worker",
+            "--max-pages", "1",
+            "--max-page-pixels", "1",
+            "--dpi", "36",
+            "--timeout-seconds", "1",
+            "--min-confidence", "0",
+        ],
+    )
+    stdout = io.BytesIO()
+    monkeypatch.setattr(ocr_worker.sys, "stdout", type("Output", (), {"buffer": stdout})())
+
+    assert ocr_worker.main() == 2
+    assert downloads == []
+    assert b"OCRUnavailable" in stdout.getvalue()
+    assert str(tmp_path).encode() not in stdout.getvalue()
+    with pytest.raises(Exception) as caught:
+        _parse_worker_result(stdout.getvalue())
+    assert parse_failure(caught.value).code == "OCR_UNAVAILABLE"
+
+
 def test_strict_probe_single_flight_and_caches_failed_result(monkeypatch):
     _dependencies_present(monkeypatch)
     started = threading.Event()

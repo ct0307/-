@@ -116,8 +116,12 @@ def offline_rapidocr_params(*, model_dir: Path | None = None) -> dict[str, objec
     for parameter, file_info in specs:
         metadata = InferSession.get_model_url(file_info)
         model_path = model_dir / Path(metadata["model_dir"]).name
-        if not model_path.is_file() or _model_sha256(model_path) != metadata["SHA256"]:
-            raise RuntimeError("OCR 本地模型不可用")
+        try:
+            valid_model = model_path.is_file() and _model_sha256(model_path) == metadata["SHA256"]
+        except OSError as exc:
+            raise OCRUnavailable("OCR 本地模型不可用") from exc
+        if not valid_model:
+            raise OCRUnavailable("OCR 本地模型不可用")
         params[parameter] = str(model_path)
     return params
 
