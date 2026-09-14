@@ -31,9 +31,9 @@ from app.services.audit.jobs import AuditJobConflict, create_single_audit_job
 from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
 from app.services.audit.runner import apply_parse_quality, run_audit
 from app.services.imports.errors import parse_failure, pdf_text_empty_failure
+from app.services.parser.elements import extract_element_result, merge_element_review
 from app.services.parser.extractor import (
     extract_document,
-    extract_elements,
 )
 from app.tasks.dispatcher import dispatch_audit_item
 
@@ -217,12 +217,16 @@ def batch_upload_contracts(
             try:
                 parsed = extract_document(stored_path)
                 apply_parse_quality(contract, parsed)
-                elements = extract_elements(parsed.text)
+                element_result = extract_element_result(parsed)
+                elements = element_result.values
+                requires_review, review_reason = merge_element_review(parsed, element_result)
+                contract.requires_review = requires_review
+                contract.review_reason = review_reason
                 contract.elements_json = json.dumps(
-                    {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
+                    elements,
                     ensure_ascii=False,
                 )
-                contract.status = "parsed"
+                contract.status = "review_required" if requires_review else "parsed"
             except Exception:
                 pass  # 解析失败不影响上传结果
 
@@ -382,10 +386,14 @@ def parse_contract(
             _raise_parse_error(contract_id, empty_error, failure=pdf_text_empty_failure())
         apply_parse_quality(contract, parsed)
         # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
-        elements = extract_elements(parsed.text)
-        contract.status = "parsed"
+        element_result = extract_element_result(parsed)
+        elements = element_result.values
+        requires_review, review_reason = merge_element_review(parsed, element_result)
+        contract.requires_review = requires_review
+        contract.review_reason = review_reason
+        contract.status = "review_required" if requires_review else "parsed"
         contract.elements_json = json.dumps(
-            {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
+            elements,
             ensure_ascii=False,
         )
         audit_log.record(db, user_id=user.id, action="parse", target=f"contract:{contract_id}")
@@ -397,6 +405,7 @@ def parse_contract(
         _raise_parse_error(contract_id, exc)
     return ParseResponse(
         contract_id=contract_id,
+        status=contract.status,
         elements=elements,
         text_length=len(parsed.text),
         requires_review=contract.requires_review,

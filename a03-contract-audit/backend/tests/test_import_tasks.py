@@ -8,6 +8,7 @@ from app.db.session import Base
 from app.models.models import Contract, ImportBatch, ImportBatchItem, LookupItem, User
 from app.services.parser.ocr import OCRUnavailable
 from app.services.imports.classifier import TypeSuggestion
+from app.services.parser.elements import ElementResult
 from app.tasks import import_tasks
 
 
@@ -68,13 +69,18 @@ def test_parse_import_item_passes_classification_and_parse_review_gates(monkeypa
     class Parsed:
         text = "采购设备并交付"
         requires_review = True
+        review_reason = "OCR 质量低"
 
     captured = {}
     monkeypatch.setattr(import_tasks, "SessionLocal", lambda: Session(engine))
     monkeypatch.setattr(import_tasks, "extract_document", lambda _: Parsed())
     monkeypatch.setattr(import_tasks, "apply_parse_quality", lambda _contract, _parsed: None)
     monkeypatch.setattr(import_tasks, "classify_contract_type", lambda **_: TypeSuggestion("采购合同", 0.99, ["采购"], auto_ready_eligible=True))
-    monkeypatch.setattr(import_tasks, "extract_elements", lambda _: {})
+    monkeypatch.setattr(
+        import_tasks,
+        "extract_element_result",
+        lambda parsed: ElementResult({}, {}, (), parsed.text),
+    )
     original_target_status = import_tasks.target_status
 
     def capture_status(*args, **kwargs):

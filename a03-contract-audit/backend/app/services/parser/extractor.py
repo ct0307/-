@@ -503,35 +503,29 @@ def _extract_docx_bytes(data: bytes) -> str:
 
 
 
-# 关键要素抽取规则：字段名 → 正则（取第一个捕获组）
-_ELEMENT_PATTERNS: dict[str, str] = {
-    "party_a": r"甲\s*方[：:]\s*([^\n，,；;]{2,50})",
-    "party_b": r"乙\s*方[：:]\s*([^\n，,；;]{2,50})",
-    "amount": r"(?:合同(?:金额|总价|总额)|价款|总金额)[^\d]{0,10}([￥¥]?\s?[\d,]+(?:\.\d+)?\s*(?:元|万元|人民币)?)",
-    "sign_date": r"(?:签订|签署)(?:日期|时间|于)?[：:]?\s*(\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2})",
-    "duration": r"(?:合同期限|履约期限|有效期)[：:]?\s*([^\n，,；;。]{2,40})",
-    # 合同标的：覆盖"本合同标的为/乙方向甲方提供/第X条 合同标的"等主流写法
-    "subject": r"(?:本合同标的为?|合同标的[：:]|乙方(?:向甲方)?(?:提供|承建|承租|销售|采购))[：:\s]*([^\n。]{8,80})",
-    # 收付款节点：提取付款条款段落文本（最多8行），不强行结构化
-    "payment_terms": r"(?:付款(?:方式|条款|计划|安排)|收付款)[^\n]*\n((?:[^\n]+\n?){1,8})",
-}
+_SIGN_DATE_PATTERN = (
+    r"(?:签订|签署)(?:日期|时间|于)?[：:]?\s*"
+    r"(\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2})"
+)
 
 
 def extract_elements(text: str) -> dict:
-    """从合同文本抽取关键要素，返回结构化字段。
+    """兼容旧调用方的扁平结果；新解析链路使用 ``extract_element_result``。"""
+    from app.services.parser.elements import extract_element_result
 
-    每个字段返回抽取到的字符串，未命中则为 None，便于审查器判断"要素缺失"风险。
-    """
-    elements: dict[str, str | None] = {}
-    for field, pattern in _ELEMENT_PATTERNS.items():
-        m = re.search(pattern, text)
-        elements[field] = m.group(1).strip() if m else None
+    result = extract_element_result(DocumentParseResult(text=text, source="native"))
+    elements = dict(result.values)
+    sign_date = re.search(_SIGN_DATE_PATTERN, text)
+    elements["sign_date"] = sign_date.group(1).strip() if sign_date else None
 
     # 附带一些供审查器使用的信号
     elements["text_length"] = len(text)  # type: ignore[assignment]
     elements["has_breach_clause"] = bool(re.search(r"违约(?:责任|金|条款)", text))  # type: ignore[assignment]
     elements["has_dispute_clause"] = bool(re.search(r"争议(?:解决|处理)|仲裁|诉讼", text))  # type: ignore[assignment]
-    fields = [field for field in _ELEMENT_PATTERNS if elements[field] is not None]
+    fields = [
+        field for field in (*result.values, "sign_date")
+        if elements[field] not in (None, [])
+    ]
     log.info(
         "parser.elements",
         fields=fields,

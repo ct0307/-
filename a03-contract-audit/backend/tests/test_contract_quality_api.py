@@ -572,7 +572,6 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
                 "OCR 平均置信度低于 75%",
             ),
         )
-        monkeypatch.setattr(contracts, "extract_elements", lambda _text: {})
         monkeypatch.setattr(
             contracts,
             "extract_elements_with_llm",
@@ -746,8 +745,8 @@ def test_parse_contract_rolls_back_partial_quality_changes(monkeypatch, tmp_path
         )
         monkeypatch.setattr(
             contracts,
-            "extract_elements",
-            lambda _text: (_ for _ in ()).throw(RuntimeError("C:/secret/parser")),
+            "extract_element_result",
+            lambda _parsed: (_ for _ in ()).throw(RuntimeError("C:/secret/parser")),
         )
 
         with pytest.raises(HTTPException):

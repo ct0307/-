@@ -11,7 +11,8 @@ from app.services.audit.runner import apply_parse_quality
 from app.services.imports.classifier import classify_contract_type
 from app.services.imports.errors import parse_failure
 from app.services.imports.service import summarize_import, target_status
-from app.services.parser.extractor import extract_document, extract_elements
+from app.services.parser.elements import extract_element_result, merge_element_review
+from app.services.parser.extractor import extract_document
 from app.tasks.celery_app import celery_app
 
 log = get_logger("imports")
@@ -39,7 +40,11 @@ def parse_import_item(item_id: int) -> dict:
                 raise ValueError("合同记录不存在")
             parsed = extract_document(item.contract.storage_path)
             apply_parse_quality(item.contract, parsed)
-            elements = extract_elements(parsed.text)
+            element_result = extract_element_result(parsed)
+            elements = element_result.values
+            requires_review, review_reason = merge_element_review(parsed, element_result)
+            item.contract.requires_review = requires_review
+            item.contract.review_reason = review_reason
             available = [
                 row.value
                 for row in db.query(LookupItem)
@@ -61,12 +66,12 @@ def parse_import_item(item_id: int) -> dict:
                 if suggestion.confidence >= settings.CONTRACT_TYPE_CONFIRM_THRESHOLD
                 else ""
             )
-            item.contract.status = "parsed"
+            item.contract.status = "review_required" if requires_review else "parsed"
             item.status = target_status(
                 suggestion.suggested_type,
                 suggestion.confidence,
                 auto_ready_eligible=suggestion.auto_ready_eligible,
-                requires_review=parsed.requires_review,
+                requires_review=requires_review,
             )
             item.error_code = None
             item.error_message = None

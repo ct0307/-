@@ -132,6 +132,7 @@ class AuditResponse(BaseModel):
 
 class ParseResponse(BaseModel):
     contract_id: int
+    status: Literal["parsed", "review_required"] = "parsed"
     elements: dict
     text_length: int
     requires_review: bool = False
