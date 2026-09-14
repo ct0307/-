@@ -195,3 +195,27 @@ def test_title_and_lead_are_disjoint_while_later_lead_signals_remain():
     ]
     assert result.confidence < 0.85
     assert result.auto_ready_eligible is False
+
+
+def test_single_line_narrative_containing_type_remains_lead_evidence():
+    result = classify_contract_type(
+        filename="scan.pdf", text="本采购合同由乙方向甲方销售产品并收取货款。",
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert [(item.contract_type, item.score) for item in result.candidates] == [
+        ("采购合同", 3),
+        ("销售合同", 3),
+    ]
+    assert result.confidence < 0.85
+    assert result.auto_ready_eligible is False
+
+
+def test_organization_prefixed_contract_title_remains_trusted():
+    result = classify_contract_type(
+        filename="scan.pdf", text="浙江某某有限公司设备采购合同\n双方约定付款期限。",
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert result.suggested_type == "采购合同"
+    assert result.candidates[0].score == 6

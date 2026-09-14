@@ -79,12 +79,16 @@ def classify_contract_type(
 
     name = Path(filename).stem.lower()
     lines = text[:8000].splitlines()
-    title = next((line.strip().lower() for line in lines if line.strip()), "")[:100]
+    first_line = next((line.strip().lower() for line in lines if line.strip()), "")
+    title = first_line[:100]
     title_start = text.lower().find(title) if title else -1
     title_end = title_start + len(title) if title_start >= 0 else 0
     title_markers = ("附件", "条款")
-    title_is_contract_type = not any(marker in title for marker in title_markers) and any(
-        value.lower() in title for value in available_types
+    title_is_contract_type = (
+        len(first_line) <= 64
+        and not any(marker in first_line for marker in title_markers)
+        and not any(mark in first_line for mark in ("。", "！", "？", "；", "，"))
+        and any(value.lower() in first_line for value in available_types)
     )
     heading = text[title_end if title_is_contract_type else 0:1800].lower()
     body = text[1800:8000].lower()
@@ -94,7 +98,7 @@ def classify_contract_type(
     primary: set[str] = set()
 
     trusted_name = name if not any(marker in name for marker in title_markers) else ""
-    trusted_title = title if not any(marker in title for marker in title_markers) else ""
+    trusted_title = title if title_is_contract_type else ""
     for source in (trusted_name, trusted_title):
         matches = [value for value in types if value.lower() in source]
         # 同一标题中较长的类型优先，避免“技术服务合同”同时命中“服务合同”。
