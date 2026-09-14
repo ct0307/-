@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-from zipfile import ZIP_STORED, ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import fitz
 import pytest
@@ -24,6 +24,20 @@ def _docx_bytes(*, names: tuple[str, ...] = ("[Content_Types].xml", "word/docume
         for name in names:
             archive.writestr(name, "<xml />")
     return output.getvalue()
+
+
+def _docx_bytes_with_corrupt_deflated_member() -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<xml />")
+        archive.writestr("word/document.xml", b"contract body" * 200)
+
+    content = bytearray(output.getvalue())
+    with ZipFile(BytesIO(content)) as archive:
+        member = archive.getinfo("word/document.xml")
+    data_offset = member.header_offset + 30 + len(member.orig_filename) + len(member.extra)
+    content[data_offset] ^= 0xFF
+    return bytes(content)
 
 
 def _validation_error(filename: str, content: bytes) -> FileValidationError:
@@ -151,6 +165,12 @@ def test_rejects_docx_with_corrupt_zip_member():
     assert _validation_error("contract.docx", bytes(content)).code == "DOCX_CORRUPT"
 
 
+def test_rejects_docx_when_deflate_member_raises_zlib_error():
+    error = _validation_error("contract.docx", _docx_bytes_with_corrupt_deflated_member())
+
+    assert error.code == "DOCX_CORRUPT"
+
+
 @pytest.mark.parametrize("filename", ("contract.exe", "contract", ".hidden"))
 def test_rejects_unsupported_extension(filename: str):
     assert _validation_error(filename, b"content").code == "UNSUPPORTED_FILE_TYPE"
@@ -178,7 +198,10 @@ def test_rejects_text_with_nul_byte():
 
 
 def test_rejects_text_with_unsupported_encoding():
-    assert _validation_error("contract.txt", b"\xff\xfe\x00\x00").code == "TEXT_ENCODING_ERROR"
+    content = b"\x81"
+
+    assert b"\x00" not in content
+    assert _validation_error("contract.txt", content).code == "TEXT_ENCODING_ERROR"
 
 
 @pytest.mark.parametrize("content", (b" \n\t", "\u200b\u200b".encode("utf-8")))

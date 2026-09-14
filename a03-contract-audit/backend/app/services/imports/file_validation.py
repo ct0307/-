@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from io import BytesIO
 import os
 import re
+import zlib
 from zipfile import BadZipFile, ZipFile
 
 import fitz
@@ -94,7 +95,7 @@ def _validate_docx(content: bytes) -> None:
             members = archive.infolist()
     except FileValidationError:
         raise
-    except (BadZipFile, OSError, RuntimeError) as error:
+    except (BadZipFile, OSError, RuntimeError, zlib.error) as error:
         raise FileValidationError("DOCX_CORRUPT") from error
 
     if any(_is_unsafe_zip_path(member.orig_filename) for member in members):
