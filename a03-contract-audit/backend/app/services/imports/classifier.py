@@ -1,5 +1,6 @@
 """基于本地规则的合同类型初筛。"""
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,6 +56,11 @@ _TYPE_FAMILY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("保密协议", ("保密协议",)),
 )
 
+_NARRATIVE_TITLE_PATTERN = re.compile(
+    r"(?:甲乙双方|双方|甲方|乙方).{0,24}"
+    r"(?:约定|签订|订立|向|由|承担|交付|支付|收取|提供|销售)"
+)
+
 
 def _family_for_type(contract_type: str) -> str | None:
     if contract_type in _TRADE_SIGNALS:
@@ -66,6 +72,21 @@ def _family_for_type(contract_type: str) -> str | None:
             if any(alias in contract_type for alias in aliases)
         ),
         None,
+    )
+
+
+def _is_contract_title(line: str, available_types: list[str]) -> bool:
+    normalized = "".join(line.lower().split())
+    if (
+        len(normalized) > 64
+        or any(marker in normalized for marker in ("附件", "条款"))
+        or _NARRATIVE_TITLE_PATTERN.search(normalized)
+    ):
+        return False
+    suffix = r"(?:[（(][^）)\r\n]{1,20}[）)]|(?:v(?:ersion)?)?\d+(?:\.\d+)*版?)?"
+    return any(
+        re.fullmatch(rf".*{re.escape(''.join(value.lower().split()))}{suffix}", normalized)
+        for value in available_types
     )
 
 
@@ -84,12 +105,7 @@ def classify_contract_type(
     title_start = text.lower().find(title) if title else -1
     title_end = title_start + len(title) if title_start >= 0 else 0
     title_markers = ("附件", "条款")
-    title_is_contract_type = (
-        len(first_line) <= 64
-        and not any(marker in first_line for marker in title_markers)
-        and not any(mark in first_line for mark in ("。", "！", "？", "；", "，"))
-        and any(value.lower() in first_line for value in available_types)
-    )
+    title_is_contract_type = _is_contract_title(first_line, available_types)
     heading = text[title_end if title_is_contract_type else 0:1800].lower()
     body = text[1800:8000].lower()
     types = list(dict.fromkeys(available_types))

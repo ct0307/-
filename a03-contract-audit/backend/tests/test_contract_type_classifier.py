@@ -219,3 +219,50 @@ def test_organization_prefixed_contract_title_remains_trusted():
 
     assert result.suggested_type == "采购合同"
     assert result.candidates[0].score == 6
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "本采购合同由乙方向甲方销售产品并收取货款",
+        "本采购合同由乙方向甲方销售产品并收取货款.",
+    ],
+    ids=["no-punctuation", "ascii-period"],
+)
+def test_unpunctuated_single_line_narrative_is_not_a_title(text):
+    result = classify_contract_type(
+        filename="scan.pdf", text=text,
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert [(item.contract_type, item.score) for item in result.candidates] == [
+        ("采购合同", 3),
+        ("销售合同", 3),
+    ]
+    assert result.confidence < 0.85
+    assert result.auto_ready_eligible is False
+
+
+@pytest.mark.parametrize("title", ["采购合同（2026版）", "采购合同V2.1"])
+def test_contract_title_allows_common_version_suffixes(title):
+    result = classify_contract_type(
+        filename="scan.pdf", text=title + "\n双方约定付款期限。",
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert result.suggested_type == "采购合同"
+    assert result.candidates[0].score == 6
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["甲乙双方约定签订采购合同", "乙方向甲方交付设备的采购合同"],
+)
+def test_party_performance_narrative_ending_in_type_is_not_a_title(text):
+    result = classify_contract_type(
+        filename="scan.pdf", text=text,
+        available_types=["采购合同", "销售合同"],
+    )
+
+    assert result.candidates[0].score == 3
+    assert result.auto_ready_eligible is False
