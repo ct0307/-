@@ -134,6 +134,31 @@ test('restores authoritative batch and item progress after reload without a succ
   expect(batchGetCalls).toBeGreaterThanOrEqual(2)
 })
 
+test('renders an active batch progress in the neutral state without failed items', async ({ page }) => {
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/runtime/status')) {
+      return fulfillJson(route, { status: 'online', checked_at: '2026-09-14T08:00:00Z' })
+    }
+    if (isLookup(path)) return fulfillJson(route, [])
+    if (path.endsWith('/batches/77')) {
+      return fulfillJson(route, auditBatch({
+        total: 1,
+        items: [auditBatch().items[0]],
+      }))
+    }
+    return fulfillJson(route, [])
+  })
+
+  await openAudit(page, '/audit?batch=77')
+
+  const batchProgress = page.locator('.batch-result > .batch-result-progress')
+  await expect(batchProgress).toHaveAttribute('aria-valuenow', '43')
+  await expect(batchProgress.getByText('43%', { exact: true })).toBeVisible()
+  await expect(batchProgress).not.toHaveClass(/is-success/)
+  await expect(batchProgress).not.toHaveClass(/is-exception/)
+})
+
 test('keeps a failed item percentage and persisted failure detail visible', async ({ page }) => {
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname
