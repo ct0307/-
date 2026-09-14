@@ -150,6 +150,10 @@ class AuditBatchItem(Base):
     import_item_id: Mapped[int | None] = mapped_column(ForeignKey("import_batch_items.id"), nullable=True, index=True)
     filename: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    progress_stage: Mapped[str] = mapped_column(
+        String(24), default="queued", server_default="queued",
+    )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     result_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")

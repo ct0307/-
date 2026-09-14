@@ -92,6 +92,8 @@ _DEV_COLUMNS = {
         ("audit_generation", "INTEGER DEFAULT 0 NOT NULL"),
         ("execution_token", "VARCHAR(64)"),
         ("import_item_id", "INTEGER"),
+        ("progress", "INTEGER DEFAULT 0 NOT NULL"),
+        ("progress_stage", "VARCHAR(24) DEFAULT 'queued' NOT NULL"),
     ],
     "import_batches": [
         ("request_fingerprint", "VARCHAR(64) DEFAULT '' NOT NULL"),

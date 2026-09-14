@@ -6,12 +6,28 @@ from sqlalchemy.orm import Session
 
 from app.db.session import Base
 from app.models.models import AuditBatch
+from app.services.audit.progress import normalize_progress
 from app.services.batch.service import (
     InvalidBatchTransition,
     retry_failed_item,
     summarize,
     transition_item,
 )
+
+
+def test_progress_is_clamped_and_never_reaches_100_before_success():
+    assert normalize_progress(-1, terminal_success=False) == 0
+    assert normalize_progress(100, terminal_success=False) == 99
+    assert normalize_progress(100, terminal_success=True) == 100
+
+
+def test_terminal_failure_counts_as_processed_without_faking_item_success():
+    progress = summarize(
+        ["reviewing", "failed"],
+        progresses=[50, 35],
+    )
+
+    assert progress.progress == 75
 
 
 def test_batch_progress_counts_terminal_items():

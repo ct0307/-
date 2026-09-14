@@ -1,6 +1,8 @@
 """批次状态机、进度聚合与失败重试规则。"""
 from dataclasses import dataclass
 
+from app.services.audit.progress import normalize_progress
+
 BATCH_STATUSES = frozenset({
     "queued", "running", "done", "review_required", "partial_failed", "failed",
 })
@@ -32,6 +34,7 @@ class BatchProgress:
     total: int
     completed: int
     failed: int
+    progress: int
     status: str
 
 
@@ -41,15 +44,27 @@ class RetryDecision:
     attempts: int
 
 
-def summarize(statuses: list[str]) -> BatchProgress:
+def summarize(
+    statuses: list[str],
+    *,
+    progresses: list[int] | None = None,
+) -> BatchProgress:
     """从批次项状态计算持久化进度，终态数量包含成功和失败。"""
     unknown = set(statuses) - ITEM_STATUSES
     if unknown:
         raise ValueError(f"未知批次项状态: {sorted(unknown)}")
+    if progresses is not None and len(progresses) != len(statuses):
+        raise ValueError("批次项状态与进度数量不一致")
 
     total = len(statuses)
     completed = sum(status in TERMINAL_ITEM_STATUSES for status in statuses)
     failed = statuses.count("failed")
+    item_progresses = progresses or [0] * total
+    contributions = [
+        100 if status in TERMINAL_ITEM_STATUSES else normalize_progress(value)
+        for status, value in zip(statuses, item_progresses, strict=True)
+    ]
+    progress = round(sum(contributions) / total) if total else 0
     if total == 0 or all(status == "queued" for status in statuses):
         status = "queued"
     elif completed < total:
@@ -62,7 +77,13 @@ def summarize(statuses: list[str]) -> BatchProgress:
         status = "failed"
     else:
         status = "partial_failed"
-    return BatchProgress(total=total, completed=completed, failed=failed, status=status)
+    return BatchProgress(
+        total=total,
+        completed=completed,
+        failed=failed,
+        progress=progress,
+        status=status,
+    )
 
 
 def transition_item(current: str, target: str) -> str:

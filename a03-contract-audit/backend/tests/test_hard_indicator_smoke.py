@@ -50,6 +50,10 @@ def test_fresh_database_migration_matches_orm_metadata(tmp_path: Path):
     assert migrated_tables == set(Base.metadata.tables)
     import_batch_columns = {column["name"] for column in inspector.get_columns("import_batches")}
     assert "request_fingerprint" in import_batch_columns
+    audit_item_columns = {
+        column["name"] for column in inspector.get_columns("audit_batch_items")
+    }
+    assert {"progress", "progress_stage"} <= audit_item_columns
     contract_foreign_keys = {
         (tuple(key["constrained_columns"]), key["referred_table"], tuple(key["referred_columns"]))
         for key in inspector.get_foreign_keys("contracts")

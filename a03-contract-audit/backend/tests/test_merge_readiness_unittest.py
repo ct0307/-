@@ -263,6 +263,11 @@ class MergeReadinessTests(unittest.TestCase):
 
         self.assertNotIn("execution_token", contract_columns)
         self.assertEqual(item_columns["execution_token"], "VARCHAR(64)")
+        self.assertEqual(item_columns["progress"], "INTEGER DEFAULT 0 NOT NULL")
+        self.assertEqual(
+            item_columns["progress_stage"],
+            "VARCHAR(24) DEFAULT 'queued' NOT NULL",
+        )
 
     def test_sqlite_hot_migration_declares_evidence_columns(self):
         risk_columns = dict(init_db_module._DEV_COLUMNS["risks"])
@@ -330,6 +335,8 @@ class MergeReadinessTests(unittest.TestCase):
                 <= contract_columns
             )
             self.assertIn("import_item_id", item_columns)
+            self.assertIn("progress", item_columns)
+            self.assertIn("progress_stage", item_columns)
             self.assertIn("request_fingerprint", import_batch_columns)
             self.assertIn("department", import_batch_columns)
             self.assertIn("import_append_requests", Base.metadata.tables)
