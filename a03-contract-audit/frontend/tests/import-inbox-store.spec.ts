@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import type { ImportBatch, ImportItem } from '../src/api/imports'
 import { createImportInboxStore, type ImportApi } from '../src/stores/import-inbox'
+import { importErrorMeta } from '../src/utils/import-errors'
 
 const readyItem: ImportItem = {
   id: 1,
@@ -66,6 +67,29 @@ function api(overrides: Partial<ImportApi> = {}): ImportApi {
 }
 
 test.beforeEach(() => setActivePinia(createPinia()))
+
+test('uses server error actions and conservative retry fallbacks', () => {
+  expect(importErrorMeta({
+    ...failedItem,
+    error_code: 'OCR_UNAVAILABLE',
+    error_action: '联系管理员修复后重试',
+    retryable: true,
+  })).toEqual({
+    message: failedItem.error_message,
+    action: '联系管理员修复后重试',
+    retryable: true,
+  })
+
+  expect(importErrorMeta({
+    ...failedItem,
+    error_code: 'PDF_CORRUPT',
+    error_message: null,
+  })).toEqual({
+    message: 'PDF 文件已损坏',
+    action: '重新获取原文件后上传',
+    retryable: false,
+  })
+})
 
 test('keeps failed items while allowing only ready items to be selected', async () => {
   const store = createImportInboxStore(api(), 'test-import')()

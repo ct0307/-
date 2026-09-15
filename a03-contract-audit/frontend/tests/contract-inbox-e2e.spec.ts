@@ -106,6 +106,8 @@ test('uses different actions for upload and parse failures', async ({ page }) =>
       status: 'failed',
       error_code: 'PARSE_FAILED',
       error_message: '合同解析失败，请重新解析或删除草稿',
+      error_action: '稍后重新解析',
+      retryable: true,
     }),
   ])
 
@@ -124,4 +126,51 @@ test('uses different actions for upload and parse failures', async ({ page }) =>
   await page.waitForTimeout(350)
   expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0)
   await page.screenshot({ path: test.info().outputPath('inbox-mobile-390.png'), fullPage: true })
+})
+
+test('shows actionable failures and OCR review quality', async ({ page }) => {
+  const fixture = batch([
+    item({
+      id: 3,
+      contract_id: 13,
+      filename: '扫描合同.pdf',
+      status: 'failed',
+      error_code: 'OCR_UNAVAILABLE',
+      error_message: '扫描件识别服务未就绪',
+      error_action: '联系管理员修复服务后重新解析',
+      retryable: true,
+    }),
+    item({
+      id: 4,
+      contract_id: 14,
+      filename: '损坏合同.pdf',
+      status: 'failed',
+      error_code: 'PDF_CORRUPT',
+      error_message: 'PDF 文件已损坏',
+      error_action: '重新获取原文件后上传',
+      retryable: false,
+    }),
+    item({
+      id: 5,
+      contract_id: 15,
+      filename: '低置信度扫描件.pdf',
+      status: 'awaiting_confirmation',
+      requires_review: true,
+      ocr_confidence: 0.423,
+    }),
+  ])
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await openAudit(page, fixture)
+
+  const scanRow = page.getByRole('row').filter({ hasText: '扫描合同.pdf' })
+  const corruptRow = page.getByRole('row').filter({ hasText: '损坏合同.pdf' })
+  const reviewRow = page.getByRole('row').filter({ hasText: '低置信度扫描件.pdf' })
+  await expect(scanRow.getByText('联系管理员修复服务后重新解析')).toBeVisible()
+  await expect(scanRow.getByRole('button', { name: '重新解析 扫描合同.pdf' })).toBeVisible()
+  await expect(corruptRow.getByText('重新获取原文件后上传')).toBeVisible()
+  await expect(corruptRow.getByRole('button', { name: '重新解析 损坏合同.pdf' })).toHaveCount(0)
+  await expect(reviewRow.getByText('需人工复核')).toBeVisible()
+  await expect(reviewRow.getByText('OCR 置信度 42%')).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0)
 })

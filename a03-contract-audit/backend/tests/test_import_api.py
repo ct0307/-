@@ -518,6 +518,29 @@ def test_import_item_out_recovers_stable_failure_metadata_from_error_code(tmp_pa
     assert legacy_out.correlation_id == f"import-item:{legacy.id}"
 
 
+def test_import_item_out_exposes_ocr_review_quality(tmp_path):
+    db = _session()
+    legal = _user(db)
+    batch = ImportBatch(owner_id=legal.id, idempotency_key="ocr-review-quality")
+    contract = Contract(
+        filename="scan.pdf",
+        storage_path=str(tmp_path / "scan.pdf"),
+        uploaded_by=legal.id,
+        department=legal.department,
+        ocr_confidence=0.423,
+        requires_review=True,
+    )
+    item = ImportBatchItem(filename="scan.pdf", contract=contract, status="awaiting_confirmation")
+    batch.items.append(item)
+    db.add(batch)
+    db.commit()
+
+    output = imports._item_out(item)
+
+    assert output.ocr_confidence == 0.423
+    assert output.requires_review is True
+
+
 @pytest.mark.parametrize(
     "audit_status",
     ["queued", "parsing", "reviewing", "validating", "auditing"],

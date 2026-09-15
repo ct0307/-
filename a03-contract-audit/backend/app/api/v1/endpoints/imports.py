@@ -183,6 +183,7 @@ def _item_out(item: ImportBatchItem) -> ImportItemOut:
         confirmed_type=contract.contract_type if contract else "",
         department=contract.department if contract else "",
         requires_review=contract.requires_review if contract else False,
+        ocr_confidence=contract.ocr_confidence if contract else None,
     )
 
 

@@ -33,6 +33,7 @@ class ImportItemOut(BaseModel):
     confirmed_type: str = ""
     department: str = ""
     requires_review: bool = False
+    ocr_confidence: float | None = None
 
 
 class ImportBatchOut(BaseModel):
