@@ -162,7 +162,7 @@ async function prepare(page: Page, itemStatus: ItemStatus, options: PrepareOptio
 
   await page.goto(`${baseUrl}/audit?import=42`)
   await page.getByRole('checkbox', { name: `选择${filename}` }).check()
-  await page.getByRole('button', { name: '审查就绪项' }).click()
+  await page.getByRole('button', { name: '审查选中的 1 份合同' }).click()
   await expect(page).toHaveURL(/\bbatch=88\b/)
   const region = page.getByRole('region', { name: '审查批次 88' })
   await expect(region).toBeVisible()

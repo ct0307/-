@@ -58,6 +58,7 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 
 interface PrepareOptions {
   failContract11Result?: boolean
+  failBatchCreate?: boolean
   onBatchCreate?: (body: { import_item_ids: number[]; dimensions: string[] }) => void
 }
 
@@ -88,6 +89,9 @@ async function prepare(page: Page, options: PrepareOptions = {}) {
       options.onBatchCreate?.(
         route.request().postDataJSON() as { import_item_ids: number[]; dimensions: string[] },
       )
+      if (options.failBatchCreate) {
+        return fulfillJson(route, { detail: '审查服务暂不可用' }, 503)
+      }
       return fulfillJson(route, {
         id: 88,
         status: 'partial_failed',
@@ -237,6 +241,65 @@ test('audits every ready contract without requiring row selection', async ({ pag
   await page.getByRole('button', { name: '审查全部 2 份就绪合同' }).click()
 
   expect(submittedIds).toEqual([1, 2])
+})
+
+test('audits only the explicitly selected ready contract', async ({ page }) => {
+  let submittedIds: number[] = []
+  await prepare(page, {
+    onBatchCreate: (body) => { submittedIds = body.import_item_ids },
+  })
+  await page.goto(`${baseUrl}/audit`)
+  await page.locator('input[type="file"]').setInputFiles([
+    { name: '采购合同.txt', mimeType: 'text/plain', buffer: Buffer.from('采购服务器设备') },
+    { name: '开发协议.txt', mimeType: 'text/plain', buffer: Buffer.from('交付软件源代码') },
+  ])
+  await page.getByRole('combobox', { name: '开发协议.txt 的合同类型' }).click()
+  await page.getByRole('option', { name: '软件开发外包合同' }).click()
+  await page.getByRole('button', { name: '确认 开发协议.txt' }).click()
+
+  await page.getByRole('checkbox', { name: '选择采购合同.txt' }).check()
+  await page.getByRole('button', { name: '审查选中的 1 份合同' }).click()
+
+  expect(submittedIds).toEqual([1])
+})
+
+test('selects only ready contracts from the table header', async ({ page }) => {
+  await prepare(page)
+  await page.goto(`${baseUrl}/audit`)
+  await page.locator('input[type="file"]').setInputFiles([
+    { name: '采购合同.txt', mimeType: 'text/plain', buffer: Buffer.from('采购服务器设备') },
+    { name: '开发协议.txt', mimeType: 'text/plain', buffer: Buffer.from('交付软件源代码') },
+    { name: '扫描件.txt', mimeType: 'text/plain', buffer: Buffer.from('') },
+  ])
+
+  await page.getByRole('checkbox', { name: '全选就绪合同' }).check()
+
+  await expect(page.getByRole('checkbox', { name: '选择采购合同.txt' })).toBeChecked()
+  await expect(page.getByRole('checkbox', { name: '选择开发协议.txt' })).toBeDisabled()
+  await expect(page.getByRole('checkbox', { name: '选择扫描件.txt' })).toBeDisabled()
+})
+
+test('disables the audit action when no contract is ready', async ({ page }) => {
+  await prepare(page)
+  await page.goto(`${baseUrl}/audit`)
+
+  await expect(page.getByRole('button', { name: '暂无就绪合同' })).toBeDisabled()
+})
+
+test('keeps an explicit selection when batch creation fails', async ({ page }) => {
+  await prepare(page, { failBatchCreate: true })
+  await page.goto(`${baseUrl}/audit`)
+  await page.locator('input[type="file"]').setInputFiles([
+    { name: '采购合同.txt', mimeType: 'text/plain', buffer: Buffer.from('采购服务器设备') },
+  ])
+  const rowCheckbox = page.getByRole('checkbox', { name: '选择采购合同.txt' })
+  await rowCheckbox.check()
+
+  await page.getByRole('button', { name: '审查选中的 1 份合同' }).click()
+
+  await expect(page.getByText('审查服务暂不可用')).toBeVisible()
+  await expect(rowCheckbox).toBeChecked()
+  await expect(page.getByRole('button', { name: '审查选中的 1 份合同' })).toBeEnabled()
 })
 
 test('uploads mixed contracts, confirms one exception and audits ready items', async ({ page }) => {

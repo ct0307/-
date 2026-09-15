@@ -33,7 +33,7 @@ test('defaults to dossier and persists a manual theme', async ({ page }) => {
 
   await page.goto(`${baseUrl}/audit`)
   const primaryButtonUsesThemeForeground = await page
-    .getByRole('button', { name: '审查就绪项' })
+    .getByRole('button', { name: /^(?:暂无就绪合同|审查全部 \d+ 份就绪合同)$/ })
     .evaluate((button) => {
     const probe = document.createElement('span')
     probe.style.color = 'var(--on-brass)'

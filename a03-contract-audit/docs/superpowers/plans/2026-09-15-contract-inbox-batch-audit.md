@@ -349,7 +349,7 @@ npx.cmd playwright test tests/contract-inbox-workflow-e2e.spec.ts
 
 Expected: 全部测试 PASS，0 failed。
 
-- [ ] **Step 7: 提交 Task 2**
+- [x] **Step 7: 提交 Task 2**
 
 ```powershell
 git add frontend/src/components/audit/ContractInbox.vue frontend/src/views/AuditView.vue frontend/tests/contract-inbox-workflow-e2e.spec.ts
@@ -363,7 +363,7 @@ git commit -m "feat: audit all ready contracts by default"
 - Modify only if a test exposes a defect: `frontend/src/components/audit/ContractInbox.vue`
 - Modify only if a test exposes a defect: `frontend/src/stores/import-inbox.ts`
 
-- [ ] **Step 1: 增加部分选择测试**
+- [x] **Step 1: 增加部分选择测试**
 
 ```ts
 test('audits only the explicitly selected ready contract', async ({ page }) => {
@@ -387,7 +387,7 @@ test('audits only the explicitly selected ready contract', async ({ page }) => {
 })
 ```
 
-- [ ] **Step 2: 增加全选和无就绪状态测试**
+- [x] **Step 2: 增加全选和无就绪状态测试**
 
 ```ts
 test('selects only ready contracts from the table header', async ({ page }) => {
@@ -430,7 +430,7 @@ test('keeps an explicit selection when batch creation fails', async ({ page }) =
 })
 ```
 
-- [ ] **Step 3: 运行相关测试，最小修复暴露的问题**
+- [x] **Step 3: 运行相关测试，最小修复暴露的问题**
 
 Run:
 
@@ -441,7 +441,7 @@ npx.cmd playwright test tests/import-inbox-store.spec.ts tests/contract-inbox-wo
 
 Expected: 全部测试 PASS，0 failed。若失败，只修复与目标集合、全选状态或动态文案直接相关的问题，不扩展范围。
 
-- [ ] **Step 4: 运行前端静态验证与生产构建**
+- [x] **Step 4: 运行前端静态验证与生产构建**
 
 Run:
 
@@ -453,7 +453,7 @@ npm.cmd run build
 
 Expected: 两条命令退出码均为 0，无 TypeScript 或 Vite 构建错误。
 
-- [ ] **Step 5: 浏览器验证桌面和移动端**
+- [x] **Step 5: 浏览器验证桌面和移动端**
 
 保持后端 `http://127.0.0.1:8000` 与前端 `http://127.0.0.1:5173` 运行，在 `1440x900` 和 `390x844` 验证：
 
@@ -467,7 +467,7 @@ Expected: 两条命令退出码均为 0，无 TypeScript 或 Vite 构建错误�
 
 Expected: 两个视口无新增控制台错误，所有状态与设计文档一致。
 
-- [ ] **Step 6: 运行项目完整质量门禁**
+- [x] **Step 6: 运行项目完整质量门禁**
 
 Run:
 
