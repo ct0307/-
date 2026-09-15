@@ -403,6 +403,7 @@ def test_mixed_pdf_preserves_low_ocr_confidence(monkeypatch):
             mean_confidence=0.41,
             page_texts=("低置信度扫描页",),
             requires_review=True,
+            page_confidences=(0.41,),
         ),
     )
 
@@ -411,7 +412,8 @@ def test_mixed_pdf_preserves_low_ocr_confidence(monkeypatch):
     assert result.source == "mixed"
     assert result.ocr_confidence == 0.41
     assert result.requires_review is True
-    assert result.review_reason == "OCR 平均置信度低于 75%"
+    assert result.review_reason == "OCR 第 2 页置信度低于 75%"
+    assert next(block for block in result.blocks if block.anchor.page_number == 2).confidence == 0.41
 
 
 def test_scanned_pdf_uses_ocr_when_text_extractors_are_empty(monkeypatch):
@@ -629,6 +631,26 @@ def test_alternate_can_fill_empty_page_without_replacing_good_primary(monkeypatc
     assert result.source == "native"
 
 
+def test_native_english_page_does_not_trigger_pdf_fallback(monkeypatch):
+    english = "This agreement defines payment, delivery, warranty, and termination terms. " * 8
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(english))
+    monkeypatch.setattr(
+        extractor,
+        "_extract_pdf_pymupdf_candidate",
+        lambda *_args, **_kwargs: pytest.fail("合法英文页不应被判定为乱码"),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "ocr_pdf_bytes",
+        lambda *_args, **_kwargs: pytest.fail("合法英文页不应进入 OCR"),
+    )
+
+    result = extractor._extract_pdf_result(b"english-pdf")
+
+    assert result.text == english.strip()
+    assert result.source == "native"
+
+
 def test_many_missing_pages_use_bounded_range_summary(monkeypatch):
     empty_pages = ("",) * 100
     monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(*empty_pages))
@@ -646,6 +668,15 @@ def test_many_missing_pages_use_bounded_range_summary(monkeypatch):
     assert result.missing_pages == tuple(range(1, 101))
     assert result.review_reason == "第 1-100 页未提取到有效文本"
     assert len(result.review_reason) <= 255
+
+
+def test_sparse_missing_pages_use_bounded_summary():
+    sparse_pages = tuple(range(1, 1000, 2))
+
+    reason = f"第 {extractor._format_page_ranges(sparse_pages)} 页未提取到有效文本"
+
+    assert len(reason) <= 255
+    assert "共 500 页" in reason
 
 
 def _blank_pdf(page_count: int) -> bytes:
@@ -673,6 +704,7 @@ def test_ocr_marks_low_confidence_for_manual_review():
 
     assert result.text == "低置信度文本"
     assert result.requires_review is True
+    assert result.page_confidences == (0.42,)
 
 
 def test_ocr_marks_review_when_any_page_is_below_confidence_threshold():

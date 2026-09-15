@@ -94,11 +94,20 @@ def extract_text(file_path: str) -> str:
 
 
 def _is_garbled(text: str) -> bool:
-    """检测文本是否乱码：CJK 字符占比低于 10% 且文本非空视为字体编码异常。"""
+    """识别疑似字体映射乱码，同时允许正常的英文合同页面。"""
     if not text or len(text) < 20:
         return False  # 空文本交给 empty 逻辑处理，不走此判断
     cjk = sum(1 for c in text if '一' <= c <= '鿿')
-    return cjk / len(text) < 0.10
+    if cjk / len(text) >= 0.10:
+        return False
+    printable_ascii = sum(1 for char in text if char.isascii() and char.isprintable())
+    distinct_letters = {char.lower() for char in text if char.isascii() and char.isalpha()}
+    looks_like_english = (
+        printable_ascii / len(text) >= 0.90
+        and any(char.isspace() for char in text)
+        and len(distinct_letters) >= 8
+    )
+    return not looks_like_english
 
 
 def _compatibility_radical_count(text: str) -> int:
@@ -170,9 +179,11 @@ def _candidate_preserves_nonempty_pages(
     )
 
 
-def _format_page_ranges(pages: tuple[int, ...]) -> str:
-    """把连续页码压缩为区间，避免复核原因超过数据库字段长度。"""
+def _format_page_ranges(pages: tuple[int, ...], *, max_chars: int = 220) -> str:
+    """把页码压缩为有界摘要；完整页码仍由结构化字段持久化。"""
     ordered = sorted(set(pages))
+    if not ordered:
+        return ""
     ranges: list[str] = []
     start = previous = ordered[0]
     for page in ordered[1:]:
@@ -182,7 +193,19 @@ def _format_page_ranges(pages: tuple[int, ...]) -> str:
         ranges.append(str(start) if start == previous else f"{start}-{previous}")
         start = previous = page
     ranges.append(str(start) if start == previous else f"{start}-{previous}")
-    return "、".join(ranges)
+    joined = "、".join(ranges)
+    if len(joined) <= max_chars:
+        return joined
+
+    suffix = f"……（共 {len(ordered)} 页）"
+    budget = max(1, max_chars - len(suffix))
+    included: list[str] = []
+    for value in ranges:
+        candidate = "、".join((*included, value))
+        if len(candidate) > budget:
+            break
+        included.append(value)
+    return "、".join(included) + suffix
 
 
 def _extract_pdf_result(data: bytes) -> DocumentParseResult:
@@ -323,6 +346,11 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
     selected = empty_pages if parts else tuple(range(result.page_count))
     if result.page_count != len(result.page_texts) or len(result.page_texts) != len(selected):
         raise OCRError("OCR 返回页数与请求页数不一致")
+    page_confidences = result.page_confidences or (
+        (result.mean_confidence,) * len(result.page_texts)
+    )
+    if len(page_confidences) != len(result.page_texts):
+        raise OCRError("OCR 返回置信度页数与文本页数不一致")
     merged = list(parts) if parts else [""] * result.page_count
     for index, page_text in zip(selected, result.page_texts):
         merged[index] = page_text
@@ -335,15 +363,24 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
     review_reason = None
     if result.requires_review:
         threshold = int(settings.OCR_MIN_CONFIDENCE * 100)
-        review_reason = (
-            f"OCR 平均置信度低于 {threshold}%"
-            if result.text
-            else "OCR 未识别出有效文本"
+        low_confidence_pages = tuple(
+            selected[position] + 1
+            for position, confidence in enumerate(page_confidences)
+            if confidence < settings.OCR_MIN_CONFIDENCE
         )
+        if not result.text:
+            review_reason = "OCR 未识别出有效文本"
+        elif low_confidence_pages:
+            review_reason = (
+                f"OCR 第 {_format_page_ranges(low_confidence_pages)} 页置信度低于 {threshold}%"
+            )
+        else:
+            review_reason = "OCR 结果需人工复核"
     if missing_pages:
         page_reason = f"第 {_format_page_ranges(missing_pages)} 页未提取到有效文本"
         review_reason = "；".join(part for part in (review_reason, page_reason) if part)
     ocr_page_set = set(selected)
+    confidence_by_page = dict(zip(selected, page_confidences))
     blocks_list: list[DocumentBlock] = []
     for index, page_text in enumerate(merged):
         page_number = index + 1
@@ -354,7 +391,7 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
                     block_type="page_text",
                     text=page_text,
                     anchor=SourceAnchor(page_number=page_number),
-                    confidence=result.mean_confidence,
+                    confidence=confidence_by_page[index],
                     parse_source="ocr",
                 ))
         else:

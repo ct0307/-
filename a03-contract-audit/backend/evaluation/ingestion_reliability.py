@@ -232,7 +232,11 @@ def _expected_type(case: Any) -> str:
     return ""
 
 
-def _evidence_positions(result: ElementResult) -> tuple[dict[str, Any], int]:
+def _evidence_positions(
+    result: ElementResult,
+    *,
+    require_page: bool = False,
+) -> tuple[dict[str, Any], int]:
     fields: dict[str, Any] = {}
     missing = 0
     for field in ELEMENT_FIELDS:
@@ -240,6 +244,12 @@ def _evidence_positions(result: ElementResult) -> tuple[dict[str, Any], int]:
         present = bool(value) if not isinstance(value, list) else any(value)
         raw_evidence = result.evidence.get(field)
         evidence = raw_evidence if isinstance(raw_evidence, list) else [raw_evidence] if raw_evidence else []
+        valid_evidence = [
+            item for item in evidence
+            if isinstance(item, ElementEvidence)
+            and 0 <= item.start < item.end <= len(result.source_text)
+            and (not require_page or isinstance(item.page, int) and item.page > 0)
+        ]
         positions = [
             {
                 "page": item.page,
@@ -249,8 +259,7 @@ def _evidence_positions(result: ElementResult) -> tuple[dict[str, Any], int]:
                 "source": item.source,
                 "validation": item.validation,
             }
-            for item in evidence
-            if isinstance(item, ElementEvidence)
+            for item in valid_evidence
         ]
         if present and not positions:
             missing += 1
@@ -333,7 +342,10 @@ def evaluate_contract_set(
             parsed = extract_uploaded_document(path.name, path.read_bytes())
             elements = extract_element_result(parsed)
             predictions[case_id] = elements.values
-            evidence, missing = _evidence_positions(elements)
+            evidence, missing = _evidence_positions(
+                elements,
+                require_page=path.suffix.lower() == ".pdf",
+            )
             missing_evidence_count += missing
             suggestion: TypeSuggestion = classify_contract_type(
                 filename=path.name,

@@ -6,10 +6,11 @@ import pytest
 
 from app.services.imports.classifier import TypeSuggestion
 from app.services.imports.file_validation import FileValidationError, ValidatedUpload
-from app.services.parser.elements import ElementResult
+from app.services.parser.elements import ElementEvidence, ElementResult
 from app.services.parser.extractor import DocumentBlock, DocumentParseResult, SourceAnchor
 from evaluation.datasets.frozen_contracts_v3.cases import load_cases
 from evaluation.ingestion_reliability import (
+    _evidence_positions,
     evaluate_contract_set,
     evaluate_ingestion,
     sanitize_element_report,
@@ -133,6 +134,30 @@ def test_gate_rejects_invalid_contract_creation_and_missing_evidence():
         "supplemental_corrupt_rejection",
         "element_evidence",
     }
+
+
+def test_pdf_evidence_requires_valid_offsets_and_page_anchor():
+    result = ElementResult(
+        values={"party_a": "测试公司"},
+        evidence={
+            "party_a": ElementEvidence(
+                raw_text="测试公司",
+                page=None,
+                start=8,
+                end=3,
+                confidence=0.9,
+                source="rule",
+                validation="valid",
+            ),
+        },
+        review_fields=(),
+        source_text="甲方：测试公司",
+    )
+
+    fields, missing = _evidence_positions(result, require_page=True)
+
+    assert fields["party_a"]["evidence"] == []
+    assert missing == 1
 
 
 def test_public_element_report_omits_contract_values():

@@ -609,6 +609,19 @@ def test_history_status_prioritizes_manual_review():
     assert contracts._derive_status(contract, []) == "待人工复核"
 
 
+def test_history_status_marks_parse_failure_instead_of_compliant():
+    contract = Contract(
+        filename="failed.pdf",
+        storage_path="/tmp/failed.pdf",
+        contract_type="采购合同",
+        status="failed",
+        department="法务部",
+        uploaded_by=1,
+    )
+
+    assert contracts._derive_status(contract, []) == "解析失败"
+
+
 def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

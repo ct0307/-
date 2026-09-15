@@ -147,3 +147,84 @@ test('旧请求迟到的 401 不清理新登录会话', async ({ page }) => {
   expect(await page.evaluate(() => localStorage.getItem('token'))).toBe('test-legal-2')
   await expect(page).toHaveURL(/\/dashboard$/)
 })
+
+test('旧会话迟到的成功响应不回写新会话状态', async ({ page }) => {
+  await prepare(page)
+  await login(page)
+  let releaseResponses!: () => void
+  const responsesReady = new Promise<void>((resolve) => { releaseResponses = resolve })
+  await page.route('**/api/v1/rectifications', async (route) => {
+    const authorization = route.request().headers().authorization
+    if (authorization === 'Bearer test-legal-1') await responsesReady
+    await route.fulfill({ json: [{
+      id: authorization === 'Bearer test-legal-1' ? 'RC-OLD' : 'RC-NEW',
+      contract: authorization === 'Bearer test-legal-1' ? '旧用户私有合同' : '新用户合同',
+      risk: '会话隔离', level: 'low', owner: '法务', status: '待处理',
+      created: '2026-09-15', due: '2026-09-22', note: '',
+    }] })
+  })
+  await page.route('**/api/v1/contracts/upload**', (route) => route.fulfill({ json: {
+    id: 7, filename: '旧会话合同.txt', contract_type: '采购合同', status: 'uploaded',
+    created_at: '2026-09-15T00:00:00Z',
+  } }))
+  await page.route('**/api/v1/contracts/7/parse', async (route) => {
+    await responsesReady
+    await route.fulfill({ json: {
+      contract_id: 7, elements: { party_a: '旧用户私有甲方' }, text_length: 20,
+    } })
+  })
+
+  const oldRectifyRequest = page.waitForRequest('**/api/v1/rectifications')
+  const oldParseRequest = page.waitForRequest('**/api/v1/contracts/7/parse')
+  await page.evaluate(async () => {
+    const rectifyModule = await import(/* @vite-ignore */ '/src/stores/rectify.ts')
+    const auditModule = await import(/* @vite-ignore */ '/src/stores/audit-session.ts')
+    const pendingWindow = window as typeof window & {
+      oldRectifyLoad?: Promise<void>
+      oldUpload?: Promise<unknown>
+    }
+    pendingWindow.oldRectifyLoad = rectifyModule.useRectifyStore().load(true)
+    pendingWindow.oldUpload = auditModule.useAuditSessionStore().uploadAndParse(
+      new File(['旧会话内容'], '旧会话合同.txt', { type: 'text/plain' }),
+      '采购合同',
+    )
+  })
+  await oldRectifyRequest
+  await oldParseRequest
+  await page.evaluate(async () => {
+    const { useAuthStore } = await import(/* @vite-ignore */ '/src/stores/auth.ts')
+    await useAuthStore().login('legal', 'test-password')
+  })
+  releaseResponses()
+  await page.evaluate(async () => {
+    const pendingWindow = window as typeof window & {
+      oldRectifyLoad?: Promise<void>
+      oldUpload?: Promise<unknown>
+    }
+    await Promise.all([pendingWindow.oldRectifyLoad, pendingWindow.oldUpload])
+  })
+
+  const staleState = await page.evaluate(async () => {
+    const rectifyModule = await import(/* @vite-ignore */ '/src/stores/rectify.ts')
+    const auditModule = await import(/* @vite-ignore */ '/src/stores/audit-session.ts')
+    const audit = auditModule.useAuditSessionStore()
+    return {
+      rectifications: rectifyModule.useRectifyStore().items,
+      contractId: audit.contractId,
+      elements: audit.elements,
+      uploadRecords: audit.uploadRecords,
+    }
+  })
+  expect(staleState).toEqual({
+    rectifications: [], contractId: null, elements: null, uploadRecords: [],
+  })
+
+  await page.evaluate(async () => {
+    const { useRectifyStore } = await import(/* @vite-ignore */ '/src/stores/rectify.ts')
+    await useRectifyStore().load(true)
+  })
+  expect(await page.evaluate(async () => {
+    const { useRectifyStore } = await import(/* @vite-ignore */ '/src/stores/rectify.ts')
+    return useRectifyStore().items[0]?.contract
+  })).toBe('新用户合同')
+})

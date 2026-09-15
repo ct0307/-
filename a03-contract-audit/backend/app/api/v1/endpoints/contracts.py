@@ -96,6 +96,8 @@ def _dept_accessible(contract, user) -> bool:
 
 # 审查状态推导：人工复核优先；其次是整改状态；其余为合规。
 def _derive_status(contract: Contract, risks: list) -> str:
+    if contract.status == "failed":
+        return "解析失败"
     if contract.status == "review_required" or contract.requires_review:
         return "待人工复核"
     if not risks:
