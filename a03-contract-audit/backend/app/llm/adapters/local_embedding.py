@@ -9,6 +9,10 @@
 - BAAI/bge-small-zh-v1.5（默认）：中文检索专用，384维，~100MB，MTEB 中文榜前列
 - BAAI/bge-base-zh-v1.5：768维，精度稍高，~400MB
 - paraphrase-multilingual-MiniLM-L12-v2：多语言，384维，~500MB
+
+注意：bge 系列的查询侧检索指令前缀（EMBED_QUERY_PREFIX）由检索层
+（services/rag/retriever._vector_search）在调用 embed() 前拼接，本适配器
+保持透明——入库的文档侧向量永远不加前缀。
 """
 import time
 from functools import lru_cache

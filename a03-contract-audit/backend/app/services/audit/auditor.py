@@ -733,6 +733,9 @@ def _ground_risks(
                 top_k=3,
                 contract_type=contract_type,
                 dimensions=dimensions or [],
+                # grounding 查询拼接了合同原文，其中的“第X条”是合同自身条款编号，
+                # 不是法条引用；必须关闭条号精确短路，走完整混合检索。
+                allow_exact=False,
             )
             validation = validate_support_relation(risk, sources)
             reliable = [source for source in sources if source.get("reliable", False)]

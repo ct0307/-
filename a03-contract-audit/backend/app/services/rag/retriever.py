@@ -13,6 +13,14 @@
      - 知识库为空 → 内置规则库关键词命中。
 
 BM25 索引带正文内容指纹缓存，知识正文或 ID 变化时自动重建。
+
+条号精确短路的安全边界（2026-09-15 修复）：
+  - exact 分支只对「简短的显式法条查询」触发（查询整体不超过
+    _EXACT_QUERY_MAX_CHARS 字符）。审查 grounding 会把合同原文拼进查询，
+    合同自身的"第X条"编号不是法条引用，必须走混合检索；调用方可传
+    allow_exact=False 显式关闭（grounding 路径即如此）。
+  - 本地 bge embedding 的查询侧按官方建议加检索指令前缀
+    （EMBED_QUERY_PREFIX），文档侧不加；API 后端不加。
 """
 import hashlib
 import json
@@ -41,6 +49,9 @@ _RRF_K = 60
 _PER_ROUTE_N = 30
 # 向量候选最低余弦相似度。低于阈值的“最近邻”不构成可靠依据。
 _MIN_VECTOR_SIMILARITY = 0.35
+# 条号精确短路只接受简短的显式法条查询。拼接了合同原文的长查询里出现的
+# “第X条”是合同自身条款编号，不是法条引用，不得触发 exact 分支。
+_EXACT_QUERY_MAX_CHARS = 40
 _CONTRACT_QUERY_TERMS = (
     "合同", "违约", "债权", "债务", "担保", "保证", "抵押", "质押",
     "价款", "租赁", "买卖", "承揽", "委托", "定金",
@@ -105,10 +116,13 @@ def retrieve(
     dimensions: list[str] | None = None,
     categories: list[str] | None = None,
     as_of: date | None = None,
+    allow_exact: bool = True,
 ) -> list[dict]:
     """检索相关依据条目 [{content, source, score}]。
 
     混合检索（向量 + BM25 RRF 融合）；embedding 不可用降级仅 BM25；库空降级关键词。
+    allow_exact=False 关闭条号精确短路（审查 grounding 等拼接查询必须关闭，
+    避免合同自身的“第X条”编号被当作法条引用劫持检索）。
     """
     plan = build_query_plan(query)
     db = SessionLocal()
@@ -149,7 +163,11 @@ def retrieve(
         log.info("rag.retrieve", mode="filtered_empty", matched=0)
         return []
 
-    article_number = plan.article_number
+    article_number = (
+        plan.article_number
+        if allow_exact and len(plan.original_query) <= _EXACT_QUERY_MAX_CHARS
+        else None
+    )
     if article_number:
         exact_docs = [
             doc for doc in docs
@@ -250,6 +268,10 @@ def rerank_results(
         for candidate in candidates
     ]
     mode = "cross_encoder" if scorer is not None else "deterministic_evidence_v1"
+    # 排序口径必须如实标注：cross-encoder 按精排分重排；
+    # 确定性模式刻意保留 RRF 融合顺序（弱启发式不覆盖混合检索排名），
+    # rerank_score 仅作观测信号记录，不得让下游误以为发生过精排。
+    ordering = "rerank_score_desc" if scorer is not None else "rrf_preserved"
     if scorer is not None:
         raw_scores = [float(value) for value in scorer(query, documents)]
         if len(raw_scores) != len(candidates) or not all(math.isfinite(value) for value in raw_scores):
@@ -279,6 +301,7 @@ def rerank_results(
             "rrf_score": float(item.get("score") or 0.0),
             "rerank_score": round(rerank_score, 6),
             "rerank_mode": mode,
+            "ordering": ordering,
         }
         ranked.append(item)
     if scorer is not None:
@@ -415,9 +438,16 @@ def _filter_docs(
 
 
 def _vector_search(query: str, vec_docs: list[tuple]) -> dict[int, int]:
-    """向量检索：返回 {doc_id: rank}（rank 从 0 起，越小越相关）。"""
+    """向量检索：返回 {doc_id: rank}（rank 从 0 起，越小越相关）。
+
+    本地 bge 模型按官方建议在查询侧加检索指令前缀（文档侧入库时不加），
+    否则短查询与训练分布不一致，检索质量明显下降；API 后端由服务商处理，不加。
+    """
     adapter = get_embedding_adapter()
-    query_vectors = adapter.embed([query])
+    query_text = query
+    if settings.EMBED_BACKEND.lower() == "local" and settings.EMBED_QUERY_PREFIX:
+        query_text = settings.EMBED_QUERY_PREFIX + query
+    query_vectors = adapter.embed([query_text])
     if len(query_vectors) != 1:
         raise LLMError(f"embedding 查询向量数量异常：expected=1, actual={len(query_vectors)}")
     query_vec = _coerce_vector(query_vectors[0])

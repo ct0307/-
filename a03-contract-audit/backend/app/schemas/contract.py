@@ -180,7 +180,10 @@ class KnowledgeImport(BaseModel):
     expiry_date: date | None = None
     applicable_contract_types: list[str] = Field(default_factory=list)
     applicable_dimensions: list[str] = Field(default_factory=list)
-    scope_mode: str = "unclassified"
+    # 显式导入（legal/admin 角色）默认全局可检索；检索过滤器对 unclassified
+    # 默认拒绝，若此处默认 unclassified 会导致“导入即死数据”。底层模型与
+    # prepare_documents 的默认拒绝不变，作为程序化路径的安全网。
+    scope_mode: str = "global"
 
     @field_validator("scope_mode")
     @classmethod

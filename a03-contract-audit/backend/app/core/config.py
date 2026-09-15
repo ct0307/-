@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     EMBED_MODEL: str = "quentinz/bge-large-zh-v1.5"
     # 向量维度（需与所用 embedding 模型一致）
     EMBED_DIM: int = 512  # bge-small-zh=512，bge-base-zh=768，bge-large-zh=1024
+    # 本地 bge 模型的查询侧检索指令前缀（官方推荐，仅 EMBED_BACKEND=local 时生效；
+    # 知识入库的文档侧不加）。置空字符串可关闭。
+    EMBED_QUERY_PREFIX: str = "为这个句子生成表示以用于检索相关文章："
 
     @model_validator(mode="after")
     def validate_production_security(self) -> "Settings":

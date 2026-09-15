@@ -67,6 +67,9 @@ export interface ImportFileResult {
   split_mode: 'article' | 'clause' | 'paragraph' | 'empty'
   article_count: number
   overlap_warning: string | null  // 同分类已有大量其他来源时的预警
+  scope_mode: string              // global / scoped / unclassified
+  retrievable: boolean            // false 表示导入的知识不参与检索
+  scope_warning: string | null    // unclassified（导入即死数据）时的预警
 }
 
 export interface LegalImportPreview {

@@ -456,6 +456,21 @@ def _parse_scope_form(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
 
+def _scope_visibility(scope_mode: str) -> dict:
+    """导入响应中的作用域可见性：unclassified 会被检索默认拒绝，必须如实告知。"""
+    retrievable = str(scope_mode).casefold() in {"global", "scoped"}
+    return {
+        "scope_mode": scope_mode,
+        "retrievable": retrievable,
+        "scope_warning": (
+            None
+            if retrievable
+            else "scope_mode=unclassified 的知识不参与检索（导入后不会被审查引用），"
+                 "如需可检索请使用 global 或配置 scoped 作用域。"
+        ),
+    }
+
+
 def _replace_source_chunks(db: Session, source: str, chunks: list[dict]) -> tuple[int, int]:
     """先完整准备新行，再用单次事务替换来源；失败时旧知识可回滚。"""
     try:
@@ -503,6 +518,7 @@ def import_knowledge(
         "skipped_duplicates": skipped,
         "split_mode": split.mode,
         "article_count": split.article_count,
+        **_scope_visibility(payload.scope_mode),
     }
 
 
@@ -511,7 +527,8 @@ async def import_knowledge_file(
     file: UploadFile = File(...),
     category: str = Form("auto"),
     overwrite: bool = Form(False),
-    scope_mode: str = Form("unclassified"),
+    # 显式导入默认全局可检索；unclassified 会被检索默认拒绝（导入即死数据）。
+    scope_mode: str = Form("global"),
     applicable_contract_types: str = Form("[]"),
     applicable_dimensions: str = Form("[]"),
     db: Session = Depends(get_db),
@@ -595,6 +612,7 @@ async def import_knowledge_file(
         "split_mode": split.mode,
         "article_count": split.article_count,
         "overlap_warning": overlap_warning,
+        **_scope_visibility(scope_metadata["scope_mode"]),
     }
 
 

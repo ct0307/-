@@ -240,6 +240,9 @@ async function startBatchImport() {
       if (res.overlap_warning) {
         ElMessage.warning({ message: res.overlap_warning, duration: 6000, showClose: true })
       }
+      if (res.scope_warning) {
+        ElMessage.warning({ message: res.scope_warning, duration: 6000, showClose: true })
+      }
     } catch (e: unknown) {
       item.status = 'error'
       const msg = e instanceof Error ? e.message : String(e)
@@ -424,6 +427,9 @@ async function retryFile(item: FileItem) {
     item.mode = res.split_mode
     item.detectedCat = catLabelMap[res.category] ?? res.category
     item.status = 'done'
+    if (res.scope_warning) {
+      ElMessage.warning({ message: res.scope_warning, duration: 6000, showClose: true })
+    }
   } catch (e: unknown) {
     item.status = 'error'
     const msg = e instanceof Error ? e.message : String(e)
