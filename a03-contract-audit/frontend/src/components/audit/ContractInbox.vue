@@ -10,6 +10,9 @@ const props = defineProps<{
   contractTypes: string[]
   departments: string[]
   selectedIds: number[]
+  readyIds: number[]
+  allReadySelected: boolean
+  someReadySelected: boolean
   canChangeDepartment: boolean
   loading: boolean
 }>()
@@ -21,6 +24,7 @@ const emit = defineEmits<{
   removeRecord: [itemId: number]
   deleteDraft: [itemId: number]
   toggleSelected: [itemId: number]
+  toggleAllReady: []
   auditReady: []
 }>()
 
@@ -46,6 +50,12 @@ const counts = computed(() => ({
   attention: props.items.filter((item) => item.status === 'awaiting_confirmation').length,
   failed: props.items.filter((item) => item.status === 'failed').length,
 }))
+
+const auditButtonLabel = computed(() => {
+  if (!counts.value.ready) return '暂无就绪合同'
+  if (props.selectedIds.length) return `审查选中的 ${props.selectedIds.length} 份合同`
+  return `审查全部 ${counts.value.ready} 份就绪合同`
+})
 
 const statusMeta: Record<ImportItem['status'], {
   label: string
@@ -168,7 +178,17 @@ async function deleteDraft(item: ImportItem) {
 
     <div v-if="items.length" class="inbox-table" role="table" aria-label="待审合同队列">
       <div class="table-row table-header" role="row">
-        <span role="columnheader">选择</span>
+        <span class="select-header" role="columnheader">
+          <input
+            class="row-checkbox"
+            type="checkbox"
+            :checked="allReadySelected"
+            :indeterminate.prop="someReadySelected"
+            :disabled="readyIds.length === 0 || loading"
+            aria-label="全选就绪合同"
+            @change="emit('toggleAllReady')"
+          >
+        </span>
         <span role="columnheader">文件</span>
         <span role="columnheader">状态</span>
         <span role="columnheader">合同类型</span>
@@ -285,14 +305,16 @@ async function deleteDraft(item: ImportItem) {
     </div>
 
     <footer class="action-bar">
-      <span>已选 <strong class="mono">{{ selectedIds.length }}</strong> 份就绪合同</span>
+      <span class="audit-scope-hint">
+        {{ selectedIds.length ? `已选 ${selectedIds.length} 份就绪合同` : '待确认和失败合同不会进入审查' }}
+      </span>
       <el-button
         type="primary"
         :loading="loading"
-        :disabled="selectedIds.length === 0"
-        aria-label="审查就绪项"
+        :disabled="counts.ready === 0"
+        :aria-label="auditButtonLabel"
         @click="emit('auditReady')"
-      >审查就绪项</el-button>
+      >{{ auditButtonLabel }}</el-button>
     </footer>
   </section>
 </template>
@@ -360,6 +382,7 @@ async function deleteDraft(item: ImportItem) {
 }
 .table-row > * { min-width: 0; padding: 10px 12px; }
 .table-header { min-height: 36px; background: var(--ink-3); color: var(--muted); font-size: 11px; }
+.select-header { display: flex; align-items: center; justify-content: center; }
 .status-failed { background: var(--seal-panel-soft); }
 .status-awaiting_confirmation { background: var(--amber-soft); }
 .select-cell { display: flex; justify-content: center; }
@@ -386,6 +409,7 @@ async function deleteDraft(item: ImportItem) {
 .action-bar { display: flex; min-height: 58px; align-items: center; justify-content: flex-end; gap: 18px; padding: 10px 20px; background: var(--ink-3); }
 .action-bar span { color: var(--muted); font-size: 12px; }
 .action-bar strong { color: var(--ivory); }
+.audit-scope-hint { min-width: 0; overflow-wrap: anywhere; }
 
 @media (max-width: 900px) {
   .table-header { display: none; }
@@ -411,6 +435,7 @@ async function deleteDraft(item: ImportItem) {
   .summary-strip > div:nth-child(2) { border-right: 0; }
   .summary-strip > div:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
   .table-row { padding: 10px 6px; }
-  .action-bar { position: sticky; bottom: 0; z-index: 2; justify-content: space-between; padding: 10px 14px; }
+  .action-bar { position: sticky; bottom: 0; z-index: 2; align-items: center; flex-wrap: wrap; justify-content: space-between; padding: 10px 14px; }
+  .action-bar :deep(.el-button) { flex: none; max-width: 100%; white-space: normal; }
 }
 </style>

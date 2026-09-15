@@ -58,6 +58,7 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 
 interface PrepareOptions {
   failContract11Result?: boolean
+  onBatchCreate?: (body: { import_item_ids: number[]; dimensions: string[] }) => void
 }
 
 async function prepare(page: Page, options: PrepareOptions = {}) {
@@ -84,6 +85,9 @@ async function prepare(page: Page, options: PrepareOptions = {}) {
       return fulfillJson(route, { ...mixedBatch.items[1], status: 'ready' })
     }
     if (path.endsWith('/batches/from-import') && method === 'POST') {
+      options.onBatchCreate?.(
+        route.request().postDataJSON() as { import_item_ids: number[]; dimensions: string[] },
+      )
       return fulfillJson(route, {
         id: 88,
         status: 'partial_failed',
@@ -204,9 +208,7 @@ async function submitAndCompleteBatch(page: Page) {
   await page.getByRole('combobox', { name: '开发协议.txt 的合同类型' }).click()
   await page.getByRole('option', { name: '软件开发外包合同' }).click()
   await page.getByRole('button', { name: '确认 开发协议.txt' }).click()
-  await page.getByRole('checkbox', { name: '选择采购合同.txt' }).check()
-  await page.getByRole('checkbox', { name: '选择开发协议.txt' }).check()
-  await page.getByRole('button', { name: '审查就绪项' }).click()
+  await page.getByRole('button', { name: '审查全部 2 份就绪合同' }).click()
 
   await expect(page.getByText('已提交 2 份合同')).toBeVisible()
   await expect(page.getByRole('region', { name: '审查批次 88' })).toContainText('部分失败')
@@ -215,6 +217,27 @@ async function submitAndCompleteBatch(page: Page) {
   await page.getByRole('button', { name: '重试失败项' }).click()
   await expect(page.getByRole('region', { name: '审查批次 88' })).toContainText('已完成')
 }
+
+test('audits every ready contract without requiring row selection', async ({ page }) => {
+  let submittedIds: number[] = []
+  await prepare(page, {
+    onBatchCreate: (body) => { submittedIds = body.import_item_ids },
+  })
+  await page.goto(`${baseUrl}/audit`)
+  await page.locator('input[type="file"]').setInputFiles([
+    { name: '采购合同.txt', mimeType: 'text/plain', buffer: Buffer.from('采购服务器设备') },
+    { name: '开发协议.txt', mimeType: 'text/plain', buffer: Buffer.from('交付软件源代码') },
+    { name: '扫描件.txt', mimeType: 'text/plain', buffer: Buffer.from('') },
+  ])
+  await page.getByRole('combobox', { name: '开发协议.txt 的合同类型' }).click()
+  await page.getByRole('option', { name: '软件开发外包合同' }).click()
+  await page.getByRole('button', { name: '确认 开发协议.txt' }).click()
+
+  await expect(page.getByRole('button', { name: '审查全部 2 份就绪合同' })).toBeEnabled()
+  await page.getByRole('button', { name: '审查全部 2 份就绪合同' }).click()
+
+  expect(submittedIds).toEqual([1, 2])
+})
 
 test('uploads mixed contracts, confirms one exception and audits ready items', async ({ page }) => {
   await prepare(page)

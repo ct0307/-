@@ -183,10 +183,11 @@ async function deleteImportDraft(itemId: number) {
 }
 
 async function auditReadyItems() {
-  if (!inbox.selectedIds.length) return
+  const targetIds = [...inbox.auditTargetIds]
+  if (!targetIds.length) return
   try {
     const created = await batchStore.createFromImport(
-      inbox.selectedIds,
+      targetIds,
       dimensions.value.filter((item) => item.on).map((item) => item.key),
     )
     await router.replace({ query: { ...route.query, batch: String(created.id) } })
@@ -379,6 +380,9 @@ const onboardSteps = [
       :contract-types="contractTypeOptions"
       :departments="availableDepartments"
       :selected-ids="inbox.selectedIds"
+      :ready-ids="inbox.readyIds"
+      :all-ready-selected="inbox.allReadySelected"
+      :some-ready-selected="inbox.someReadySelected"
       :can-change-department="canChangeDepartment"
       :loading="inbox.loading || batchStore.loading"
       @upload="uploadFiles"
@@ -387,6 +391,7 @@ const onboardSteps = [
       @remove-record="removeImportRecord"
       @delete-draft="deleteImportDraft"
       @toggle-selected="inbox.toggleSelected"
+      @toggle-all-ready="inbox.toggleAllReady"
       @audit-ready="auditReadyItems"
     />
 

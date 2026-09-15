@@ -147,7 +147,7 @@ npx.cmd playwright test tests/import-inbox-store.spec.ts
 
 Expected: 全部测试 PASS，0 failed。
 
-- [ ] **Step 5: 提交 Task 1**
+- [x] **Step 5: 提交 Task 1**
 
 ```powershell
 git add frontend/src/stores/import-inbox.ts frontend/tests/import-inbox-store.spec.ts
@@ -161,7 +161,7 @@ git commit -m "feat: add batch audit target selection"
 - Modify: `frontend/src/views/AuditView.vue:185-198,377-391`
 - Test: `frontend/tests/contract-inbox-workflow-e2e.spec.ts`
 
-- [ ] **Step 1: 写零选择提交全部的失败 E2E 测试**
+- [x] **Step 1: 写零选择提交全部的失败 E2E 测试**
 
 将测试路由记录 `/batches/from-import` 的请求体，并把既有工作流改为不勾选两行直接提交：
 
@@ -217,7 +217,7 @@ test('audits every ready contract without requiring row selection', async ({ pag
 })
 ```
 
-- [ ] **Step 2: 运行 E2E 并确认失败**
+- [x] **Step 2: 运行 E2E 并确认失败**
 
 Run:
 
@@ -228,7 +228,7 @@ npx.cmd playwright test tests/contract-inbox-workflow-e2e.spec.ts
 
 Expected: FAIL，找不到“审查全部 2 份就绪合同”按钮。
 
-- [ ] **Step 3: 扩展组件契约与动态文案**
+- [x] **Step 3: 扩展组件契约与动态文案**
 
 给 `ContractInbox.vue` 增加 props 和事件：
 
@@ -297,7 +297,7 @@ const auditButtonLabel = computed(() => {
 }
 ```
 
-- [ ] **Step 4: 视图提交目标 ID 快照**
+- [x] **Step 4: 视图提交目标 ID 快照**
 
 修改 `AuditView.vue`：
 
@@ -328,7 +328,7 @@ async function auditReadyItems() {
 @toggle-all-ready="inbox.toggleAllReady"
 ```
 
-- [ ] **Step 5: 更新既有 E2E 工作流断言**
+- [x] **Step 5: 更新既有 E2E 工作流断言**
 
 在 `submitAndCompleteBatch()` 删除两次逐行 `.check()`，改为点击动态按钮：
 
@@ -338,7 +338,7 @@ await page.getByRole('button', { name: '审查全部 2 份就绪合同' }).click
 
 保留批次部分失败、重试、查看风险结果和空风险结果的既有断言，证明主流程没有回归。
 
-- [ ] **Step 6: 运行相关 E2E 并确认通过**
+- [x] **Step 6: 运行相关 E2E 并确认通过**
 
 Run:
 
