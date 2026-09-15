@@ -9,6 +9,7 @@ from app.models.models import Contract, ImportBatch, ImportBatchItem, LookupItem
 from app.services.parser.ocr import OCRUnavailable
 from app.services.imports.classifier import TypeSuggestion
 from app.services.parser.elements import ElementResult
+from app.services.parser.extractor import DocumentParseResult
 from app.tasks import import_tasks
 
 
@@ -70,6 +71,8 @@ def test_parse_import_item_passes_classification_and_parse_review_gates(monkeypa
         text = "采购设备并交付"
         requires_review = True
         review_reason = "OCR 质量低"
+        total_pages = None
+        missing_pages = ()
 
     captured = {}
     monkeypatch.setattr(import_tasks, "SessionLocal", lambda: Session(engine))
@@ -124,6 +127,49 @@ def test_parse_import_item_hides_parser_failure_details(monkeypatch, tmp_path):
         assert item.error_message == "合同解析失败，请稍后重试"
         assert item.contract.status == "failed"
         assert "missing.pdf" not in item.error_message
+
+
+def test_parse_import_item_rolls_back_partial_parse_state_before_marking_failure(monkeypatch, tmp_path):
+    engine = _db()
+    with Session(engine) as db:
+        user = User(username="atomic", password_hash="x", role="legal", department="法务部")
+        db.add(user)
+        db.flush()
+        contract = Contract(
+            filename="atomic.pdf", storage_path=str(tmp_path / "atomic.pdf"),
+            uploaded_by=user.id, department=user.department,
+        )
+        batch = ImportBatch(owner_id=user.id, idempotency_key="task-atomic", total=1)
+        batch.items.append(ImportBatchItem(filename=contract.filename, contract=contract, status="queued"))
+        db.add(batch)
+        db.commit()
+        item_id = batch.items[0].id
+
+    monkeypatch.setattr(import_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(
+        import_tasks, "extract_document",
+        lambda _path: DocumentParseResult(
+            "甲方：测试公司", "mixed", ocr_confidence=0.42,
+            requires_review=True, review_reason="第 2 页未提取到有效文本",
+        ),
+    )
+    monkeypatch.setattr(
+        import_tasks, "classify_contract_type",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("分类器内部路径 C:/secret")),
+    )
+
+    result = import_tasks.parse_import_item.run(item_id)
+
+    with Session(engine) as db:
+        item = db.get(ImportBatchItem, item_id)
+        assert result["status"] == "failed"
+        assert item.contract.status == "failed"
+        assert item.contract.requires_review is False
+        assert item.contract.ocr_confidence is None
+        assert item.contract.review_reason == "合同解析失败，请稍后重试"
+        assert item.contract.elements_json == "{}"
+        assert item.contract.element_evidence_json == "{}"
+    engine.dispose()
 
 
 def test_parse_import_item_persists_ocr_unavailable_code_and_whitelisted_log_fields(monkeypatch, tmp_path):

@@ -134,6 +134,11 @@ def evaluate_ingestion(
         missing_pages = set(item.get("missing_pages") or ())
         total_pages = item.get("total_pages")
         covered_pages = item.get("covered_pages")
+        if item.get("document_kind") == "pdf" and (
+            not isinstance(total_pages, int) or total_pages <= 0 or covered_pages is None
+        ):
+            missing_pdf_page_count += 1
+            continue
         if isinstance(total_pages, int) and total_pages > 0 and covered_pages is not None:
             missing_pages.update(set(range(1, total_pages + 1)) - set(covered_pages))
         missing_pdf_page_count += len(missing_pages)
@@ -356,6 +361,7 @@ def evaluate_contract_set(
                 "case_id": case_id,
                 "status": "review_required" if requires_review else "parsed",
                 "error_code": None,
+                "document_kind": path.suffix.lower().lstrip("."),
                 "parse_source": parsed.source,
                 "ocr_confidence": parsed.ocr_confidence,
                 "total_pages": parsed.total_pages,
@@ -380,6 +386,7 @@ def evaluate_contract_set(
                 "case_id": case_id,
                 "status": "failed",
                 "error_code": error_code,
+                "document_kind": path.suffix.lower().lstrip("."),
                 "parse_source": None,
                 "ocr_confidence": None,
                 "total_pages": None,

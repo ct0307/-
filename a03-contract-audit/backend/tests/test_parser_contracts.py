@@ -417,7 +417,10 @@ def test_mixed_pdf_preserves_low_ocr_confidence(monkeypatch):
 def test_scanned_pdf_uses_ocr_when_text_extractors_are_empty(monkeypatch):
     """文本层和 PyMuPDF 均为空时必须进入 OCR，不能静默返回空文本。"""
     monkeypatch.setattr(pdfplumber, "open", lambda _: nullcontext(_EmptyPdf()))
-    monkeypatch.setattr(extractor, "_extract_pdf_pymupdf", lambda _: "")
+    monkeypatch.setattr(
+        extractor, "_extract_pdf_pymupdf_candidate",
+        lambda _data, expected_pages=None: _pymupdf_candidate(""),
+    )
     monkeypatch.setattr(
         extractor, "ocr_pdf_bytes",
         lambda _data, **_kwargs: OCRResult("甲方：测试公司", 1, 0.95, ("甲方：测试公司",)),
@@ -429,7 +432,10 @@ def test_scanned_pdf_uses_ocr_when_text_extractors_are_empty(monkeypatch):
 @pytest.mark.parametrize("ocr_result", ["没有页信息的文本", None, OCRResult("", 0, 0.0)])
 def test_ocr_rejects_results_without_valid_page_metadata(monkeypatch, ocr_result):
     monkeypatch.setattr(pdfplumber, "open", lambda _: nullcontext(_EmptyPdf()))
-    monkeypatch.setattr(extractor, "_extract_pdf_pymupdf", lambda _: "")
+    monkeypatch.setattr(
+        extractor, "_extract_pdf_pymupdf_candidate",
+        lambda _data, expected_pages=None: _pymupdf_candidate(""),
+    )
     monkeypatch.setattr(extractor, "ocr_pdf_bytes", lambda *_args, **_kwargs: ocr_result)
 
     with pytest.raises(OCRError):
@@ -621,6 +627,25 @@ def test_alternate_can_fill_empty_page_without_replacing_good_primary(monkeypatc
     result = extractor._extract_pdf_result(b"mixed")
     assert result.text == good + "\n第二页付款"
     assert result.source == "native"
+
+
+def test_many_missing_pages_use_bounded_range_summary(monkeypatch):
+    empty_pages = ("",) * 100
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(*empty_pages))
+    monkeypatch.setattr(
+        extractor, "_extract_pdf_pymupdf_candidate",
+        lambda _data, expected_pages=None: _pymupdf_candidate(*empty_pages),
+    )
+    monkeypatch.setattr(
+        extractor, "ocr_pdf_bytes",
+        lambda _data, **_kwargs: OCRResult("", 100, 0.95, empty_pages),
+    )
+
+    result = extractor._extract_pdf_result(b"many-empty-pages")
+
+    assert result.missing_pages == tuple(range(1, 101))
+    assert result.review_reason == "第 1-100 页未提取到有效文本"
+    assert len(result.review_reason) <= 255
 
 
 def _blank_pdf(page_count: int) -> bytes:

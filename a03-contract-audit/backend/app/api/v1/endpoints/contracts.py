@@ -224,11 +224,16 @@ def batch_upload_contracts(
                 apply_parse_quality(contract, parsed)
                 element_result = extract_element_result(parsed)
                 elements = legacy_element_values(element_result.values, text=parsed.text)
+                evidence_payload = element_evidence_payload(element_result, parsed=parsed)
                 requires_review, review_reason = merge_element_review(parsed, element_result)
                 contract.requires_review = requires_review
                 contract.review_reason = review_reason
                 contract.elements_json = json.dumps(
                     elements,
+                    ensure_ascii=False,
+                )
+                contract.element_evidence_json = json.dumps(
+                    evidence_payload,
                     ensure_ascii=False,
                 )
                 contract.status = "review_required" if requires_review else "parsed"
@@ -413,7 +418,7 @@ def parse_contract(
         # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
         element_result = extract_element_result(parsed)
         elements = legacy_element_values(element_result.values, text=parsed.text)
-        evidence_payload = element_evidence_payload(element_result)
+        evidence_payload = element_evidence_payload(element_result, parsed=parsed)
         requires_review, review_reason = merge_element_review(parsed, element_result)
         contract.requires_review = requires_review
         contract.review_reason = review_reason

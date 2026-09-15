@@ -2,14 +2,21 @@ import { expect, test, type Page } from '@playwright/test'
 
 // 仅隔离 HTTP 边界，运行真实 Vue 页面、Axios 拦截器、Pinia 和路由。
 async function prepare(page: Page) {
+  let loginSequence = 0
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/auth/login')) {
       const username = new URLSearchParams(route.request().postData() || '').get('username')
       await route.fulfill({ json: {
-        access_token: `test-${username}`, token_type: 'bearer', role: 'legal',
+        access_token: `test-${username}-${++loginSequence}`, token_type: 'bearer', role: 'legal',
         username, department: '法务部', authorized_departments: ['法务部'],
       } })
+    } else if (path.endsWith('/rectifications')) {
+      const authorization = route.request().headers().authorization
+      await route.fulfill({ json: authorization === 'Bearer test-legal-2' ? [{
+        id: 'RC-NEW', contract: '用户乙合同', risk: '新会话风险', level: 'low',
+        owner: '用户乙', status: '待处理', created: '2026-09-15', due: '2026-09-22', note: '',
+      }] : [] })
     } else if (path.endsWith('/dashboard/summary')) {
       await route.fulfill({ json: {
         total_contracts: 0, total_risks: 0, level_distribution: {},
@@ -56,8 +63,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(page).toHaveURL(/\/dashboard$/)
 
     await page.evaluate(async () => {
-      const paths = ['/src/stores/audit-session.ts', '/src/stores/import-inbox.ts', '/src/stores/batch.ts']
-      const [auditModule, inboxModule, batchModule] = await Promise.all(paths.map((path) => import(/* @vite-ignore */ path)))
+      const paths = ['/src/stores/audit-session.ts', '/src/stores/import-inbox.ts', '/src/stores/batch.ts', '/src/stores/rectify.ts', '/src/stores/notify.ts']
+      const [auditModule, inboxModule, batchModule, rectifyModule, notifyModule] = await Promise.all(paths.map((path) => import(/* @vite-ignore */ path)))
       const audit = auditModule.useAuditSessionStore()
       audit.contractId = 42
       audit.filename = '测试合同.pdf'
@@ -66,6 +73,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       inbox.selectedIds = [42]
       inbox.polling = true
       batchModule.useBatchStore().polling = true
+      rectifyModule.useRectifyStore().items = [{
+        id: 'RC-PRIVATE', contract: '用户甲合同', risk: '敏感风险', level: 'high', owner: '用户甲',
+        status: '待处理', created: '2026-09-15', due: '2026-09-20', note: '内部说明',
+      }]
+      notifyModule.useNotifyStore().push('rectify', '用户甲通知', '敏感风险内容')
       localStorage.setItem('qijian-active-audit', '{}')
       localStorage.setItem('session-test-preference', '保留')
       document.documentElement.dataset.sessionMarker = '保持页面实例'
@@ -76,8 +88,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(page.getByPlaceholder('用户名')).toBeVisible()
 
     const state = await page.evaluate(async () => {
-      const paths = ['/src/stores/auth.ts', '/src/stores/audit-session.ts', '/src/stores/import-inbox.ts', '/src/stores/batch.ts', '/src/utils/session.ts', '/src/router/index.ts']
-      const [authModule, auditModule, inboxModule, batchModule, sessionModule, routerModule] = await Promise.all(paths.map((path) => import(/* @vite-ignore */ path)))
+      const paths = ['/src/stores/auth.ts', '/src/stores/audit-session.ts', '/src/stores/import-inbox.ts', '/src/stores/batch.ts', '/src/stores/rectify.ts', '/src/stores/notify.ts', '/src/utils/session.ts', '/src/router/index.ts']
+      const [authModule, auditModule, inboxModule, batchModule, rectifyModule, notifyModule, sessionModule, routerModule] = await Promise.all(paths.map((path) => import(/* @vite-ignore */ path)))
       const auth = authModule.useAuthStore()
       const audit = auditModule.useAuditSessionStore()
       const inbox = inboxModule.useImportInboxStore()
@@ -86,6 +98,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         authenticated: auth.isAuthenticated(), username: auth.username, departments: auth.authorizedDepartments,
         contractId: audit.contractId, elements: audit.elements, selectedIds: inbox.selectedIds,
         inboxPolling: inbox.polling, batchPolling: batchModule.useBatchStore().polling,
+        rectifications: rectifyModule.useRectifyStore().items,
+        notifications: notifyModule.useNotifyStore().items,
         keysCleared: Object.values(sessionModule.SESSION_KEYS).every((key) => localStorage.getItem(key as string) === null),
         preference: localStorage.getItem('session-test-preference'),
         marker: document.documentElement.dataset.sessionMarker,
@@ -95,11 +109,17 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     expect(state).toEqual({
       authenticated: false, username: '', departments: [], contractId: null, elements: null,
       selectedIds: [], inboxPolling: false, batchPolling: false, keysCleared: true,
+      rectifications: [], notifications: [],
       preference: '保留', marker: '保持页面实例', overflow: false,
     })
     await expect(page).toHaveURL(/\/login$/)
     await page.screenshot({ path: testInfo.outputPath('expired-login.png'), fullPage: true })
     await login(page)
+    await expect.poll(() => page.evaluate(async () => {
+      const modulePath = '/src/stores/rectify.ts'
+      const { useRectifyStore } = await import(/* @vite-ignore */ modulePath)
+      return useRectifyStore().items[0]?.contract
+    })).toBe('用户乙合同')
     expect(pageErrors).toEqual([])
   })
 }
@@ -116,14 +136,14 @@ test('旧请求迟到的 401 不清理新登录会话', async ({ page }) => {
   const requested = page.waitForRequest('**/api/v1/session-old')
   const pending = requestError(page, '/session-old')
   const oldRequest = await requested
-  expect(oldRequest.headers().authorization).toBe('Bearer test-legal')
+  expect(oldRequest.headers().authorization).toBe('Bearer test-legal-1')
   await page.evaluate(async () => {
     const modulePath = '/src/stores/auth.ts'
     const { useAuthStore } = await import(/* @vite-ignore */ modulePath)
-    await useAuthStore().login('new-user', 'test-password')
+    await useAuthStore().login('legal', 'test-password')
   })
   releaseResponse()
   await pending
-  expect(await page.evaluate(() => localStorage.getItem('token'))).toBe('test-new-user')
+  expect(await page.evaluate(() => localStorage.getItem('token'))).toBe('test-legal-2')
   await expect(page).toHaveURL(/\/dashboard$/)
 })

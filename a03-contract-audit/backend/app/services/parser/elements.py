@@ -37,7 +37,11 @@ class ElementResult:
     source_text: str
 
 
-def element_evidence_payload(result: ElementResult) -> dict[str, object]:
+def element_evidence_payload(
+    result: ElementResult,
+    *,
+    parsed: DocumentParseResult | None = None,
+) -> dict[str, object]:
     """构造可持久化的版本化证据，不包含合同全文。"""
     fields: dict[str, object] = {}
     for field, value in result.evidence.items():
@@ -45,11 +49,17 @@ def element_evidence_payload(result: ElementResult) -> dict[str, object]:
             fields[field] = [asdict(item) for item in value]
         else:
             fields[field] = asdict(value)
-    return {
+    payload: dict[str, object] = {
         "schema_version": 1,
         "fields": fields,
         "review_fields": list(result.review_fields),
     }
+    if parsed is not None:
+        payload["document"] = {
+            "total_pages": parsed.total_pages,
+            "missing_pages": list(parsed.missing_pages),
+        }
+    return payload
 
 
 @dataclass(frozen=True)

@@ -7,7 +7,7 @@ import pytest
 from app.services.imports.classifier import TypeSuggestion
 from app.services.imports.file_validation import FileValidationError, ValidatedUpload
 from app.services.parser.elements import ElementResult
-from app.services.parser.extractor import DocumentParseResult
+from app.services.parser.extractor import DocumentBlock, DocumentParseResult, SourceAnchor
 from evaluation.datasets.frozen_contracts_v3.cases import load_cases
 from evaluation.ingestion_reliability import (
     evaluate_contract_set,
@@ -102,6 +102,22 @@ def test_gate_cross_checks_page_anchors_without_relying_on_missing_pages_flag():
     assert report.metrics["missing_pdf_page_count"] == 1
 
 
+def test_gate_rejects_pdf_without_page_coverage_metadata():
+    report = evaluate_ingestion(
+        valid_results=[{
+            "status": "parsed", "error_code": None, "document_kind": "pdf",
+            "total_pages": None, "missing_pages": [], "covered_pages": [],
+        }],
+        invalid_results=[],
+        classification={"auto_ready_enabled": False, "auto_ready_count": 0},
+        element_report=passing_element_report(),
+    )
+
+    assert report.passed is False
+    assert "pdf_page_coverage" in report.failures
+    assert report.metrics["missing_pdf_page_count"] == 1
+
+
 def test_gate_rejects_invalid_contract_creation_and_missing_evidence():
     report = evaluate_ingestion(
         valid_results=[{"status": "parsed", "error_code": None}],
@@ -168,7 +184,15 @@ def test_contract_set_runner_evaluates_without_serializing_text(monkeypatch, tmp
 
     def fake_extract(path):
         case_id = path.split("F3-")[1][:3]
-        return DocumentParseResult(text=f"F3-{case_id} 合同原文", source="native")
+        text = f"F3-{case_id} 合同原文"
+        return DocumentParseResult(
+            text=text,
+            source="native",
+            total_pages=1,
+            blocks=(DocumentBlock(
+                "page-1", "page_text", text, SourceAnchor(page_number=1),
+            ),),
+        )
 
     monkeypatch.setattr(module, "validate_upload", fake_validate)
     monkeypatch.setattr(

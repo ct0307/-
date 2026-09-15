@@ -170,6 +170,21 @@ def _candidate_preserves_nonempty_pages(
     )
 
 
+def _format_page_ranges(pages: tuple[int, ...]) -> str:
+    """把连续页码压缩为区间，避免复核原因超过数据库字段长度。"""
+    ordered = sorted(set(pages))
+    ranges: list[str] = []
+    start = previous = ordered[0]
+    for page in ordered[1:]:
+        if page == previous + 1:
+            previous = page
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = page
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return "、".join(ranges)
+
+
 def _extract_pdf_result(data: bytes) -> DocumentParseResult:
     """PDF 文本提取：pdfplumber 优先，乱码时降级到 PyMuPDF。"""
     import pdfplumber
@@ -326,7 +341,7 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
             else "OCR 未识别出有效文本"
         )
     if missing_pages:
-        page_reason = "第 " + "、".join(map(str, missing_pages)) + " 页未提取到有效文本"
+        page_reason = f"第 {_format_page_ranges(missing_pages)} 页未提取到有效文本"
         review_reason = "；".join(part for part in (review_reason, page_reason) if part)
     ocr_page_set = set(selected)
     blocks_list: list[DocumentBlock] = []

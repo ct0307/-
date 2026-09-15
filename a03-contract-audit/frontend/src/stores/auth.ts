@@ -4,6 +4,8 @@ import { login as loginApi } from '@/api/contract'
 import { useAuditSessionStore } from '@/stores/audit-session'
 import { useBatchStore } from '@/stores/batch'
 import { useImportInboxStore } from '@/stores/import-inbox'
+import { useNotifyStore } from '@/stores/notify'
+import { useRectifyStore } from '@/stores/rectify'
 import { clearSessionStorage, SESSION_KEYS } from '@/utils/session'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -19,6 +21,8 @@ export const useAuthStore = defineStore('auth', () => {
     useAuditSessionStore().reset()
     useImportInboxStore().reset()
     useBatchStore().reset()
+    useRectifyStore().reset()
+    useNotifyStore().reset()
   }
 
   async function login(user: string, password: string) {

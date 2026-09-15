@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from io import BytesIO
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -18,7 +19,7 @@ from app.models.models import AuditLog, Contract, LookupItem, Risk, User
 from app.schemas.contract import LookupItemCreate
 from app.schemas.contract import AuditRequest
 from app.schemas.contract import ParseErrorResponse
-from app.services.parser.extractor import DocumentParseResult
+from app.services.parser.extractor import DocumentBlock, DocumentParseResult, SourceAnchor
 from app.services.parser.ocr import OCRError, OCRLimitExceeded, OCRTimeout, OCRUnavailable
 from app.services import audit_log
 
@@ -321,7 +322,13 @@ def test_legacy_batch_parse_failure_keeps_file_and_processes_next_item(monkeypat
             calls.append(path)
             if len(calls) == 1:
                 raise OCRError("C:/secret/contract.pdf")
-            return DocumentParseResult("合同有效条款", "native")
+            text = "甲方：测试公司\n合同有效条款"
+            return DocumentParseResult(
+                text, "native", total_pages=1,
+                blocks=(DocumentBlock(
+                    "pdf-page-1", "page_text", text, SourceAnchor(page_number=1),
+                ),),
+            )
 
         monkeypatch.setattr(contracts, "extract_document", parse)
         result = contracts.batch_upload_contracts(
@@ -336,7 +343,11 @@ def test_legacy_batch_parse_failure_keeps_file_and_processes_next_item(monkeypat
         from pathlib import Path
         assert Path(failed.storage_path).is_file()
         assert result[1]["status"] == "success"
-        assert db.get(Contract, result[1]["contract_id"]).status == "parsed"
+        succeeded = db.get(Contract, result[1]["contract_id"])
+        assert succeeded.status == "parsed"
+        evidence = json.loads(succeeded.element_evidence_json)
+        assert evidence["fields"]["party_a"]["page"] == 1
+        assert evidence["document"] == {"total_pages": 1, "missing_pages": []}
     engine.dispose()
 
 
@@ -354,7 +365,12 @@ def test_parse_response_exposes_missing_pages_and_persists_reason(monkeypatch, t
         assert response.total_pages == 3
         assert response.missing_pages == [2]
         db.expire_all()
-        assert db.get(Contract, contract.id).review_reason == parsed.review_reason
+        persisted = db.get(Contract, contract.id)
+        assert persisted.review_reason == parsed.review_reason
+        assert json.loads(persisted.element_evidence_json)["document"] == {
+            "total_pages": 3,
+            "missing_pages": [2],
+        }
         assert response.status == "review_required"
     engine.dispose()
 

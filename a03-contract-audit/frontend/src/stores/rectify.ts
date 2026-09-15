@@ -59,5 +59,12 @@ export const useRectifyStore = defineStore('rectify', () => {
     if (it) it.status = updated.status
   }
 
-  return { items, loading, error, total, countByStatus, openCount, load, addFromRisk, setStatus }
+  function reset() {
+    items.value = []
+    loading.value = false
+    error.value = ''
+    loaded = false
+  }
+
+  return { items, loading, error, total, countByStatus, openCount, load, addFromRisk, setStatus, reset }
 })

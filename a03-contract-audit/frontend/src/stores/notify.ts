@@ -42,5 +42,9 @@ export const useNotifyStore = defineStore('notify', () => {
     items.value.forEach((n) => (n.read = true))
   }
 
-  return { items, unreadCount, hasUnread, push, markAllRead }
+  function reset() {
+    items.value = []
+  }
+
+  return { items, unreadCount, hasUnread, push, markAllRead, reset }
 })
