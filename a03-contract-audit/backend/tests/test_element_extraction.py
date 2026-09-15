@@ -414,6 +414,80 @@ def test_controlled_amount_aliases_capture_following_bare_money(text, expected):
     _assert_evidence(result, "amount", page=1)
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "合同金额或结算口径为人\n民币1,460,000元。付款按“验收后付款”执行。",
+            "人民币1,460,000元",
+        ),
+        (
+            "合同金额或结算口径为人民币3,200,00\n0元。付款按“验收后付款”执行。",
+            "人民币3,200,000元",
+        ),
+        (
+            "本订单采用固定计价，金额为人民币360,\n000元；付款节点为验收后付款。",
+            "人民币360,000元",
+        ),
+    ],
+)
+def test_structured_amount_survives_pdf_line_wrapping(text, expected):
+    result = extract_element_result(_parsed(text))
+
+    assert result.values["amount"] == expected
+    assert "amount" not in result.review_fields
+    _assert_evidence(result, "amount", page=1)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "合同金额或结算口径为服务费人\n民币1,080,000元。付款按“按月结算”执行。",
+            "服务费人民币1,080,000元",
+        ),
+        (
+            "合同金额或结算口径为\n建设费人民币5,800,000元，"
+            "云资源首年人民币960,000元。付款按“分期支付”执行。",
+            "建设费人民币5,800,000元，云资源首年人民币960,000元",
+        ),
+        (
+            "合同金额或结算口径为单位\n推荐费标准为年薪的22%。"
+            "付款按“入职后支付”执行。",
+            "单位推荐费标准为年薪的22%",
+        ),
+    ],
+)
+def test_structured_amount_preserves_business_prefix_and_composite_value(text, expected):
+    result = extract_element_result(_parsed(text))
+
+    assert result.values["amount"] == expected
+    assert "amount" not in result.review_fields
+    _assert_evidence(result, "amount", page=1)
+
+
+def test_no_fixed_total_suppresses_lower_priority_fee_candidates():
+    result = extract_element_result(_parsed(
+        "合同金额或结算口径为按有效订单、实际验收数量及约定单价据实结算，"
+        "不设固定总额。付款按“按月结算”执行。"
+        "租赁本金为人民币68,000元。"
+    ))
+
+    assert result.values["amount"] is None
+    assert "amount" not in result.evidence
+    assert "amount" not in result.review_fields
+
+
+def test_no_fixed_total_does_not_suppress_later_explicit_contract_amount():
+    result = extract_element_result(_parsed(
+        "框架部分据实结算，不设固定总额。"
+        "本补充订单合同金额为人民币420,000元。"
+    ))
+
+    assert result.values["amount"] == "人民币420,000元"
+    _assert_evidence(result, "amount", page=1)
+
+
 def test_legacy_api_result_retains_signals_when_called_through_structured_result(monkeypatch):
     parsed = _parsed("甲方：甲公司\n签署日期：2026-10-1\n违约责任：按约承担。")
     monkeypatch.setattr(contracts, "extract_document", lambda _path: parsed)

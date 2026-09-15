@@ -92,8 +92,8 @@ _SUBJECT_PATTERNS = (
 )
 
 _STRUCTURED_AMOUNT_PATTERNS = (
-    re.compile(r"合同金额或结算口径为(.{1,100}?)。付款按"),
-    re.compile(r"金额为(.{1,100}?)[；;]付款节点为"),
+    re.compile(r"合同金额或结算口径为([\s\S]{1,160}?)。\s*付款按"),
+    re.compile(r"金额为([\s\S]{1,160}?)[；;]\s*付款节点为"),
 )
 
 _AMOUNT_PATTERN = re.compile(
@@ -208,17 +208,29 @@ def _collect_section_parties(text: str) -> tuple[list[_Candidate], list[_Candida
 
 def _collect_amounts(text: str) -> list[_Candidate]:
     candidates: list[_Candidate] = []
+    structured_spans: list[tuple[int, int]] = []
+    no_fixed_total = False
     for pattern in _STRUCTURED_AMOUNT_PATTERNS:
         for match in pattern.finditer(text):
             raw = match.group(1).strip()
+            structured_spans.append(match.span(1))
             if not raw or any(
                 marker in raw
                 for marker in ("不设固定总额", "据实结算", "不设固定金额")
             ):
+                no_fixed_total = True
                 continue
             left_trimmed = len(match.group(1)) - len(match.group(1).lstrip())
             start = match.start(1) + left_trimmed
-            candidates.append(_Candidate(raw, raw, start, start + len(raw), 0.995))
+            candidates.append(
+                _Candidate(
+                    _normalize_amount(raw),
+                    raw,
+                    start,
+                    start + len(raw),
+                    0.995,
+                )
+            )
     for match in _AMOUNT_PATTERN.finditer(text):
         sentence_start = max(
             (text.rfind(mark, 0, match.start()) for mark in "。！？\n；;"),
@@ -238,17 +250,34 @@ def _collect_amounts(text: str) -> list[_Candidate]:
         explicit_contract_amount = any(
             item in label for item in _EXPLICIT_CONTRACT_AMOUNT_LABELS
         )
+        inside_structured_value = any(
+            start <= match.start(1) and match.end(1) <= end
+            for start, end in structured_spans
+        )
         weak_material_context = any(
             item in text[max(sentence_start, match.start() - 16):match.start()]
             for item in _NON_CONTRACT_AMOUNT_CONTEXT
         )
-        if not explicit_contract_amount and (excluded_near_label or excluded_in_sentence or weak_material_context):
+        if inside_structured_value or (
+            not explicit_contract_amount
+            and (
+                no_fixed_total
+                or excluded_near_label
+                or excluded_in_sentence
+                or weak_material_context
+            )
+        ):
             continue
         confidence = 0.99 if explicit_contract_amount else 0.90
         candidate = _candidate(match, confidence, normalize=_normalize_amount)
         candidates.append(candidate)
     alias_pattern = re.compile("|".join(map(re.escape, _AMOUNT_ALIAS_LABELS)))
     for label_match in alias_pattern.finditer(text):
+        if no_fixed_total or any(
+            start <= label_match.start() < end
+            for start, end in structured_spans
+        ):
+            continue
         segment_end = min(
             next((text.find(mark, label_match.end()) for mark in "。；;" if text.find(mark, label_match.end()) >= 0), len(text)),
             label_match.end() + 100,
