@@ -67,6 +67,7 @@ _DEV_COLUMNS = {
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
     "contracts": [
         ("elements_json", "TEXT DEFAULT '{}'"),
+        ("element_evidence_json", "TEXT DEFAULT '{}' NOT NULL"),
         ("parse_source", "VARCHAR(16) DEFAULT 'native' NOT NULL"),
         ("ocr_confidence", "FLOAT"),
         ("requires_review", "BOOLEAN DEFAULT 0 NOT NULL"),

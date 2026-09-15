@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import Mock
+from zipfile import ZIP_DEFLATED, ZipFile
 
+import fitz
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
@@ -17,7 +19,7 @@ from app.schemas.contract import LookupItemCreate
 from app.schemas.contract import AuditRequest
 from app.schemas.contract import ParseErrorResponse
 from app.services.parser.extractor import DocumentParseResult
-from app.services.parser.ocr import OCRUnavailable
+from app.services.parser.ocr import OCRError, OCRLimitExceeded, OCRTimeout, OCRUnavailable
 from app.services import audit_log
 
 
@@ -54,6 +56,26 @@ def _upload(filename: str, content: bytes) -> object:
     from fastapi import UploadFile
 
     return UploadFile(filename=filename, file=BytesIO(content))
+
+
+def _docx_with_invalid_structure() -> bytes:
+    content = BytesIO()
+    with ZipFile(content, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("word/other.xml", "<document />")
+    return content.getvalue()
+
+
+def _encrypted_pdf() -> bytes:
+    document = fitz.open()
+    document.new_page().insert_text((72, 72), "test")
+    try:
+        return document.tobytes(
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            owner_pw="owner-password",
+            user_pw="user-password",
+        )
+    finally:
+        document.close()
 
 
 def test_risk_api_returns_trace_and_redacts_business_retrieval_query(tmp_path):
@@ -137,14 +159,14 @@ def test_single_upload_is_idempotent_and_rejects_payload_mismatch(monkeypatch, t
         monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
 
         first = contracts.upload_contract(
-            _upload("contract.pdf", b"same contract"),
+            _upload("contract.txt", b"same contract"),
             contract_type="",
             idempotency_key="upload-request-001",
             db=db,
             user=user,
         )
         repeated = contracts.upload_contract(
-            _upload("contract.pdf", b"same contract"),
+            _upload("contract.txt", b"same contract"),
             contract_type="",
             idempotency_key="upload-request-001",
             db=db,
@@ -158,7 +180,7 @@ def test_single_upload_is_idempotent_and_rejects_payload_mismatch(monkeypatch, t
 
         with pytest.raises(HTTPException) as exc_info:
             contracts.upload_contract(
-                _upload("contract.pdf", b"different contract"),
+                _upload("contract.txt", b"different contract"),
                 contract_type="",
                 idempotency_key="upload-request-001",
                 db=db,
@@ -166,6 +188,120 @@ def test_single_upload_is_idempotent_and_rejects_payload_mismatch(monkeypatch, t
             )
 
         assert exc_info.value.status_code == 409
+        assert db.query(Contract).count() == 1
+        assert len(list(tmp_path.iterdir())) == 1
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "error_code"),
+    [
+        ("broken.pdf", b"%PDF-not-a-document", "PDF_CORRUPT"),
+        ("broken.docx", _docx_with_invalid_structure(), "DOCX_STRUCTURE_INVALID"),
+    ],
+)
+def test_single_upload_rejects_invalid_content_before_persistence(
+    monkeypatch, tmp_path, filename, content, error_code
+):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username=f"invalid-{filename}",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+
+        with pytest.raises(HTTPException) as raised:
+            contracts.upload_contract(
+                _upload(filename, content),
+                contract_type="",
+                idempotency_key=f"invalid-upload-{filename}",
+                db=db,
+                user=user,
+            )
+
+        assert raised.value.status_code == 422
+        assert raised.value.detail["code"] == error_code
+        assert db.query(Contract).count() == 0
+        assert list(tmp_path.iterdir()) == []
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "status_code", "error_code"),
+    [
+        ("empty.txt", b"", 400, "EMPTY_FILE"),
+        ("disguised.pdf", b"plain text", 400, "FILE_TYPE_MISMATCH"),
+        ("encrypted.pdf", _encrypted_pdf(), 422, "PDF_ENCRYPTED"),
+    ],
+)
+def test_single_upload_returns_stable_preflight_error_codes(
+    monkeypatch, tmp_path, filename, content, status_code, error_code
+):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username=f"preflight-{filename}",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+
+        with pytest.raises(HTTPException) as raised:
+            contracts.upload_contract(
+                _upload(filename, content),
+                contract_type="",
+                idempotency_key=f"preflight-upload-{filename}",
+                db=db,
+                user=user,
+            )
+
+        assert raised.value.status_code == status_code
+        assert raised.value.detail["code"] == error_code
+        assert db.query(Contract).count() == 0
+        assert list(tmp_path.iterdir()) == []
+    engine.dispose()
+
+
+def test_legacy_batch_upload_isolates_invalid_content(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(
+            username="legacy-invalid-content",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+
+        result = contracts.batch_upload_contracts(
+            files=[_upload("broken.pdf", b"%PDF-not-a-document"), _upload("valid.txt", b"valid")],
+            contract_type="采购合同",
+            db=db,
+            user=user,
+        )
+
+        assert result[0] == {
+            "filename": "broken.pdf",
+            "status": "failed",
+            "error_code": "PDF_CORRUPT",
+            "error": "PDF 文件损坏或无法打开",
+        }
+        assert result[1]["filename"] == "valid.txt"
+        assert result[1]["status"] == "success"
+        assert result[1]["contract_id"] is not None
         assert db.query(Contract).count() == 1
         assert len(list(tmp_path.iterdir())) == 1
     engine.dispose()
@@ -198,7 +334,7 @@ def test_deleted_contract_does_not_block_reupload_with_same_idempotency_key(monk
         monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
 
         uploaded = contracts.upload_contract(
-            _upload("contract.pdf", b"replacement contract"),
+            _upload("contract.txt", b"replacement contract"),
             contract_type="采购合同",
             idempotency_key="reupload-request-001",
             db=db,
@@ -230,7 +366,7 @@ def test_upload_keeps_committed_file_when_response_refresh_fails(monkeypatch, tm
         monkeypatch.setattr(db, "refresh", fail_refresh)
         with pytest.raises(HTTPException) as exc_info:
             contracts.upload_contract(
-                _upload("contract.pdf", b"committed contract"),
+                _upload("contract.txt", b"committed contract"),
                 contract_type="",
                 idempotency_key="upload-request-refresh-failure",
                 db=db,
@@ -436,7 +572,6 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
                 "OCR 平均置信度低于 75%",
             ),
         )
-        monkeypatch.setattr(contracts, "extract_elements", lambda _text: {})
         monkeypatch.setattr(
             contracts,
             "extract_elements_with_llm",
@@ -463,6 +598,7 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
             {
                 "code": "PDF_TEXT_ENCODING_ERROR",
                 "detail": "PDF 文本编码异常，请重新导出 PDF 后重试",
+                "action": "重新导出 PDF 后重试",
             },
         ),
         (
@@ -470,7 +606,35 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
             503,
             {
                 "code": "OCR_UNAVAILABLE",
-                "detail": "OCR 服务暂不可用，请稍后重试或上传含文本层的文件",
+                "detail": "OCR 服务暂不可用，请联系管理员修复后重试",
+                "action": "联系管理员修复后重试",
+            },
+        ),
+        (
+            OCRTimeout("C:/secret/contracts/timeout.pdf"),
+            503,
+            {
+                "code": "OCR_TIMEOUT",
+                "detail": "OCR 处理超时，请稍后重试或拆分文件",
+                "action": "稍后重试或拆分文件",
+            },
+        ),
+        (
+            OCRLimitExceeded("C:/secret/contracts/large.pdf"),
+            422,
+            {
+                "code": "OCR_LIMIT_EXCEEDED",
+                "detail": "文件超出 OCR 处理限制，请拆分或压缩文件后重试",
+                "action": "拆分或压缩文件后重试",
+            },
+        ),
+        (
+            OCRError("C:/secret/third-party-error"),
+            503,
+            {
+                "code": "OCR_PROTOCOL_ERROR",
+                "detail": "OCR 服务响应异常，请稍后重试",
+                "action": "稍后重试",
             },
         ),
         (
@@ -479,6 +643,7 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
             {
                 "code": "PARSE_INTERNAL_ERROR",
                 "detail": "合同解析失败，请稍后重试",
+                "action": "稍后重试",
             },
         ),
         (
@@ -487,6 +652,7 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
             {
                 "code": "PARSE_INTERNAL_ERROR",
                 "detail": "合同解析失败，请稍后重试",
+                "action": "稍后重试",
             },
         ),
     ],
@@ -514,7 +680,10 @@ def test_parse_contract_maps_exceptions_to_safe_errors(
             contracts.parse_contract(contract.id, db=db, user=user)
 
         assert context.value.status_code == expected_status
-        assert context.value.detail == expected_detail
+        assert context.value.detail == {
+            **expected_detail,
+            "correlation_id": f"contract:{contract.id}",
+        }
         assert "secret" not in repr(context.value.detail).lower()
         assert logger.events == [
             (
@@ -549,7 +718,9 @@ def test_parse_contract_rejects_empty_text_with_safe_error(monkeypatch, tmp_path
         assert context.value.status_code == 422
         assert context.value.detail == {
             "code": "PDF_TEXT_EMPTY",
-            "detail": "未能从文件中提取有效文本，请上传含文本层的文件",
+            "detail": "未能从文件中提取有效文本，请重新导出 PDF 后重试",
+            "action": "重新导出 PDF 后重试",
+            "correlation_id": f"contract:{contract.id}",
         }
         assert logger.events[0][1]["exception_type"] == "ValueError"
     engine.dispose()
@@ -574,8 +745,8 @@ def test_parse_contract_rolls_back_partial_quality_changes(monkeypatch, tmp_path
         )
         monkeypatch.setattr(
             contracts,
-            "extract_elements",
-            lambda _text: (_ for _ in ()).throw(RuntimeError("C:/secret/parser")),
+            "extract_element_result",
+            lambda _parsed: (_ for _ in ()).throw(RuntimeError("C:/secret/parser")),
         )
 
         with pytest.raises(HTTPException):
@@ -605,9 +776,21 @@ def test_parse_contract_documents_safe_error_envelope():
         500: ParseErrorResponse,
     }
     assert ParseErrorResponse.model_validate(
-        {"detail": {"code": "PDF_TEXT_EMPTY", "detail": "安全中文说明"}}
+        {
+            "detail": {
+                "code": "PDF_TEXT_EMPTY",
+                "detail": "安全中文说明",
+                "action": "重新导出 PDF 后重试",
+                "correlation_id": "contract:1",
+            }
+        }
     ).model_dump() == {
-        "detail": {"code": "PDF_TEXT_EMPTY", "detail": "安全中文说明"}
+        "detail": {
+            "code": "PDF_TEXT_EMPTY",
+            "detail": "安全中文说明",
+            "action": "重新导出 PDF 后重试",
+            "correlation_id": "contract:1",
+        }
     }
 
 

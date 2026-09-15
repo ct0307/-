@@ -25,15 +25,21 @@ from app.schemas.contract import (
     RiskOut,
 )
 from app.services import audit_log
+from app.services.imports.file_validation import FileValidationError, validate_upload
 from app.services import masking
 from app.services.audit.jobs import AuditJobConflict, create_single_audit_job
 from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
 from app.services.audit.runner import apply_parse_quality, run_audit
+from app.services.imports.errors import parse_failure, pdf_text_empty_failure
+from app.services.parser.elements import (
+    element_evidence_payload,
+    extract_element_result,
+    legacy_element_values,
+    merge_element_review,
+)
 from app.services.parser.extractor import (
     extract_document,
-    extract_elements,
 )
-from app.services.parser.ocr import OCRError, OCRUnavailable
 from app.tasks.dispatcher import dispatch_audit_item
 
 router = APIRouter()
@@ -41,56 +47,45 @@ log = get_logger("contracts")
 
 _ALLOWED_EXT = {".pdf", ".docx", ".txt"}
 
+_UNPROCESSABLE_UPLOAD_CODES = {
+    "PDF_CORRUPT",
+    "PDF_EMPTY",
+    "PDF_ENCRYPTED",
+    "DOCX_CORRUPT",
+    "DOCX_STRUCTURE_INVALID",
+    "TEXT_ENCODING_ERROR",
+    "TEXT_EMPTY",
+}
+
+
+def _raise_upload_validation_error(error: FileValidationError) -> None:
+    status_code = (
+        status.HTTP_422_UNPROCESSABLE_ENTITY
+        if error.code in _UNPROCESSABLE_UPLOAD_CODES
+        else status.HTTP_400_BAD_REQUEST
+    )
+    raise HTTPException(status_code, {"code": error.code, "message": error.message})
+
 # 风险等级聚合：取最高等级
 _LEVEL_RANK = {"high": 2, "medium": 1, "low": 0}
 _LEVEL_ZH = {2: "高风险", 1: "中风险", 0: "低风险"}
 
-_PARSE_ERROR_DETAILS = {
-    "PDF_TEXT_ENCODING_ERROR": (
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        "PDF 文本编码异常，请重新导出 PDF 后重试",
-    ),
-    "PDF_TEXT_EMPTY": (
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        "未能从文件中提取有效文本，请上传含文本层的文件",
-    ),
-    "OCR_UNAVAILABLE": (
-        status.HTTP_503_SERVICE_UNAVAILABLE,
-        "OCR 服务暂不可用，请稍后重试或上传含文本层的文件",
-    ),
-    "OCR_PROCESSING_ERROR": (
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        "OCR 未能识别文件内容，请检查文件清晰度后重试",
-    ),
-    "PARSE_INTERNAL_ERROR": (
-        status.HTTP_500_INTERNAL_SERVER_ERROR,
-        "合同解析失败，请稍后重试",
-    ),
-}
-
-
-def _parse_error_code(exc: Exception) -> str:
-    if isinstance(exc, UnicodeError):
-        return "PDF_TEXT_ENCODING_ERROR"
-    if isinstance(exc, OCRUnavailable):
-        return "OCR_UNAVAILABLE"
-    if isinstance(exc, OCRError):
-        return "OCR_PROCESSING_ERROR"
-    return "PARSE_INTERNAL_ERROR"
-
-
-def _raise_parse_error(contract_id: int, exc: Exception, *, code: str | None = None) -> None:
-    error_code = code or _parse_error_code(exc)
-    status_code, detail = _PARSE_ERROR_DETAILS[error_code]
+def _raise_parse_error(contract_id: int, exc: Exception, *, failure=None) -> None:
+    failure = failure or parse_failure(exc)
     log.error(
         "contract.parse_failed",
         contract_id=contract_id,
-        code=error_code,
+        code=failure.code,
         exception_type=type(exc).__name__,
     )
     raise HTTPException(
-        status_code=status_code,
-        detail={"code": error_code, "detail": detail},
+        status_code=failure.http_status,
+        detail={
+            "code": failure.code,
+            "detail": failure.message,
+            "action": failure.action,
+            "correlation_id": f"contract:{contract_id}",
+        },
     ) from exc
 
 
@@ -182,7 +177,7 @@ def batch_upload_contracts(
     results = []
 
     for file in files:
-        fname = file.filename or "unknown"
+        fname = os.path.basename(file.filename or "unknown")
         ext = os.path.splitext(fname)[1].lower()
         stored_path: str | None = None
         contract_id: int | None = None
@@ -194,6 +189,16 @@ def batch_upload_contracts(
             content = file.file.read()
             if len(content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
                 results.append({"filename": fname, "status": "failed", "error": "文件超过大小限制"})
+                continue
+            try:
+                validate_upload(fname, content)
+            except FileValidationError as exc:
+                results.append({
+                    "filename": fname,
+                    "status": "failed",
+                    "error_code": exc.code,
+                    "error": exc.message,
+                })
                 continue
 
             stored_name = f"{uuid.uuid4().hex}{ext}"
@@ -217,12 +222,16 @@ def batch_upload_contracts(
             try:
                 parsed = extract_document(stored_path)
                 apply_parse_quality(contract, parsed)
-                elements = extract_elements(parsed.text)
+                element_result = extract_element_result(parsed)
+                elements = legacy_element_values(element_result.values, text=parsed.text)
+                requires_review, review_reason = merge_element_review(parsed, element_result)
+                contract.requires_review = requires_review
+                contract.review_reason = review_reason
                 contract.elements_json = json.dumps(
-                    {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
+                    elements,
                     ensure_ascii=False,
                 )
-                contract.status = "parsed"
+                contract.status = "review_required" if requires_review else "parsed"
             except Exception:
                 pass  # 解析失败不影响上传结果
 
@@ -268,13 +277,11 @@ def upload_contract(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Contract:
-    ext = os.path.splitext(file.filename or "")[1].lower()
+    filename = os.path.basename(file.filename or "unknown")
+    ext = os.path.splitext(filename)[1].lower()
     if ext not in _ALLOWED_EXT:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"不支持的文件类型: {ext}")
 
-    os.makedirs(settings.storage_path, exist_ok=True)
-    stored_name = f"{uuid.uuid4().hex}{ext}"
-    stored_path = os.path.join(settings.storage_path, stored_name)
     content = file.file.read()
     if len(content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "文件超过大小限制")
@@ -288,13 +295,23 @@ def upload_contract(
         Contract.upload_idempotency_key == key,
     ).first()
     if existing:
-        if existing.deleted_at is not None:
-            existing.upload_idempotency_key = None
-            db.flush()
-        elif existing.content_sha256 != content_sha256:
+        if existing.deleted_at is None and existing.content_sha256 != content_sha256:
             raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键与文件内容不一致")
-        else:
+        if existing.deleted_at is None:
             return existing
+
+    try:
+        validate_upload(filename, content)
+    except FileValidationError as exc:
+        _raise_upload_validation_error(exc)
+
+    if existing is not None:
+        existing.upload_idempotency_key = None
+        db.flush()
+
+    os.makedirs(settings.storage_path, exist_ok=True)
+    stored_name = f"{uuid.uuid4().hex}{ext}"
+    stored_path = os.path.join(settings.storage_path, stored_name)
 
     # 加密存储：启用 FILE_ENCRYPT_KEY 时落盘前加密，防止明文泄漏
     from app.core.crypto import encrypt_bytes, is_encryption_enabled
@@ -308,7 +325,7 @@ def upload_contract(
         created_path = True
 
         contract = Contract(
-            filename=file.filename or stored_name,
+            filename=filename,
             storage_path=stored_path,
             contract_type=contract_type,
             department=user.department,
@@ -371,13 +388,22 @@ def parse_contract(
         if not parsed.text.strip():
             empty_error = ValueError("empty document text")
             db.rollback()
-            _raise_parse_error(contract_id, empty_error, code="PDF_TEXT_EMPTY")
+            _raise_parse_error(contract_id, empty_error, failure=pdf_text_empty_failure())
         apply_parse_quality(contract, parsed)
         # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
-        elements = extract_elements(parsed.text)
-        contract.status = "parsed"
+        element_result = extract_element_result(parsed)
+        elements = legacy_element_values(element_result.values, text=parsed.text)
+        evidence_payload = element_evidence_payload(element_result)
+        requires_review, review_reason = merge_element_review(parsed, element_result)
+        contract.requires_review = requires_review
+        contract.review_reason = review_reason
+        contract.status = "review_required" if requires_review else "parsed"
         contract.elements_json = json.dumps(
-            {k: v for k, v in elements.items() if isinstance(v, (str, type(None)))},
+            elements,
+            ensure_ascii=False,
+        )
+        contract.element_evidence_json = json.dumps(
+            evidence_payload,
             ensure_ascii=False,
         )
         audit_log.record(db, user_id=user.id, action="parse", target=f"contract:{contract_id}")
@@ -389,7 +415,9 @@ def parse_contract(
         _raise_parse_error(contract_id, exc)
     return ParseResponse(
         contract_id=contract_id,
+        status=contract.status,
         elements=elements,
+        element_evidence=evidence_payload["fields"],
         text_length=len(parsed.text),
         requires_review=contract.requires_review,
         ocr_confidence=contract.ocr_confidence,

@@ -81,12 +81,18 @@ def fixed_clock():
     return datetime(2026, 9, 1, tzinfo=timezone.utc)
 
 
-def make_config(tmp_path: Path, *, include_e2e: bool = False):
+def make_config(
+    tmp_path: Path,
+    *,
+    include_e2e: bool = False,
+    contract_set_dir: Path | None = None,
+):
     return quality_gate.GateConfig(
         project_root=tmp_path,
         python_executable=tmp_path / "backend/.venv/Scripts/python.exe",
         npm_executable="npm.cmd",
         include_e2e=include_e2e,
+        contract_set_dir=contract_set_dir,
     )
 
 
@@ -110,6 +116,18 @@ def test_default_gate_runs_fixed_steps_and_clears_e2e_url(tmp_path):
     ]
     frontend = next(step for step in runner.steps if step.name == "frontend")
     assert frontend.env_overrides["E2E_BASE_URL"] is None
+
+
+def test_quality_gate_adds_contract_set_step_only_when_explicit(tmp_path):
+    contract_set = tmp_path / "contracts"
+    config = make_config(tmp_path, contract_set_dir=contract_set)
+
+    steps = quality_gate.default_steps(config)
+
+    assert steps[0].name == "contract-set"
+    assert "evaluation.ingestion_reliability" in steps[0].argv
+    assert str(contract_set) in steps[0].argv
+    assert not any(step.name == "contract-set" for step in quality_gate.default_steps(make_config(tmp_path)))
 
 
 def test_gate_stops_after_first_failed_step(tmp_path):
@@ -286,6 +304,12 @@ def test_parse_args_accepts_include_e2e():
     assert quality_gate.parse_args(["--include-e2e"]).include_e2e is True
 
 
+def test_parse_args_accepts_contract_set_dir(tmp_path):
+    args = quality_gate.parse_args(["--contract-set-dir", str(tmp_path)])
+
+    assert args.contract_set_dir == tmp_path
+
+
 def test_preflight_reports_missing_backend_python(tmp_path):
     with pytest.raises(quality_gate.GateError, match="后端虚拟环境 Python"):
         quality_gate.validate_environment(make_config(tmp_path))
@@ -323,9 +347,11 @@ def test_subprocess_runner_removes_overridden_environment(monkeypatch, tmp_path)
 
 def test_powershell_entry_forwards_switch_and_exit_code():
     script = (PROJECT_ROOT / "scripts/quality_gate.ps1").read_text(encoding="utf-8")
-    assert "param([switch]$IncludeE2E)" in script
+    assert "[switch]$IncludeE2E" in script
+    assert "[string]$ContractSetDir" in script
     assert "backend\\.venv\\Scripts\\python.exe" in script
     assert "--include-e2e" in script
+    assert "--contract-set-dir" in script
     assert "exit $LASTEXITCODE" in script
 
 
@@ -346,4 +372,6 @@ def test_readme_documents_modes_and_evidence_boundary():
 
     assert ".\\scripts\\quality_gate.ps1" in readme
     assert "-IncludeE2E" in readme
+    assert "-ContractSetDir" in readme
+    assert "不保存合同正文" in readme
     assert "不等于真实硬指标验收" in readme

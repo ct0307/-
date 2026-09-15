@@ -62,6 +62,79 @@ def test_create_import_keeps_valid_files_when_one_file_is_invalid(monkeypatch, t
     assert db.query(Contract).count() == 1
 
 
+def test_create_import_rejects_corrupt_pdf_and_queues_valid_file(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    dispatched: list[int] = []
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", dispatched.append)
+
+    result = imports.create_import(
+        files=[_file("broken.pdf", b"%PDF-not-a-document"), _file("valid.txt", b"valid contract")],
+        idempotency_key="corrupt-pdf-import-1",
+        department=legal.department,
+        db=db,
+        user=legal,
+    )
+
+    failed, queued = result.items
+    assert failed.status == "failed"
+    assert failed.error_code == "PDF_CORRUPT"
+    assert failed.contract_id is None
+    assert queued.status == "queued"
+    assert queued.contract_id is not None
+    assert db.query(Contract).count() == 1
+    assert len(dispatched) == 1
+    assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_create_import_rejects_corrupt_pdf_without_persisting_contract(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda _item_id: "task")
+
+    result = imports.create_import(
+        files=[_file("broken.pdf", b"%PDF-not-a-document")],
+        idempotency_key="corrupt-pdf-only-import-1",
+        department=legal.department,
+        db=db,
+        user=legal,
+    )
+
+    item = result.items[0]
+    assert item.status == "failed"
+    assert item.error_code == "PDF_CORRUPT"
+    assert item.contract_id is None
+    assert db.query(Contract).count() == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_append_import_rejects_corrupt_pdf_without_affecting_existing_items(monkeypatch, tmp_path):
+    db = _session()
+    legal = _user(db)
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda _item_id: "task")
+    created = imports.create_import(
+        [_file("first.txt", b"first contract")], "create-append-corrupt", legal.department, db, legal
+    )
+
+    appended = imports.append_import_items(
+        created.id,
+        [_file("broken.pdf", b"%PDF-not-a-document")],
+        "append-corrupt-pdf",
+        db,
+        legal,
+    )
+
+    assert appended.total == 2
+    assert appended.items[-1].status == "failed"
+    assert appended.items[-1].error_code == "PDF_CORRUPT"
+    assert appended.items[-1].contract_id is None
+    assert db.query(Contract).count() == 1
+    assert len(list(tmp_path.iterdir())) == 1
+
+
 def test_create_import_is_idempotent_per_owner(monkeypatch, tmp_path):
     db = _session()
     legal = _user(db)
@@ -373,6 +446,99 @@ def test_confirm_retry_remove_and_delete_have_distinct_semantics(monkeypatch, tm
     failed_contract = db.get(ImportBatchItem, parse_failed_id).contract
     assert failed_contract.deleted_at is not None
     assert db.query(AuditLog).filter(AuditLog.action == "contract_draft_delete").count() == 1
+
+
+@pytest.mark.parametrize(
+    ("confirmed", "initial_status", "contract_type", "expected_status"),
+    [
+        (False, "awaiting_confirmation", "采购合同", "awaiting_confirmation"),
+        (True, "awaiting_confirmation", "采购合同", "ready"),
+        (False, "failed", "", "awaiting_confirmation"),
+    ],
+)
+def test_restore_contract_draft_only_recovers_confirmed_type_as_ready(
+    tmp_path, confirmed, initial_status, contract_type, expected_status,
+):
+    db = _session()
+    legal = _user(db)
+    admin = _user(db, username="restore-admin", role="admin", department="管理部")
+    contract = Contract(
+        filename="采购合同.txt", storage_path=str(tmp_path / "draft.txt"),
+        uploaded_by=legal.id, department=legal.department, status="parsed",
+        suggested_type="采购合同", type_confidence=0.99, contract_type=contract_type,
+    )
+    batch = ImportBatch(owner_id=legal.id, idempotency_key=f"restore-{confirmed}-{initial_status}")
+    item = ImportBatchItem(filename=contract.filename, contract=contract, status=initial_status)
+    batch.items.append(item)
+    db.add(batch)
+    db.commit()
+    if confirmed:
+        imports.confirm_item(
+            batch.id, item.id,
+            ConfirmImportItem(contract_type="采购合同", department=legal.department), db, legal,
+        )
+
+    assert imports.delete_contract_draft(batch.id, item.id, db, legal).status == "deleted"
+    restored = imports.restore_contract_draft(batch.id, item.id, db, admin)
+
+    assert restored.status == expected_status
+    assert db.get(ImportBatchItem, item.id).status == expected_status
+    assert db.get(ImportBatch, batch.id).ready == (1 if confirmed else 0)
+    assert db.get(Contract, contract.id).deleted_at is None
+
+
+def test_import_item_out_recovers_stable_failure_metadata_from_error_code(tmp_path):
+    db = _session()
+    legal = _user(db)
+    batch = ImportBatch(owner_id=legal.id, idempotency_key="failure-metadata")
+    known = ImportBatchItem(
+        filename="timeout.pdf",
+        contract=Contract(
+            filename="timeout.pdf",
+            storage_path=str(tmp_path / "timeout.pdf"),
+            uploaded_by=legal.id,
+            department=legal.department,
+        ),
+        status="failed",
+        error_code="OCR_TIMEOUT",
+    )
+    legacy = ImportBatchItem(filename="legacy.pdf", status="failed", error_code="PARSE_FAILED")
+    batch.items.extend([known, legacy])
+    db.add(batch)
+    db.commit()
+
+    known_out = imports._item_out(known)
+    legacy_out = imports._item_out(legacy)
+
+    assert known_out.error_action == "稍后重试或拆分文件"
+    assert known_out.retryable is True
+    assert known_out.correlation_id == f"import-item:{known.id}"
+    assert legacy_out.error_action is None
+    assert legacy_out.retryable is False
+    assert legacy_out.correlation_id == f"import-item:{legacy.id}"
+
+
+def test_import_item_out_exposes_ocr_review_quality(tmp_path):
+    db = _session()
+    legal = _user(db)
+    batch = ImportBatch(owner_id=legal.id, idempotency_key="ocr-review-quality")
+    contract = Contract(
+        filename="scan.pdf",
+        storage_path=str(tmp_path / "scan.pdf"),
+        uploaded_by=legal.id,
+        department=legal.department,
+        ocr_confidence=0.423,
+        requires_review=True,
+    )
+    item = ImportBatchItem(filename="scan.pdf", contract=contract, status="awaiting_confirmation")
+    batch.items.append(item)
+    db.add(batch)
+    db.commit()
+
+    output = imports._item_out(item)
+
+    assert output.ocr_confidence == 0.423
+    assert output.requires_review is True
 
 
 @pytest.mark.parametrize(

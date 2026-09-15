@@ -27,6 +27,8 @@ from app.models.models import (
 )
 from app.schemas.import_batch import ConfirmImportItem, ImportBatchOut, ImportItemOut
 from app.services.batch.service import ACTIVE_AUDIT_ITEM_STATUSES
+from app.services.imports.file_validation import FileValidationError, validate_upload
+from app.services.imports.errors import failure_for_code
 from app.services.imports.service import summarize_import
 from app.tasks.dispatcher import dispatch_import_item
 
@@ -119,6 +121,11 @@ def _append_prepared_uploads(
             error_code, error_message = "FILE_TOO_LARGE", "文件超过大小限制"
         elif total_bytes > _MAX_TOTAL_BYTES:
             error_code, error_message = "BATCH_TOO_LARGE", "批次总大小超过 500MB"
+        else:
+            try:
+                validate_upload(upload.filename, content)
+            except FileValidationError as exc:
+                error_code, error_message = exc.code, exc.message
         filenames.add(upload.filename)
 
         if error_code:
@@ -160,6 +167,7 @@ def _dispatch_import_item(item_id: int) -> str:
 
 def _item_out(item: ImportBatchItem) -> ImportItemOut:
     contract = item.contract
+    failure = failure_for_code(item.error_code)
     return ImportItemOut(
         id=item.id,
         contract_id=item.contract_id,
@@ -167,11 +175,15 @@ def _item_out(item: ImportBatchItem) -> ImportItemOut:
         status=item.status,
         error_code=item.error_code,
         error_message=item.error_message,
+        error_action=failure.action if failure else None,
+        retryable=failure.retryable if failure else False,
+        correlation_id=f"import-item:{item.id}" if item.error_code else None,
         suggested_type=contract.suggested_type if contract else "",
         confidence=contract.type_confidence if contract else None,
         confirmed_type=contract.contract_type if contract else "",
         department=contract.department if contract else "",
         requires_review=contract.requires_review if contract else False,
+        ocr_confidence=contract.ocr_confidence if contract else None,
     )
 
 
@@ -589,7 +601,11 @@ def restore_contract_draft(
         raise HTTPException(status.HTTP_410_GONE, "合同草稿已超过恢复期限")
     contract.deleted_at = None
     contract.deleted_by = None
-    item.status = "awaiting_confirmation" if not contract.contract_type else "ready"
+    item.status = (
+        "ready"
+        if contract.contract_type and contract.type_confirmed_by and contract.type_confirmed_at
+        else "awaiting_confirmation"
+    )
     db.add(AuditLog(user_id=user.id, action="contract_draft_restore", target=f"contract:{contract.id}"))
     _refresh_batch(batch)
     db.commit()

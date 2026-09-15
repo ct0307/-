@@ -344,6 +344,14 @@ def test_elements_log_contains_keys_not_contract_values(monkeypatch):
     }
 
 
+def test_flat_extract_elements_keeps_payment_terms_as_legacy_string():
+    result = extractor.extract_elements(
+        "付款安排：\n1. 签订后支付30%；\n2. 验收后支付70%。"
+    )
+
+    assert result["payment_terms"] == "签订后支付30%；验收后支付70%"
+
+
 def test_text_pdf_returns_native_parse_result(monkeypatch):
     class TextPage:
         def extract_text(self) -> str:

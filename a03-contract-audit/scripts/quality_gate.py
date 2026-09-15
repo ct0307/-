@@ -18,6 +18,7 @@ from typing import Callable, Literal, Mapping, Protocol
 
 
 EVALUATION_TESTS = (
+    "tests/test_ingestion_reliability.py",
     "tests/test_element_metrics.py",
     "tests/test_evaluation_evidence.py",
     "tests/test_evaluation_batch.py",
@@ -52,6 +53,7 @@ class GateConfig:
     python_executable: Path
     npm_executable: str
     include_e2e: bool = False
+    contract_set_dir: Path | None = None
 
 
 class CommandRunner(Protocol):
@@ -113,6 +115,8 @@ def validate_environment(config: GateConfig) -> None:
             raise GateError(f"未找到{label}：{path}")
     if not shutil.which(config.npm_executable):
         raise GateError(f"未找到 npm 命令：{config.npm_executable}")
+    if config.contract_set_dir is not None and not config.contract_set_dir.is_dir():
+        raise GateError(f"未找到合同集目录：{config.contract_set_dir}")
 
 
 class LocalServiceManager:
@@ -233,7 +237,24 @@ def default_steps(config: GateConfig) -> tuple[Step, ...]:
     python = str(config.python_executable)
     npm = config.npm_executable
     e2e_url = "http://127.0.0.1:5173" if config.include_e2e else None
-    return (
+    contract_set_steps = ()
+    if config.contract_set_dir is not None:
+        contract_set_steps = (
+            Step(
+                "contract-set",
+                (
+                    python,
+                    "-m",
+                    "evaluation.ingestion_reliability",
+                    "--dataset",
+                    str(config.contract_set_dir),
+                    "--output",
+                    str(config.project_root / "outputs/contract-set-gate/report.json"),
+                ),
+                backend,
+            ),
+        )
+    return contract_set_steps + (
         Step(
             "evaluation",
             (python, "-m", "pytest", *EVALUATION_TESTS, "-q"),
@@ -364,6 +385,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="启动本地前后端并执行服务型 E2E",
     )
+    parser.add_argument(
+        "--contract-set-dir",
+        type=Path,
+        help="显式运行 50+2 冻结合同集验收",
+    )
     return parser.parse_args(argv)
 
 
@@ -375,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
         python_executable=project_root / "backend/.venv/Scripts/python.exe",
         npm_executable=shutil.which("npm.cmd") or "npm.cmd",
         include_e2e=args.include_e2e,
+        contract_set_dir=args.contract_set_dir.resolve() if args.contract_set_dir else None,
     )
     try:
         validate_environment(config)
