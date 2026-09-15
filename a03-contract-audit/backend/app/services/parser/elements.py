@@ -37,7 +37,11 @@ class ElementResult:
     source_text: str
 
 
-def element_evidence_payload(result: ElementResult) -> dict[str, object]:
+def element_evidence_payload(
+    result: ElementResult,
+    *,
+    parsed: DocumentParseResult | None = None,
+) -> dict[str, object]:
     """构造可持久化的版本化证据，不包含合同全文。"""
     fields: dict[str, object] = {}
     for field, value in result.evidence.items():
@@ -45,11 +49,17 @@ def element_evidence_payload(result: ElementResult) -> dict[str, object]:
             fields[field] = [asdict(item) for item in value]
         else:
             fields[field] = asdict(value)
-    return {
+    payload: dict[str, object] = {
         "schema_version": 1,
         "fields": fields,
         "review_fields": list(result.review_fields),
     }
+    if parsed is not None:
+        payload["document"] = {
+            "total_pages": parsed.total_pages,
+            "missing_pages": list(parsed.missing_pages),
+        }
+    return payload
 
 
 @dataclass(frozen=True)
@@ -127,7 +137,7 @@ _DURATION_PATTERNS = (
 )
 
 _STRUCTURED_PAYMENT_PATTERNS = (
-    re.compile(r"依次按以下节点办理：(.{1,500}?)。付款申请"),
+    re.compile(r"依次按以下节点办理：(.{1,500}?)。\s*付款申请"),
     re.compile(r"付款按“(.{1,500}?)”执行"),
     re.compile(r"付款节点为(.{1,500}?)。"),
     re.compile(r"(?:结算与付款|账单与发票|对账和开票)按(.{1,500}?)执行"),
@@ -187,8 +197,8 @@ def _collect_scalar(
 
 def _collect_subjects(text: str) -> list[_Candidate]:
     candidates: list[_Candidate] = []
-    for pattern in _SUBJECT_PATTERNS:
-        candidates.extend(_collect_scalar(pattern, text, 0.90))
+    for index, pattern in enumerate(_SUBJECT_PATTERNS):
+        candidates.extend(_collect_scalar(pattern, text, 0.98 if index == 0 else 0.90))
     return sorted(candidates, key=lambda item: (-item.confidence, item.start))
 
 
@@ -213,10 +223,14 @@ def _collect_amounts(text: str) -> list[_Candidate]:
     for pattern in _STRUCTURED_AMOUNT_PATTERNS:
         for match in pattern.finditer(text):
             raw = match.group(1).strip()
+            compact_raw = re.sub(r"\s+", "", raw)
             structured_spans.append(match.span(1))
             if not raw or any(
                 marker in raw
                 for marker in ("不设固定总额", "据实结算", "不设固定金额")
+            ) or (
+                re.search(r"(?:订单|验收数量).*?结算", compact_raw)
+                and not re.search(r"\d|人民币|万元|元|%", compact_raw)
             ):
                 no_fixed_total = True
                 continue
@@ -302,6 +316,15 @@ def _collect_durations(text: str) -> list[_Candidate]:
     for index, pattern in enumerate(_DURATION_PATTERNS):
         normalize = (lambda value: value) if index == 0 else _normalize_duration
         for candidate in _collect_scalar(pattern, text, 0.95, normalize=normalize):
+            if index == 2 and (
+                candidate.raw_text.startswith(("、", "，", ","))
+                or not re.search(
+                    r"\d{4}\s*[-/.年]|\d+\s*(?:年|个月|月|日|天)|"
+                    r"生效|届满|终止|长期|永久|至|到",
+                    candidate.raw_text,
+                )
+            ):
+                continue
             if any(
                 candidate.start < existing.end and existing.start < candidate.end
                 for existing in candidates
@@ -345,7 +368,9 @@ def _collect_payment_section(text: str, section_start: int, section_end: int) ->
     candidates: list[_Candidate] = []
     for part in re.finditer(r"[^；;]+", raw):
         value = part.group(0).strip()
-        if not value:
+        if not value or value.strip("“”\" ") == "" or (
+            "适用以下商业条件" in value or "合同金额或结算口径" in value
+        ):
             continue
         left_trimmed = len(part.group(0)) - len(part.group(0).lstrip())
         start = base_start + part.start() + left_trimmed

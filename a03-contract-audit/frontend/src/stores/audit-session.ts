@@ -18,6 +18,7 @@ import {
   createAuditIdempotencyKey,
   createUploadIdempotencyKey,
 } from '@/utils/idempotency'
+import { SESSION_KEYS } from '@/utils/session'
 
 export type UploadStatus = 'uploading' | 'upload_failed' | 'parsing' | 'parse_failed' | 'parsed'
 
@@ -41,7 +42,7 @@ interface ActiveAudit {
   batchId?: number
 }
 
-const ACTIVE_AUDIT_STORAGE_KEY = 'qijian-active-audit'
+const ACTIVE_AUDIT_STORAGE_KEY = SESSION_KEYS.activeAudit
 
 function readActiveAudit(): ActiveAudit | null {
   if (typeof window === 'undefined') return null
@@ -49,7 +50,7 @@ function readActiveAudit(): ActiveAudit | null {
     const raw = window.localStorage.getItem(ACTIVE_AUDIT_STORAGE_KEY)
     if (!raw) return null
     const value = JSON.parse(raw) as Partial<ActiveAudit>
-    const currentOwner = window.localStorage.getItem('username') || ''
+    const currentOwner = window.localStorage.getItem(SESSION_KEYS.username) || ''
     if (
       value.owner !== currentOwner
       || !Number.isInteger(value.contractId)
@@ -102,6 +103,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   const uploadRecords = ref<UploadRecord[]>([])
   const activeAudit = ref<ActiveAudit | null>(readActiveAudit())
   let uploadSequence = 0
+  let generation = 0
   let _auditAbort: AbortController | null = null
   // 0 未上传 / 1 已解析 / 2 已审查
   const step = ref(0)
@@ -132,6 +134,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   }
 
   function reset() {
+    generation += 1
     _auditAbort?.abort()
     _auditAbort = null
     contractId.value = null
@@ -161,29 +164,34 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   async function parseRecord(record: UploadRecord) {
     if (busy.value) throw new Error('当前任务处理中，请稍后再试')
     if (record.contractId === null) throw new Error('合同尚未上传成功，无法解析')
+    const requestGeneration = generation
     busy.value = true
     record.status = 'parsing'
     record.errorCode = ''
     record.errorMessage = ''
     try {
       const parsed = await parseContract(record.contractId)
+      if (requestGeneration !== generation) return parsed
       applyParsedContract(record, parsed)
       record.status = 'parsed'
       return parsed
     } catch (error) {
-      const info = errorInfo(error)
-      record.status = 'parse_failed'
-      record.errorCode = info.code
-      record.errorMessage = info.message
+      if (requestGeneration === generation) {
+        const info = errorInfo(error)
+        record.status = 'parse_failed'
+        record.errorCode = info.code
+        record.errorMessage = info.message
+      }
       throw error
     } finally {
-      busy.value = false
+      if (requestGeneration === generation) busy.value = false
     }
   }
 
   // —— 真实接口链路（不改后端契约）——
   async function uploadAndParse(file: File, contractType = '') {
     if (busy.value) throw new Error('当前任务处理中，请稍后再试')
+    const requestGeneration = generation
     const record = reactive<UploadRecord>({
       localId: `upload-${Date.now()}-${++uploadSequence}`,
       filename: file.name,
@@ -196,22 +204,27 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     busy.value = true
     try {
       const idempotencyKey = await createUploadIdempotencyKey(file)
+      if (requestGeneration !== generation) return
       const c = await uploadContract(file, contractType, idempotencyKey)
+      if (requestGeneration !== generation) return c
       record.contractId = c.id
       record.filename = c.filename
       record.status = 'parsing'
       const parsed = await parseContract(c.id)
+      if (requestGeneration !== generation) return c
       applyParsedContract(record, parsed)
       record.status = 'parsed'
       return c
     } catch (error) {
-      const info = errorInfo(error)
-      record.status = record.contractId === null ? 'upload_failed' : 'parse_failed'
-      record.errorCode = info.code
-      record.errorMessage = info.message
+      if (requestGeneration === generation) {
+        const info = errorInfo(error)
+        record.status = record.contractId === null ? 'upload_failed' : 'parse_failed'
+        record.errorCode = info.code
+        record.errorMessage = info.message
+      }
       throw error
     } finally {
-      busy.value = false
+      if (requestGeneration === generation) busy.value = false
     }
   }
 
@@ -227,34 +240,40 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     if (!contractId.value) return
     if (busy.value) throw new Error('当前任务处理中，请稍后再试')
     const currentContractId = contractId.value
+    const requestGeneration = generation
     const selectedDimensions = dimensions ?? []
     busy.value = true
     try {
-      const owner = typeof window === 'undefined' ? '' : window.localStorage.getItem('username') || ''
+      const owner = typeof window === 'undefined' ? '' : window.localStorage.getItem(SESSION_KEYS.username) || ''
       const pending = activeAudit.value
-      const recovery: ActiveAudit = pending
-        && pending.owner === owner
-        && pending.contractId === currentContractId
-        ? pending
-        : {
+      let recovery: ActiveAudit
+      if (pending && pending.owner === owner && pending.contractId === currentContractId) {
+        recovery = pending
+      } else {
+        const idempotencyKey = await createAuditIdempotencyKey()
+        if (requestGeneration !== generation) return
+        recovery = {
             owner,
             contractId: currentContractId,
             filename: filename.value,
-            idempotencyKey: await createAuditIdempotencyKey(),
+            idempotencyKey,
             contractType,
             dimensions: selectedDimensions,
           }
+      }
       saveActiveAudit(recovery)
-      _auditAbort = new AbortController()
+      const abortController = new AbortController()
+      _auditAbort = abortController
       const initial = recovery.jobId
-        ? await getAuditStatus(currentContractId, recovery.jobId, _auditAbort.signal)
+        ? await getAuditStatus(currentContractId, recovery.jobId, abortController.signal)
         : await auditContract(
             currentContractId,
             recovery.contractType,
             recovery.dimensions,
             recovery.idempotencyKey,
-            _auditAbort.signal,
+            abortController.signal,
           )
+      if (requestGeneration !== generation) return initial
       saveActiveAudit({
         ...recovery,
         jobId: initial.job_id,
@@ -263,44 +282,55 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
       const res = isAuditPendingStatus(initial.status)
         ? await waitForAuditTerminal(
             (signal) => getAuditStatus(currentContractId, initial.job_id, signal),
-            { signal: _auditAbort.signal },
+            { signal: abortController.signal },
           )
         : await waitForAuditTerminal(
             async () => initial,
-            { intervalMs: 0, maxAttempts: 1, signal: _auditAbort.signal },
+            { intervalMs: 0, maxAttempts: 1, signal: abortController.signal },
           )
+      if (requestGeneration !== generation) return res
+      const loadedRisks = await getRisks(currentContractId, res.job_id ?? initial.job_id)
+      if (requestGeneration !== generation) return res
       applyQuality(res)
       crossChecks.value = res.cross_checks ?? []
-      risks.value = await getRisks(currentContractId, res.job_id ?? initial.job_id)
+      risks.value = loadedRisks
       step.value = 2
       saveActiveAudit(null)
       return res
     } catch (error) {
-      if (error instanceof AuditTaskError || isMissingPersistedAudit(error)) saveActiveAudit(null)
+      if (
+        requestGeneration === generation
+        && (error instanceof AuditTaskError || isMissingPersistedAudit(error))
+      ) saveActiveAudit(null)
       throw error
     } finally {
-      busy.value = false
-      _auditAbort = null
+      if (requestGeneration === generation) {
+        busy.value = false
+        _auditAbort = null
+      }
     }
   }
 
   async function resumeActiveAudit() {
     const recovery = activeAudit.value
     if (!recovery) return null
+    const requestGeneration = generation
     contractId.value = recovery.contractId
     filename.value = recovery.filename
     busy.value = true
-    _auditAbort = new AbortController()
+    const abortController = new AbortController()
+    _auditAbort = abortController
     try {
       const initial = recovery.jobId
-        ? await getAuditStatus(recovery.contractId, recovery.jobId, _auditAbort.signal)
+        ? await getAuditStatus(recovery.contractId, recovery.jobId, abortController.signal)
         : await auditContract(
             recovery.contractId,
             recovery.contractType,
             recovery.dimensions,
             recovery.idempotencyKey,
-            _auditAbort.signal,
+            abortController.signal,
           )
+      if (requestGeneration !== generation) return initial
       if (!recovery.jobId && initial.job_id) {
         saveActiveAudit({
           ...recovery,
@@ -310,20 +340,28 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
       }
       const result = await waitForAuditTerminal(
         (signal) => getAuditStatus(recovery.contractId, initial.job_id, signal),
-        { signal: _auditAbort.signal },
+        { signal: abortController.signal },
       )
+      if (requestGeneration !== generation) return result
+      const loadedRisks = await getRisks(recovery.contractId, result.job_id ?? initial.job_id)
+      if (requestGeneration !== generation) return result
       applyQuality(result)
       crossChecks.value = result.cross_checks ?? []
-      risks.value = await getRisks(recovery.contractId, result.job_id ?? initial.job_id)
+      risks.value = loadedRisks
       step.value = 2
       saveActiveAudit(null)
       return result
     } catch (error) {
-      if (error instanceof AuditTaskError || isMissingPersistedAudit(error)) saveActiveAudit(null)
+      if (
+        requestGeneration === generation
+        && (error instanceof AuditTaskError || isMissingPersistedAudit(error))
+      ) saveActiveAudit(null)
       throw error
     } finally {
-      busy.value = false
-      _auditAbort = null
+      if (requestGeneration === generation) {
+        busy.value = false
+        _auditAbort = null
+      }
     }
   }
 
@@ -333,6 +371,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     selectedJobId: number,
   ) {
     if (busy.value) throw new Error('当前任务处理中，请稍后再试')
+    const requestGeneration = generation
     busy.value = true
     try {
       const initial = await getAuditStatus(selectedContractId, selectedJobId)
@@ -341,6 +380,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
         { intervalMs: 0, maxAttempts: 1 },
       )
       const loadedRisks = await getRisks(selectedContractId, result.job_id ?? selectedJobId)
+      if (requestGeneration !== generation) return result
 
       contractId.value = selectedContractId
       filename.value = selectedFilename
@@ -351,7 +391,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
       step.value = 2
       return result
     } finally {
-      busy.value = false
+      if (requestGeneration === generation) busy.value = false
     }
   }
 
@@ -364,7 +404,9 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   }
 
   async function setRiskStatus(risk: RiskOut, status: RiskOut['review_status']) {
+    const requestGeneration = generation
     await updateRiskStatus(risk.id, status)
+    if (requestGeneration !== generation) return
     risk.review_status = status
   }
 

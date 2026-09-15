@@ -11,6 +11,10 @@ const authSource = readFileSync(
   fileURLToPath(new URL('../src/stores/auth.ts', import.meta.url)),
   'utf8',
 )
+const sessionSource = readFileSync(
+  fileURLToPath(new URL('../src/utils/session.ts', import.meta.url)),
+  'utf8',
+)
 const adminApiSource = readFileSync(
   fileURLToPath(new URL('../src/api/admin.ts', import.meta.url)),
   'utf8',
@@ -20,7 +24,8 @@ const adminApiSource = readFileSync(
 test('keeps authorized departments in the login context', () => {
   expect(typeSource).toContain('authorized_departments: string[]')
   expect(authSource).toContain('const authorizedDepartments = ref<string[]>')
-  expect(authSource).toContain("localStorage.setItem('authorized_departments'")
+  expect(authSource).toContain('localStorage.setItem(SESSION_KEYS.authorizedDepartments')
+  expect(sessionSource).toContain("authorizedDepartments: 'authorized_departments'")
   expect(authSource).toContain('authorizedDepartments,')
 })
 

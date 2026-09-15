@@ -3,6 +3,7 @@
 不用 python-jose(算法混淆 CVE-2024-33663 等 + 停维)和 passlib(停维、与 bcrypt 5.x 不兼容)。
 """
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import bcrypt
 import jwt
@@ -31,7 +32,7 @@ def verify_password(raw: str, hashed: str) -> bool:
 
 def create_access_token(subject: str, role: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    payload = {"sub": subject, "role": role, "exp": expire}
+    payload = {"sub": subject, "role": role, "exp": expire, "jti": uuid4().hex}
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 

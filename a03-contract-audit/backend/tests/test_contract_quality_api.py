@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from io import BytesIO
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -18,7 +19,7 @@ from app.models.models import AuditLog, Contract, LookupItem, Risk, User
 from app.schemas.contract import LookupItemCreate
 from app.schemas.contract import AuditRequest
 from app.schemas.contract import ParseErrorResponse
-from app.services.parser.extractor import DocumentParseResult
+from app.services.parser.extractor import DocumentBlock, DocumentParseResult, SourceAnchor
 from app.services.parser.ocr import OCRError, OCRLimitExceeded, OCRTimeout, OCRUnavailable
 from app.services import audit_log
 
@@ -307,6 +308,73 @@ def test_legacy_batch_upload_isolates_invalid_content(monkeypatch, tmp_path):
     engine.dispose()
 
 
+def test_legacy_batch_parse_failure_keeps_file_and_processes_next_item(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(username="batch-parse", password_hash="x", role="legal", department="法务部")
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+        calls = []
+
+        def parse(path):
+            calls.append(path)
+            if len(calls) == 1:
+                raise OCRError("C:/secret/contract.pdf")
+            text = "甲方：测试公司\n合同有效条款"
+            return DocumentParseResult(
+                text, "native", total_pages=1,
+                blocks=(DocumentBlock(
+                    "pdf-page-1", "page_text", text, SourceAnchor(page_number=1),
+                ),),
+            )
+
+        monkeypatch.setattr(contracts, "extract_document", parse)
+        result = contracts.batch_upload_contracts(
+            files=[_upload("broken.txt", b"first"), _upload("good.txt", b"second")],
+            contract_type="采购合同", db=db, user=user,
+        )
+        assert result[0]["error_code"] == "OCR_PROTOCOL_ERROR"
+        assert result[0]["status"] == "failed"
+        assert "secret" not in repr(result)
+        failed = db.get(Contract, result[0]["contract_id"])
+        assert failed.status == "failed"
+        from pathlib import Path
+        assert Path(failed.storage_path).is_file()
+        assert result[1]["status"] == "success"
+        succeeded = db.get(Contract, result[1]["contract_id"])
+        assert succeeded.status == "parsed"
+        evidence = json.loads(succeeded.element_evidence_json)
+        assert evidence["fields"]["party_a"]["page"] == 1
+        assert evidence["document"] == {"total_pages": 1, "missing_pages": []}
+    engine.dispose()
+
+
+def test_parse_response_exposes_missing_pages_and_persists_reason(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user, contract = _create_uploaded_contract(db, tmp_path)
+        parsed = DocumentParseResult(
+            "甲方：测试公司", "mixed", requires_review=True,
+            review_reason="第 2 页未提取到有效文本", total_pages=3, missing_pages=(2,),
+        )
+        monkeypatch.setattr(contracts, "extract_document", lambda _: parsed)
+        response = contracts.parse_contract(contract.id, db, user)
+        assert response.total_pages == 3
+        assert response.missing_pages == [2]
+        db.expire_all()
+        persisted = db.get(Contract, contract.id)
+        assert persisted.review_reason == parsed.review_reason
+        assert json.loads(persisted.element_evidence_json)["document"] == {
+            "total_pages": 3,
+            "missing_pages": [2],
+        }
+        assert response.status == "review_required"
+    engine.dispose()
+
+
 def test_deleted_contract_does_not_block_reupload_with_same_idempotency_key(monkeypatch, tmp_path):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -539,6 +607,19 @@ def test_history_status_prioritizes_manual_review():
     )
 
     assert contracts._derive_status(contract, []) == "待人工复核"
+
+
+def test_history_status_marks_parse_failure_instead_of_compliant():
+    contract = Contract(
+        filename="failed.pdf",
+        storage_path="/tmp/failed.pdf",
+        contract_type="采购合同",
+        status="failed",
+        department="法务部",
+        uploaded_by=1,
+    )
+
+    assert contracts._derive_status(contract, []) == "解析失败"
 
 
 def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):

@@ -16,7 +16,7 @@ export interface RuntimeStatus {
 }
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
-  return client.get<RuntimeStatus>('/runtime/status') as unknown as RuntimeStatus
+  return client.get<RuntimeStatus>('/runtime/status')
 }
 
 const runtimeErrorLabels: Record<string, string> = {

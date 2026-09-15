@@ -96,6 +96,8 @@ def _dept_accessible(contract, user) -> bool:
 
 # 审查状态推导：人工复核优先；其次是整改状态；其余为合规。
 def _derive_status(contract: Contract, risks: list) -> str:
+    if contract.status == "failed":
+        return "解析失败"
     if contract.status == "review_required" or contract.requires_review:
         return "待人工复核"
     if not risks:
@@ -224,6 +226,7 @@ def batch_upload_contracts(
                 apply_parse_quality(contract, parsed)
                 element_result = extract_element_result(parsed)
                 elements = legacy_element_values(element_result.values, text=parsed.text)
+                evidence_payload = element_evidence_payload(element_result, parsed=parsed)
                 requires_review, review_reason = merge_element_review(parsed, element_result)
                 contract.requires_review = requires_review
                 contract.review_reason = review_reason
@@ -231,9 +234,33 @@ def batch_upload_contracts(
                     elements,
                     ensure_ascii=False,
                 )
+                contract.element_evidence_json = json.dumps(
+                    evidence_payload,
+                    ensure_ascii=False,
+                )
                 contract.status = "review_required" if requires_review else "parsed"
-            except Exception:
-                pass  # 解析失败不影响上传结果
+            except Exception as exc:
+                failure = parse_failure(exc)
+                contract.status = "failed"
+                contract.requires_review = False
+                contract.review_reason = failure.message[:255]
+                audit_log.record(
+                    db,
+                    user_id=user.id,
+                    action="parse_failed",
+                    target=f"contract:{contract.id}",
+                    detail=f"code={failure.code}",
+                )
+                db.commit()
+                committed = True
+                results.append({
+                    "filename": fname,
+                    "status": "failed",
+                    "contract_id": contract_id,
+                    "error_code": failure.code,
+                    "error": failure.message,
+                })
+                continue
 
             audit_log.record(db, user_id=user.id, action="batch_upload",
                              target=f"contract:{contract.id}", detail=f"{fname} encrypted={encrypted_flag}")
@@ -393,7 +420,7 @@ def parse_contract(
         # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
         element_result = extract_element_result(parsed)
         elements = legacy_element_values(element_result.values, text=parsed.text)
-        evidence_payload = element_evidence_payload(element_result)
+        evidence_payload = element_evidence_payload(element_result, parsed=parsed)
         requires_review, review_reason = merge_element_review(parsed, element_result)
         contract.requires_review = requires_review
         contract.review_reason = review_reason
@@ -419,6 +446,8 @@ def parse_contract(
         elements=elements,
         element_evidence=evidence_payload["fields"],
         text_length=len(parsed.text),
+        total_pages=parsed.total_pages,
+        missing_pages=list(parsed.missing_pages),
         requires_review=contract.requires_review,
         ocr_confidence=contract.ocr_confidence,
         review_reason=contract.review_reason,
