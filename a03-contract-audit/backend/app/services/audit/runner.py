@@ -80,6 +80,7 @@ def run_audit(
     claimed_generation = generation or 0
     owns_generation = generation is None
     previous_status = contract.status
+    previous_item_state: dict[str, object] | None = None
     try:
         claimed = (
             db.query(Contract)
@@ -136,6 +137,8 @@ def run_audit(
             .populate_existing()
             .one()
         )
+        prior_requires_review = bool(validating.requires_review)
+        prior_review_reason = validating.review_reason
         _assert_generation(validating, claimed_generation)
         validating_item = _locked_item(
             db,
@@ -149,6 +152,12 @@ def run_audit(
         )
         validating.status = "validating"
         if validating_item is not None:
+            previous_item_state = {
+                "status": validating_item.status,
+                "progress": validating_item.progress,
+                "progress_stage": validating_item.progress_stage,
+                "finished_at": validating_item.finished_at,
+            }
             validating_item.status = "validating"
             validating_item.progress = max(validating_item.progress, 95)
             validating_item.progress_stage = "persisting"
@@ -157,12 +166,21 @@ def run_audit(
         decision = decide_audit_status(risk_payloads, issues, coverage)
         quality_reasons = list(decision.reasons)
         review_reason = _review_reason(quality_reasons)
+        if prior_requires_review:
+            reasons = [prior_review_reason, review_reason]
+            review_reason = "；".join(dict.fromkeys(reason for reason in reasons if reason)) or None
+        final_requires_review = decision.requires_review or prior_requires_review
+        final_status = (
+            "review_required"
+            if prior_requires_review and decision.status == "done"
+            else decision.status
+        )
         public_issues = [_public_issue(issue) for issue in issues]
         published_risk_count = len(risk_payloads) if decision.status != "audit_failed" else 0
         result.update({
-            "status": decision.status,
+            "status": final_status,
             "risk_count": published_risk_count,
-            "requires_review": decision.requires_review,
+            "requires_review": final_requires_review,
             "review_reason": review_reason,
             "quality_reasons": quality_reasons,
             "issues": public_issues,
@@ -192,9 +210,9 @@ def run_audit(
             execution_token=execution_token,
         )
         apply_parse_quality(publishing, parsed)
-        publishing.requires_review = decision.requires_review
+        publishing.requires_review = final_requires_review
         publishing.review_reason = review_reason
-        if decision.status in {"done", "review_required"}:
+        if final_status in {"done", "review_required"}:
             db.query(Risk).filter(
                 Risk.contract_id == contract_id,
                 Risk.review_status == "pending",
@@ -214,10 +232,10 @@ def run_audit(
                 )
                 for risk in risk_payloads
             ])
-        publishing.status = decision.status
+        publishing.status = final_status
         if item is not None:
-            item.status = "failed" if decision.status == "audit_failed" else decision.status
-            if decision.status in {"done", "review_required"}:
+            item.status = "failed" if final_status == "audit_failed" else final_status
+            if final_status in {"done", "review_required"}:
                 item.progress = 100
                 item.progress_stage = "completed"
             else:
@@ -226,10 +244,10 @@ def run_audit(
             item.error_code = None
             item.result_json = json.dumps(
                 {
-                    "status": decision.status,
+                    "status": final_status,
                     "risk_count": published_risk_count,
                     "cross_checks": result.get("cross_checks", []),
-                    "requires_review": decision.requires_review,
+                    "requires_review": final_requires_review,
                     "ocr_confidence": result.get("ocr_confidence"),
                     "review_reason": review_reason,
                     "quality_reasons": quality_reasons,
@@ -246,7 +264,7 @@ def run_audit(
         log.info(
             "audit.performance",
             contract_id=contract_id,
-            status=decision.status,
+            status=final_status,
             parse_ms=int(timings.get("parse_ms", 0)),
             legal_agent_ms=int(timings.get("legal_agent_ms", 0)),
             finance_agent_ms=int(timings.get("finance_agent_ms", 0)),
@@ -267,8 +285,21 @@ def run_audit(
                 .with_for_update()
                 .one()
             )
-            if owns_generation and claimed_generation and restored_contract.audit_generation == claimed_generation:
+            if claimed_generation and restored_contract.audit_generation == claimed_generation:
                 restored_contract.status = previous_status
+                restored_item = _locked_item(
+                    db,
+                    contract_id=contract_id,
+                    batch_item_id=batch_item_id,
+                )
+                if restored_item is not None and previous_item_state is not None:
+                    _assert_item_fence(
+                        restored_item,
+                        generation=claimed_generation,
+                        execution_token=execution_token,
+                    )
+                    for field, value in previous_item_state.items():
+                        setattr(restored_item, field, value)
                 db.commit()
             else:
                 db.rollback()

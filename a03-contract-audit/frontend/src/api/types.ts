@@ -40,6 +40,12 @@ export type ContractStatus =
   | 'three_review'
   | 'purged'
 
+export interface ContractQualityFields {
+  requires_review?: boolean
+  ocr_confidence?: number | null
+  review_reason?: string | null
+}
+
 export interface LoginResult {
   access_token: string
   token_type: string
@@ -49,24 +55,18 @@ export interface LoginResult {
   authorized_departments: string[]
 }
 
-export interface ContractOut {
+export interface ContractOut extends ContractQualityFields {
   id: number
   filename: string
   contract_type: string
   status: ContractStatus
   created_at: string
-  requires_review?: boolean
-  ocr_confidence?: number | null
-  review_reason?: string | null
 }
 
-export interface ParseResult {
+export interface ParseResult extends ContractQualityFields {
   contract_id: number
   elements: Record<string, unknown>
   text_length: number
-  requires_review?: boolean
-  ocr_confidence?: number | null
-  review_reason?: string | null
 }
 
 // 交叉验证 / 冲突消解项（后端审查态动态结果，不落库，随 audit 响应返回）

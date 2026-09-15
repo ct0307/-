@@ -234,6 +234,14 @@ a03-contract-audit/
 
 本地质量门禁用于防止开发回归，**不等于真实硬指标验收**。它不会替代真实 52 份文件、PostgreSQL 16、Docker Compose、OpenClaw、GPU 或功率数据的实机证据，也不会自动提交、推送或部署代码。
 
+需要验收 50+2 冻结合同集时必须显式传入目录：
+
+```powershell
+.\scripts\quality_gate.ps1 -ContractSetDir 'C:\Users\chentao\Desktop\测试合同'
+```
+
+该步骤调用生产预检、解析、分类和六要素抽取链路，报告写入 `outputs/contract-set-gate/report.json`。报告只保留 case ID、状态、错误码、汇总指标和证据坐标，不保存合同正文或字段原值。这里的六要素结果属于构造真值工程基线，不是经双人法务复核的正式法律金标准。
+
 
 ## 验收指标
 

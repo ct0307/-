@@ -58,6 +58,9 @@ class Contract(Base):
     content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     audit_generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     elements_json: Mapped[str] = mapped_column(Text, default="{}")  # JSON：解析要素（甲方/标的/收付款节点等）
+    element_evidence_json: Mapped[str] = mapped_column(
+        Text, default="{}", server_default="{}"
+    )
     parse_source: Mapped[str] = mapped_column(
         String(16), default="native", server_default="native"
     )

@@ -1,4 +1,5 @@
 import client from './client'
+import type { ContractQualityFields } from './types'
 
 export type ImportItemStatus =
   | 'queued'
@@ -10,13 +11,16 @@ export type ImportItemStatus =
   | 'done'
   | 'deleted'
 
-export interface ImportItem {
+export interface ImportItem extends ContractQualityFields {
   id: number
   contract_id: number | null
   filename: string
   status: ImportItemStatus
   error_code: string | null
   error_message: string | null
+  error_action?: string | null
+  retryable?: boolean
+  correlation_id?: string | null
   suggested_type: string
   confidence: number | null
   confirmed_type: string

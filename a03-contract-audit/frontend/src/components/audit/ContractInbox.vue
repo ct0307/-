@@ -4,6 +4,7 @@ import { Delete, DocumentChecked, RefreshRight, UploadFilled } from '@element-pl
 import { ElMessageBox } from 'element-plus'
 
 import type { ImportItem } from '@/api/imports'
+import { importErrorMeta } from '@/utils/import-errors'
 
 const props = defineProps<{
   items: ImportItem[]
@@ -112,6 +113,18 @@ function confirm(item: ImportItem) {
   if (contractType && department) emit('confirm', item.id, contractType, department)
 }
 
+function failureMeta(item: ImportItem) {
+  return importErrorMeta(item)
+}
+
+function canRetry(item: ImportItem) {
+  return item.status === 'failed' && Boolean(item.contract_id) && failureMeta(item).retryable
+}
+
+function confidencePercent(confidence: number) {
+  return Math.round(Math.min(1, Math.max(0, confidence)) * 100)
+}
+
 async function deleteDraft(item: ImportItem) {
   try {
     await ElMessageBox.confirm(
@@ -216,16 +229,27 @@ async function deleteDraft(item: ImportItem) {
           <el-icon><DocumentChecked /></el-icon>
           <div>
             <strong :title="item.filename">{{ item.filename }}</strong>
-            <small v-if="item.error_message" role="alert">{{ item.error_message }}</small>
+            <template v-if="item.status === 'failed'">
+              <small role="alert">{{ failureMeta(item).message }}</small>
+              <small class="error-action">建议：{{ failureMeta(item).action }}</small>
+            </template>
+            <small v-else-if="item.ocr_confidence != null" class="confidence mono">
+              OCR 置信度 {{ confidencePercent(item.ocr_confidence) }}%
+            </small>
             <small v-else-if="item.confidence !== null" class="confidence mono">
-              识别置信度 {{ Math.round(item.confidence * 100) }}%
+              类型置信度 {{ confidencePercent(item.confidence) }}%
             </small>
           </div>
         </div>
         <div role="cell" data-label="状态">
-          <el-tag :type="statusMeta[item.status].type" size="small">
-            {{ statusMeta[item.status].label }}
-          </el-tag>
+          <div class="status-tags">
+            <el-tag :type="statusMeta[item.status].type" size="small">
+              {{ statusMeta[item.status].label }}
+            </el-tag>
+            <el-tag v-if="item.requires_review" type="warning" effect="plain" size="small">
+              需人工复核
+            </el-tag>
+          </div>
         </div>
         <div role="cell" data-label="合同类型">
           <el-select
@@ -262,7 +286,7 @@ async function deleteDraft(item: ImportItem) {
             :aria-label="`确认 ${item.filename}`"
             @click="confirm(item)"
           >确认</el-button>
-          <el-tooltip v-if="item.status === 'failed' && item.contract_id" content="使用已保存的草稿重新解析">
+          <el-tooltip v-if="canRetry(item)" content="使用已保存的草稿重新解析">
             <el-button
               circle
               size="small"
@@ -398,7 +422,9 @@ async function deleteDraft(item: ImportItem) {
 .file-cell > .el-icon { flex: none; margin-top: 2px; color: var(--info); }
 .file-cell strong { display: block; overflow: hidden; color: var(--ivory); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .file-cell small { display: block; margin-top: 4px; color: var(--seal); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
+.file-cell .error-action { color: var(--amber); }
 .file-cell .confidence { color: var(--muted); }
+.status-tags { display: flex; min-width: 0; flex-wrap: wrap; gap: 5px; }
 .department-text { color: var(--ivory-dim); font-size: 12px; }
 .actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
 .actions :deep(.el-button + .el-button) { margin-left: 0; }

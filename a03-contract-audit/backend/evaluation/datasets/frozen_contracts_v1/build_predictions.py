@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.services.parser.extractor import extract_document, extract_elements
+from app.services.parser.elements import extract_element_result
+from app.services.parser.extractor import extract_document
 
 
 FIELDS = ("party_a", "party_b", "subject", "amount", "duration", "payment_terms")
@@ -34,7 +35,7 @@ def build_predictions(dataset_root: Path) -> list[dict[str, Any]]:
         case_id = str(truth["case_id"])
         try:
             parsed = extract_document(str(path))
-            extracted = extract_elements(parsed.text)
+            extracted = extract_element_result(parsed).values
             prediction = {field: extracted.get(field) for field in FIELDS}
             prediction["payment_terms"] = _payment_terms(prediction["payment_terms"])
             predictions.append(

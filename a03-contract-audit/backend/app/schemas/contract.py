@@ -132,7 +132,9 @@ class AuditResponse(BaseModel):
 
 class ParseResponse(BaseModel):
     contract_id: int
+    status: Literal["parsed", "review_required"] = "parsed"
     elements: dict
+    element_evidence: dict = Field(default_factory=dict)
     text_length: int
     requires_review: bool = False
     ocr_confidence: float | None = None
@@ -142,6 +144,8 @@ class ParseResponse(BaseModel):
 class ParseErrorDetail(BaseModel):
     code: str
     detail: str
+    action: str
+    correlation_id: str
 
 
 class ParseErrorResponse(BaseModel):

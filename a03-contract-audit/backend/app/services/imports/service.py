@@ -21,12 +21,20 @@ def target_status(
     suggested_type: str,
     confidence: float,
     *,
+    auto_ready_eligible: bool = False,
+    requires_review: bool = False,
     current_status: str = "parsing",
     retry: bool = False,
 ) -> str:
     if retry and current_status != "failed":
         raise ImportConflict("仅失败导入项可以重试")
-    if suggested_type and confidence >= settings.CONTRACT_TYPE_READY_THRESHOLD:
+    if (
+        not requires_review
+        and settings.CONTRACT_TYPE_AUTO_READY_ENABLED
+        and auto_ready_eligible
+        and suggested_type
+        and confidence >= settings.CONTRACT_TYPE_READY_THRESHOLD
+    ):
         return "ready"
     return "awaiting_confirmation"
 

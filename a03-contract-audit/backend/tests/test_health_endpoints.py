@@ -9,6 +9,7 @@ from app.core.config import (
 )
 from app.main import app
 from app.api.v1.endpoints.runtime import PublicRuntimeStatus
+from app.services.parser.readiness import OCRReadiness
 
 
 client = TestClient(app)
@@ -34,7 +35,11 @@ def test_live_health_is_public_and_reports_process_liveness():
 def test_ready_health_returns_200_when_dependencies_are_ready(monkeypatch):
     monkeypatch.setattr(
         "app.main.collect_readiness",
-        lambda **_kwargs: {"database": {"ready": True}, "model": {"ready": True}},
+        lambda **_kwargs: {
+            "database": {"ready": True},
+            "model": {"ready": True},
+            "ocr": {"ready": True},
+        },
     )
 
     response = client.get("/health/ready")
@@ -80,6 +85,22 @@ def test_ready_health_keeps_instance_ready_when_model_is_degraded(monkeypatch):
     assert response.json()["checks"]["model"]["error_code"] == "network_error"
 
 
+def test_ready_health_keeps_instance_ready_when_ocr_is_degraded(monkeypatch):
+    monkeypatch.setattr(
+        "app.main.collect_readiness",
+        lambda **_kwargs: {
+            "database": {"ready": True},
+            "model": {"ready": True},
+            "ocr": {"ready": False, "error_code": "ocr_unavailable"},
+        },
+    )
+
+    response = client.get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json()["checks"]["ocr"]["error_code"] == "ocr_unavailable"
+
+
 def test_ready_health_returns_503_when_database_is_unavailable(monkeypatch):
     monkeypatch.setattr(
         "app.main.collect_readiness",
@@ -110,13 +131,13 @@ def test_ready_health_does_not_refresh_external_model(monkeypatch):
     response = client.get("/health/ready")
 
     assert response.status_code == 200
-    assert calls == [{"refresh_model": False}]
+    assert calls == [{"refresh_model": False, "strict_ocr": False}]
 
 
 def test_preflight_requires_model_readiness(monkeypatch):
     monkeypatch.setattr(
         "app.main.collect_readiness",
-        lambda: {
+        lambda **_kwargs: {
             "database": {"ready": True},
             "model": {"ready": False, "error_code": "timeout"},
         },
@@ -126,6 +147,50 @@ def test_preflight_requires_model_readiness(monkeypatch):
 
     assert response.status_code == 503
     assert response.json()["status"] == "not_ready"
+
+
+def test_preflight_requests_fresh_model_and_strict_ocr_probe(monkeypatch):
+    calls: list[dict] = []
+
+    def collect(**kwargs):
+        calls.append(kwargs)
+        return {
+            "database": {"ready": True},
+            "model": {"ready": True},
+            "ocr": {"ready": True},
+        }
+
+    monkeypatch.setattr("app.main.collect_readiness", collect)
+
+    response = client.get("/health/preflight")
+
+    assert response.status_code == 200
+    assert calls == [{"refresh_model": True, "strict_ocr": True}]
+
+
+def test_preflight_returns_503_when_strict_ocr_probe_is_not_ready(monkeypatch):
+    model_calls: list[bool] = []
+    ocr_calls: list[bool] = []
+
+    monkeypatch.setattr(main_module, "collect_database_readiness", lambda: {"ready": True})
+
+    def model_readiness(*, refresh):
+        model_calls.append(refresh)
+        return {"ready": True, "status": "online"}
+
+    def ocr_readiness(*, strict):
+        ocr_calls.append(strict)
+        return OCRReadiness(False, "ocr_unavailable", "OCR 运行依赖不可用")
+
+    monkeypatch.setattr(main_module, "collect_model_readiness", model_readiness)
+    monkeypatch.setattr(main_module, "probe_ocr_runtime", ocr_readiness)
+
+    response = client.get("/health/preflight")
+
+    assert response.status_code == 503
+    assert model_calls == [True]
+    assert ocr_calls == [True]
+    assert response.json()["checks"]["ocr"]["error_code"] == "ocr_unavailable"
 
 
 def test_deepseek_configuration_requires_api_key():
@@ -194,7 +259,7 @@ def test_preflight_readiness_forces_a_fresh_runtime_probe(monkeypatch):
     monkeypatch.setattr(main_module, "_get_cached_runtime_status", cached_status)
     monkeypatch.setattr(main_module.settings, "LLM_API_KEY", "test-key")
 
-    checks = main_module.collect_readiness()
+    checks = main_module.collect_readiness(strict_ocr=False)
 
     assert checks["model"]["ready"] is True
     assert calls == [{"force_refresh": True}]

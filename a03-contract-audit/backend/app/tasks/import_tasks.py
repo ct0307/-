@@ -4,13 +4,23 @@ import json
 from datetime import datetime, timezone
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from app.models.models import ImportBatchItem, LookupItem
 from app.services.audit.runner import apply_parse_quality
 from app.services.imports.classifier import classify_contract_type
+from app.services.imports.errors import parse_failure
 from app.services.imports.service import summarize_import, target_status
-from app.services.parser.extractor import extract_document, extract_elements
+from app.services.parser.elements import (
+    element_evidence_payload,
+    extract_element_result,
+    legacy_element_values,
+    merge_element_review,
+)
+from app.services.parser.extractor import extract_document
 from app.tasks.celery_app import celery_app
+
+log = get_logger("imports")
 
 
 def refresh_import_batch(batch) -> None:
@@ -35,7 +45,12 @@ def parse_import_item(item_id: int) -> dict:
                 raise ValueError("合同记录不存在")
             parsed = extract_document(item.contract.storage_path)
             apply_parse_quality(item.contract, parsed)
-            elements = extract_elements(parsed.text)
+            element_result = extract_element_result(parsed)
+            elements = legacy_element_values(element_result.values, text=parsed.text)
+            evidence_payload = element_evidence_payload(element_result)
+            requires_review, review_reason = merge_element_review(parsed, element_result)
+            item.contract.requires_review = requires_review
+            item.contract.review_reason = review_reason
             available = [
                 row.value
                 for row in db.query(LookupItem)
@@ -49,6 +64,10 @@ def parse_import_item(item_id: int) -> dict:
                 available_types=available,
             )
             item.contract.elements_json = json.dumps(elements, ensure_ascii=False)
+            item.contract.element_evidence_json = json.dumps(
+                evidence_payload,
+                ensure_ascii=False,
+            )
             item.contract.suggested_type = suggestion.suggested_type
             item.contract.type_confidence = suggestion.confidence
             item.contract.type_evidence_json = json.dumps(suggestion.evidence, ensure_ascii=False)
@@ -57,14 +76,28 @@ def parse_import_item(item_id: int) -> dict:
                 if suggestion.confidence >= settings.CONTRACT_TYPE_CONFIRM_THRESHOLD
                 else ""
             )
-            item.contract.status = "parsed"
-            item.status = target_status(suggestion.suggested_type, suggestion.confidence)
+            item.contract.status = "review_required" if requires_review else "parsed"
+            item.status = target_status(
+                suggestion.suggested_type,
+                suggestion.confidence,
+                auto_ready_eligible=suggestion.auto_ready_eligible,
+                requires_review=requires_review,
+            )
             item.error_code = None
             item.error_message = None
-        except Exception:
+        except Exception as exc:
+            failure = parse_failure(exc)
             item.status = "failed"
-            item.error_code = "PARSE_FAILED"
-            item.error_message = "合同解析失败，请重新解析或删除草稿"
+            item.error_code = failure.code
+            item.error_message = failure.message
+            log.error(
+                "import.parse_failed",
+                item_id=item.id,
+                contract_id=item.contract_id,
+                code=failure.code,
+                exception_type=type(exc).__name__,
+                attempts=item.attempts,
+            )
         refresh_import_batch(item.batch)
         db.commit()
         return {"item_id": item.id, "status": item.status}
