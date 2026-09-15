@@ -224,7 +224,7 @@ test('restores an active quality-state batch from the url after reload', async (
   await expect(page).toHaveURL(/\bimport=42\b/)
   await expect(page).toHaveURL(/\bbatch=88\b/)
 
-  await page.reload()
+  await page.reload({ waitUntil: 'domcontentloaded' })
 
   const region = page.getByRole('region', { name: '审查批次 88' })
   await expect(region.getByText('结果校验中', { exact: true })).toBeVisible()
