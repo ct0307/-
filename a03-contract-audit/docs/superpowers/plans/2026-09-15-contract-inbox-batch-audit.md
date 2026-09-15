@@ -478,7 +478,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\quality_gate.ps1
 
 Expected: 质量门禁退出码为 0；如存在与本改动无关的既有失败，记录完整命令和失败项，不声明全部通过。
 
-- [ ] **Step 7: 提交验收测试与必要修复**
+- [x] **Step 7: 提交验收测试与必要修复**
 
 ```powershell
 git add frontend/tests/contract-inbox-workflow-e2e.spec.ts frontend/src/components/audit/ContractInbox.vue frontend/src/stores/import-inbox.ts
