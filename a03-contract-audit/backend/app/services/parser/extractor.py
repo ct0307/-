@@ -361,6 +361,7 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
 
     source = "mixed" if text or any(part.strip() for part in parts) else "ocr"
     review_reason = None
+    low_confidence_pages: tuple[int, ...] = ()
     if result.requires_review:
         threshold = int(settings.OCR_MIN_CONFIDENCE * 100)
         low_confidence_pages = tuple(
@@ -378,6 +379,15 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
             review_reason = "OCR 结果需人工复核"
     if missing_pages:
         page_reason = f"第 {_format_page_ranges(missing_pages)} 页未提取到有效文本"
+        if review_reason and len(f"{review_reason}；{page_reason}") > 255:
+            if low_confidence_pages:
+                review_reason = (
+                    f"OCR 第 {_format_page_ranges(low_confidence_pages, max_chars=90)} "
+                    f"页置信度低于 {threshold}%"
+                )
+            page_reason = (
+                f"第 {_format_page_ranges(missing_pages, max_chars=90)} 页未提取到有效文本"
+            )
         review_reason = "；".join(part for part in (review_reason, page_reason) if part)
     ocr_page_set = set(selected)
     confidence_by_page = dict(zip(selected, page_confidences))

@@ -679,6 +679,37 @@ def test_sparse_missing_pages_use_bounded_summary():
     assert "共 500 页" in reason
 
 
+def test_combined_low_confidence_and_sparse_missing_reason_stays_bounded(monkeypatch):
+    page_texts = tuple("有效合同正文" * 5 if index % 2 == 0 else "" for index in range(400))
+    ocr_texts = ("低置信度扫描页",) + ("",) * 199
+    confidences = (0.41,) * 200
+    monkeypatch.setattr(pdfplumber, "open", lambda _: _pdf_with_pages(*page_texts))
+    monkeypatch.setattr(
+        extractor,
+        "_extract_pdf_pymupdf_candidate",
+        lambda _data, expected_pages=None: _pymupdf_candidate(*page_texts),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "ocr_pdf_bytes",
+        lambda _data, **_kwargs: OCRResult(
+            text="低置信度扫描页",
+            page_count=200,
+            mean_confidence=0.41,
+            page_texts=ocr_texts,
+            requires_review=True,
+            page_confidences=confidences,
+        ),
+    )
+
+    result = extractor._extract_pdf_result(b"mixed-quality-pages")
+
+    assert result.review_reason is not None
+    assert len(result.review_reason) <= 255
+    assert "置信度低于" in result.review_reason
+    assert "未提取到有效文本" in result.review_reason
+
+
 def _blank_pdf(page_count: int) -> bytes:
     import fitz
 

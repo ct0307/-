@@ -21,8 +21,8 @@
 
 ### 验证结论
 
-- OCR 返回类型、旧 401 与独立审查阻断项均先复现失败、再验证修复；后端解析器、合同质量、评测及 OCR 专项测试 `112 passed`。
-- 基于 `origin/master` 的干净 PR 分支完整质量门禁通过：评测 `97 passed`；后端 `1142 passed`；前端 `83 passed, 36 skipped`；TypeScript 类型检查与生产构建通过。评测测试包含于后端全量，不重复累计。
+- OCR 返回类型、旧 401 与独立审查阻断项均先复现失败、再验证修复；后端解析器、合同质量、评测及 OCR 专项测试 `113 passed`。
+- 基于 `origin/master` 的干净 PR 分支完整质量门禁通过：评测 `97 passed`；后端 `1143 passed`；前端 `83 passed, 36 skipped`；TypeScript 类型检查与生产构建通过。评测测试包含于后端全量，不重复累计。
 - Windows 下使用 `$env:PYTHONUTF8='1'` 后执行 `powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/quality_gate.ps1`；此前评测 CLI 编码失败已消除。门禁摘要位于本地 `.quality-gate/summary.json`。
 - 会话专项浏览器测试 `5 passed`：桌面 1440×900、手机 390×844 覆盖空表单、登录、403 保持会话、401 清理内存/缓存/轮询、路由守卫、同用户重新登录、迟到 401/200 响应隔离及整改数据重新加载。HTTP 使用测试夹具，运行真实 Vue、Axios、Pinia 和路由；截图复核无横向溢出或控件遮挡。
 - 默认模式跳过的 36 项联调测试未在本轮执行；未执行真实 52 文件、真实 OCR 准确率、PostgreSQL、OpenClaw/GPU 或能耗实测，不据此宣称生产验收达标。第三方依赖仍有弃用及构建注释警告，无门禁失败。
