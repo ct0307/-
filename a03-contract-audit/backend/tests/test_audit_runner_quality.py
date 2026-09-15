@@ -839,6 +839,8 @@ def test_task_publish_rolls_back_risks_and_terminal_state_together(monkeypatch, 
         contract_id=contract.id,
         filename=contract.filename,
         status="auditing",
+        progress=62,
+        progress_stage="reviewing",
         audit_generation=1,
         execution_token="atomic-token",
     )
@@ -887,7 +889,10 @@ def test_task_publish_rolls_back_risks_and_terminal_state_together(monkeypatch, 
 
     db.rollback()
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
-    assert db.get(AuditBatchItem, item.id).status == "validating"
+    saved_item = db.get(AuditBatchItem, item.id)
+    assert saved_item.status == "auditing"
+    assert saved_item.progress == 62
+    assert saved_item.progress_stage == "reviewing"
 
 
 def test_expired_worker_execution_token_cannot_publish(monkeypatch, db: Session):

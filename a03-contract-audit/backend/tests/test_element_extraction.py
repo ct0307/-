@@ -135,6 +135,29 @@ def test_unscoped_distinct_reconciliation_and_payment_nodes_remain_valid():
     assert all(item.validation == "valid" for item in result.evidence["payment_terms"])
 
 
+def test_same_payment_trigger_with_conflicting_percentages_requires_review():
+    result = extract_element_result(_parsed(
+        "付款安排：合同签订后支付30%。\n"
+        "付款方式：合同签订后支付50%。"
+    ))
+
+    assert "payment_terms" in result.review_fields
+    assert all(
+        item.validation == "ambiguous"
+        for item in result.evidence["payment_terms"]
+    )
+
+
+def test_long_payment_section_keeps_nodes_after_1200_characters():
+    filler = "付款申请资料应完整。" * 130
+    result = extract_element_result(_parsed(
+        "付款安排：\n1. 合同签订后支付30%；\n"
+        f"{filler}\n2. 最终验收后支付70%。"
+    ))
+
+    assert result.values["payment_terms"][-1] == "最终验收后支付70%"
+
+
 @pytest.mark.parametrize(
     "text",
     [

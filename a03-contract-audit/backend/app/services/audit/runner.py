@@ -79,6 +79,7 @@ def run_audit(
     claimed_generation = generation or 0
     owns_generation = generation is None
     previous_status = contract.status
+    previous_item_state: dict[str, object] | None = None
     try:
         claimed = (
             db.query(Contract)
@@ -150,6 +151,12 @@ def run_audit(
         )
         validating.status = "validating"
         if validating_item is not None:
+            previous_item_state = {
+                "status": validating_item.status,
+                "progress": validating_item.progress,
+                "progress_stage": validating_item.progress_stage,
+                "finished_at": validating_item.finished_at,
+            }
             validating_item.status = "validating"
             validating_item.progress = max(validating_item.progress, 95)
             validating_item.progress_stage = "persisting"
@@ -277,8 +284,21 @@ def run_audit(
                 .with_for_update()
                 .one()
             )
-            if owns_generation and claimed_generation and restored_contract.audit_generation == claimed_generation:
+            if claimed_generation and restored_contract.audit_generation == claimed_generation:
                 restored_contract.status = previous_status
+                restored_item = _locked_item(
+                    db,
+                    contract_id=contract_id,
+                    batch_item_id=batch_item_id,
+                )
+                if restored_item is not None and previous_item_state is not None:
+                    _assert_item_fence(
+                        restored_item,
+                        generation=claimed_generation,
+                        execution_token=execution_token,
+                    )
+                    for field, value in previous_item_state.items():
+                        setattr(restored_item, field, value)
                 db.commit()
             else:
                 db.rollback()

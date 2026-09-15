@@ -57,12 +57,28 @@ _PARTY_PATTERNS = {
     ),
 }
 
+_PARTY_SECTION = re.compile(
+    r"(?:^|\n)合同主体和通知信息\s*\n(?P<body>.*?)(?=\n签署页(?:\n|$))",
+    re.DOTALL,
+)
+_PARTY_SECTION_LINE = re.compile(
+    r"(?m)^[^\n：:；;]{1,24}[：:]\s*([^；;\n]{2,100})(?=[；;])"
+)
+
 _SUBJECT_PATTERNS = (
+    re.compile(r"本合同“[^”\n]{1,40}”以(.{2,180}?)为交易基础"),
+    re.compile(r"本次交易明细为(.{2,180}?)[。；;\n]"),
+    re.compile(r"本次[^\n，,；;。]{1,30}为(.{2,180}?)[，,；;。]"),
     re.compile(r"(?:本合同标的|合同标的|标的名称|项目名称)\s*(?:为|是)?\s*[：:]?\s*([^\n，,；;。]{2,100})"),
     re.compile(
         r"(?:乙方|供应方|供应商|受托方)\s*(?:向\s*(?:甲方|采购方|采购人|委托方))?"
         r"\s*(?:提供|承建|销售)\s*([^\n，,；;。]{2,100})"
     ),
+)
+
+_STRUCTURED_AMOUNT_PATTERNS = (
+    re.compile(r"合同金额或结算口径为(.{1,100}?)。付款按"),
+    re.compile(r"金额为(.{1,100}?)[；;]付款节点为"),
 )
 
 _AMOUNT_PATTERN = re.compile(
@@ -83,6 +99,7 @@ _BARE_MONEY_PATTERN = re.compile(
 )
 
 _DURATION_PATTERNS = (
+    re.compile(r"适用期间为([^。；;\n]{2,100})(?=[。；;])"),
     re.compile(
         r"(?:合同期限|合同有效期|履约期限|有效期)\s*(?:为)?\s*[：:]?\s*自?\s*"
         r"(\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?\s*"
@@ -92,6 +109,13 @@ _DURATION_PATTERNS = (
         r"(?:合同期限|合同有效期|履约期限|有效期)\s*(?:为)?\s*[：:]?\s*"
         r"([^\n，,；;。]{2,60})"
     ),
+)
+
+_STRUCTURED_PAYMENT_PATTERNS = (
+    re.compile(r"依次按以下节点办理：(.{1,500}?)。付款申请"),
+    re.compile(r"付款按“(.{1,500}?)”执行"),
+    re.compile(r"付款节点为(.{1,500}?)。"),
+    re.compile(r"(?:结算与付款|账单与发票|对账和开票)按(.{1,500}?)执行"),
 )
 
 _PAYMENT_HEADER = re.compile(
@@ -150,11 +174,36 @@ def _collect_subjects(text: str) -> list[_Candidate]:
     candidates: list[_Candidate] = []
     for pattern in _SUBJECT_PATTERNS:
         candidates.extend(_collect_scalar(pattern, text, 0.90))
-    return sorted(candidates, key=lambda item: item.start)
+    return sorted(candidates, key=lambda item: (-item.confidence, item.start))
+
+
+def _collect_section_parties(text: str) -> tuple[list[_Candidate], list[_Candidate]]:
+    match = _PARTY_SECTION.search(text)
+    if match is None:
+        return [], []
+    body_start = match.start("body")
+    candidates = []
+    for line in _PARTY_SECTION_LINE.finditer(match.group("body")):
+        raw = line.group(1).strip()
+        left_trimmed = len(line.group(1)) - len(line.group(1).lstrip())
+        start = body_start + line.start(1) + left_trimmed
+        candidates.append(_Candidate(raw, raw, start, start + len(raw), 0.99))
+    return candidates[:1], candidates[1:2]
 
 
 def _collect_amounts(text: str) -> list[_Candidate]:
     candidates: list[_Candidate] = []
+    for pattern in _STRUCTURED_AMOUNT_PATTERNS:
+        for match in pattern.finditer(text):
+            raw = match.group(1).strip()
+            if not raw or any(
+                marker in raw
+                for marker in ("不设固定总额", "据实结算", "不设固定金额")
+            ):
+                continue
+            left_trimmed = len(match.group(1)) - len(match.group(1).lstrip())
+            start = match.start(1) + left_trimmed
+            candidates.append(_Candidate(raw, raw, start, start + len(raw), 0.995))
     for match in _AMOUNT_PATTERN.finditer(text):
         sentence_start = max(
             (text.rfind(mark, 0, match.start()) for mark in "。！？\n；;"),
@@ -206,8 +255,9 @@ def _collect_amounts(text: str) -> list[_Candidate]:
 
 def _collect_durations(text: str) -> list[_Candidate]:
     candidates: list[_Candidate] = []
-    for pattern in _DURATION_PATTERNS:
-        for candidate in _collect_scalar(pattern, text, 0.95, normalize=_normalize_duration):
+    for index, pattern in enumerate(_DURATION_PATTERNS):
+        normalize = (lambda value: value) if index == 0 else _normalize_duration
+        for candidate in _collect_scalar(pattern, text, 0.95, normalize=normalize):
             if any(
                 candidate.start < existing.end and existing.start < candidate.end
                 for existing in candidates
@@ -218,7 +268,7 @@ def _collect_durations(text: str) -> list[_Candidate]:
 
 
 def _payment_section_end(text: str, start: int) -> int:
-    end = min(len(text), start + 1200)
+    end = len(text)
     heading = re.search(
         r"\n\s*(?:第[一二三四五六七八九十\d]+条(?:\s*[^\n]*)?"
         r"|(?:违约责任|争议解决|合同期限|保密|知识产权)[：:]?)",
@@ -261,9 +311,27 @@ def _collect_payment_section(text: str, section_start: int, section_end: int) ->
 
 def _collect_payment_terms(text: str) -> list[_Candidate]:
     """按标题顺序收集付款节点；规范化后完全重复的节点只保留首次出现。"""
+    structured: list[_Candidate] = []
+    structured_seen: set[str] = set()
+    for pattern in _STRUCTURED_PAYMENT_PATTERNS:
+        for match in pattern.finditer(text):
+            raw = match.group(1)
+            group_start = match.start(1)
+            for part in re.finditer(r"[^；;]+", raw):
+                value = part.group(0).strip().strip("“”\"")
+                if not value:
+                    continue
+                normalized = _normalized(value)
+                if normalized in structured_seen:
+                    continue
+                left_trimmed = len(part.group(0)) - len(part.group(0).lstrip())
+                start = group_start + part.start() + left_trimmed
+                structured.append(_Candidate(value, value, start, start + len(value), 0.96))
+                structured_seen.add(normalized)
+
     headers = list(_PAYMENT_HEADER.finditer(text))
-    candidates: list[_Candidate] = []
-    seen: set[str] = set()
+    candidates: list[_Candidate] = list(structured)
+    seen: set[str] = set(structured_seen)
     for index, header in enumerate(headers):
         next_header = headers[index + 1].start() if index + 1 < len(headers) else len(text)
         section_end = min(_payment_section_end(text, header.end()), next_header)
@@ -277,15 +345,32 @@ def _collect_payment_terms(text: str) -> list[_Candidate]:
 
 
 def _payment_conflicts(candidates: list[_Candidate]) -> bool:
-    stages = ("预付款", "首付款", "启动款", "签约", "发货", "到货", "验收", "终验", "尾款", "质保", "进度")
+    stage_patterns = (
+        ("start", re.compile(r"(?:合同)?(?:签订|签署|签约|生效)后|预付款|首付款|启动款")),
+        ("invoice", re.compile(r"(?:收到)?发票后|收票后|开票后")),
+        ("delivery", re.compile(r"发货|到货|交付|进场")),
+        ("acceptance", re.compile(r"验收|终验|初验")),
+        ("warranty", re.compile(r"质保|保修")),
+        ("progress", re.compile(r"进度|里程碑")),
+    )
     grouped: dict[str, set[str]] = {}
     for item in candidates:
-        stage = next((word for word in stages if word in item.value), "__unscoped__")
-        if stage == "__unscoped__":
-            # 无明确付款阶段的节点通常描述不同动作（如对账、收票后付款），
-            # 文本不同本身不足以证明互斥冲突。
+        stage = next(
+            (name for name, pattern in stage_patterns if pattern.search(item.value)),
+            None,
+        )
+        if stage is None:
+            action = re.search(r"(.{2,30}?)(?:支付|付款|付至|结算)", item.value)
+            stage = _normalized(action.group(1)) if action else None
+        if not stage:
             continue
-        grouped.setdefault(stage, set()).add(_normalized(item.value))
+        financial_value = re.search(
+            r"\d+(?:\.\d+)?\s*%|(?:人民币\s*)?[￥¥]?\s*\d[\d,]*(?:\.\d+)?\s*(?:万元|元)",
+            item.value,
+        )
+        if financial_value is None:
+            continue
+        grouped.setdefault(stage, set()).add(_normalized(financial_value.group(0)))
     return any(len(values) > 1 for values in grouped.values())
 
 
@@ -397,9 +482,10 @@ def extract_element_result(parsed: DocumentParseResult) -> ElementResult:
     """抽取固定六要素，并为每个非空值提供可回查的全文字符区间。"""
     text = parsed.text
     spans = _block_spans(parsed)
+    section_party_a, section_party_b = _collect_section_parties(text)
     candidates = {
-        "party_a": _collect_scalar(_PARTY_PATTERNS["party_a"], text, 0.96),
-        "party_b": _collect_scalar(_PARTY_PATTERNS["party_b"], text, 0.96),
+        "party_a": section_party_a + _collect_scalar(_PARTY_PATTERNS["party_a"], text, 0.96),
+        "party_b": section_party_b + _collect_scalar(_PARTY_PATTERNS["party_b"], text, 0.96),
         "subject": _collect_subjects(text),
         "amount": _collect_amounts(text),
         "duration": _collect_durations(text),

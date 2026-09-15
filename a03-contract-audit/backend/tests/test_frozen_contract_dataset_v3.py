@@ -548,3 +548,29 @@ def test_v3_validator_accepts_chinese_annex_titles():
     cases = load_cases()
     reasons = validate_contract_documents(cases, [build_contract(case) for case in cases])
     assert not [reason for reason in reasons if "正文附件引用不完整" in reason]
+
+
+def test_structured_extractor_meets_construction_truth_baseline():
+    """构造真值仅用于工程回归，不代表正式法律金标准。"""
+    from app.services.parser.elements import extract_element_result
+    from app.services.parser.extractor import DocumentParseResult
+    from evaluation.datasets.frozen_contracts_v1.precheck import (
+        evaluate_construction_truth,
+    )
+    from evaluation.datasets.frozen_contracts_v3.content import build_contract
+
+    truth_rows = []
+    predictions = {}
+    for case in load_cases():
+        text = build_contract(case).plain_text
+        result = extract_element_result(DocumentParseResult(text=text, source="native"))
+        truth_rows.append({
+            "case_id": case.case_id,
+            "gold": dict(case.truth.evaluation_projection(case.parties)),
+        })
+        predictions[case.case_id] = result.values
+
+    report = evaluate_construction_truth(truth_rows, predictions)
+
+    assert report["overall"]["f1"] >= 0.80
+    assert all(item["f1"] > 0 for item in report["by_field"].values())
