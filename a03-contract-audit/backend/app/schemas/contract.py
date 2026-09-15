@@ -136,6 +136,8 @@ class ParseResponse(BaseModel):
     elements: dict
     element_evidence: dict = Field(default_factory=dict)
     text_length: int
+    total_pages: int | None = None
+    missing_pages: list[int] = Field(default_factory=list)
     requires_review: bool = False
     ocr_confidence: float | None = None
     review_reason: str | None = None

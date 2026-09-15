@@ -38,6 +38,45 @@ def test_returns_no_selection_when_evidence_is_too_weak():
     assert result.confidence < 0.60
 
 
+def test_training_service_agreement_title_overrides_incidental_sales_words():
+    result = classify_contract_type(
+        filename="F3-025-渠道销售人员培训服务协议.pdf",
+        text="渠道销售人员培训服务协议\n合同类型：培训服务协议\n"
+             "培训机构提供课程设计和授课，学员为销售经理。",
+        available_types=ALL_TYPES,
+    )
+
+    assert result.suggested_type == "服务协议"
+    assert 0.60 <= result.confidence <= 0.70
+    assert result.auto_ready_eligible is False
+
+
+def test_untrusted_sample_cover_line_does_not_hide_real_agreement_title():
+    result = classify_contract_type(
+        filename="F3-025-渠道销售人员培训服务协议.pdf",
+        text="合成测试样本，仅用于系统验收\n渠道销售人员培训服务协议\n"
+             "案例编号：F3-025\n合同类型：培训服务协议\n销售经理参加课程。",
+        available_types=ALL_TYPES,
+    )
+
+    assert result.suggested_type == "服务协议"
+    assert result.confidence < 0.85
+    assert result.auto_ready_eligible is False
+
+
+def test_broad_insurance_service_agreement_title_is_not_auto_certain():
+    result = classify_contract_type(
+        filename="F3-044-员工补充医疗保险服务协议.pdf",
+        text="合成测试样本，仅用于系统验收\n员工补充医疗保险服务协议\n"
+             "合同类型：员工保险服务协议\n甲方提供保险服务。",
+        available_types=ALL_TYPES,
+    )
+
+    assert result.suggested_type == "服务协议"
+    assert result.confidence <= 0.70
+    assert result.auto_ready_eligible is False
+
+
 def test_only_returns_an_available_contract_type():
     result = classify_contract_type(
         filename="系统开发协议.docx",

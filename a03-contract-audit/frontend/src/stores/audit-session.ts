@@ -18,6 +18,7 @@ import {
   createAuditIdempotencyKey,
   createUploadIdempotencyKey,
 } from '@/utils/idempotency'
+import { SESSION_KEYS } from '@/utils/session'
 
 export type UploadStatus = 'uploading' | 'upload_failed' | 'parsing' | 'parse_failed' | 'parsed'
 
@@ -41,7 +42,7 @@ interface ActiveAudit {
   batchId?: number
 }
 
-const ACTIVE_AUDIT_STORAGE_KEY = 'qijian-active-audit'
+const ACTIVE_AUDIT_STORAGE_KEY = SESSION_KEYS.activeAudit
 
 function readActiveAudit(): ActiveAudit | null {
   if (typeof window === 'undefined') return null
@@ -49,7 +50,7 @@ function readActiveAudit(): ActiveAudit | null {
     const raw = window.localStorage.getItem(ACTIVE_AUDIT_STORAGE_KEY)
     if (!raw) return null
     const value = JSON.parse(raw) as Partial<ActiveAudit>
-    const currentOwner = window.localStorage.getItem('username') || ''
+    const currentOwner = window.localStorage.getItem(SESSION_KEYS.username) || ''
     if (
       value.owner !== currentOwner
       || !Number.isInteger(value.contractId)
@@ -230,7 +231,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     const selectedDimensions = dimensions ?? []
     busy.value = true
     try {
-      const owner = typeof window === 'undefined' ? '' : window.localStorage.getItem('username') || ''
+      const owner = typeof window === 'undefined' ? '' : window.localStorage.getItem(SESSION_KEYS.username) || ''
       const pending = activeAudit.value
       const recovery: ActiveAudit = pending
         && pending.owner === owner

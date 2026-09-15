@@ -71,6 +71,37 @@ def test_gate_accepts_terminal_valid_files_and_rejected_invalid_files():
     assert report.failures == ()
 
 
+def test_gate_rejects_pdf_page_coverage_even_if_terminal_status_is_parsed():
+    report = evaluate_ingestion(
+        valid_results=[{
+            "case_id": "F3-044", "status": "parsed", "error_code": None,
+            "total_pages": 5, "missing_pages": [2, 3, 5],
+        }],
+        invalid_results=[{"status": "failed", "contract_id": None}],
+        classification={"auto_ready_enabled": False, "auto_ready_count": 0},
+        element_report=passing_element_report(),
+    )
+
+    assert report.passed is False
+    assert "pdf_page_coverage" in report.failures
+    assert report.metrics["missing_pdf_page_count"] == 3
+
+
+def test_gate_cross_checks_page_anchors_without_relying_on_missing_pages_flag():
+    report = evaluate_ingestion(
+        valid_results=[{
+            "status": "parsed", "error_code": None, "total_pages": 3,
+            "missing_pages": [], "covered_pages": [1, 3],
+        }],
+        invalid_results=[],
+        classification={"auto_ready_enabled": False, "auto_ready_count": 0},
+        element_report=passing_element_report(),
+    )
+
+    assert "pdf_page_coverage" in report.failures
+    assert report.metrics["missing_pdf_page_count"] == 1
+
+
 def test_gate_rejects_invalid_contract_creation_and_missing_evidence():
     report = evaluate_ingestion(
         valid_results=[{"status": "parsed", "error_code": None}],
@@ -140,7 +171,11 @@ def test_contract_set_runner_evaluates_without_serializing_text(monkeypatch, tmp
         return DocumentParseResult(text=f"F3-{case_id} 合同原文", source="native")
 
     monkeypatch.setattr(module, "validate_upload", fake_validate)
-    monkeypatch.setattr(module, "extract_document", fake_extract)
+    monkeypatch.setattr(
+        module,
+        "extract_uploaded_document",
+        lambda filename, _content: fake_extract(filename),
+    )
     monkeypatch.setattr(
         module,
         "extract_element_result",

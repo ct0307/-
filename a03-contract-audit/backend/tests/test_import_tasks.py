@@ -122,6 +122,7 @@ def test_parse_import_item_hides_parser_failure_details(monkeypatch, tmp_path):
         assert item.status == "failed"
         assert item.error_code == "PARSE_INTERNAL_ERROR"
         assert item.error_message == "合同解析失败，请稍后重试"
+        assert item.contract.status == "failed"
         assert "missing.pdf" not in item.error_message
 
 

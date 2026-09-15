@@ -307,6 +307,58 @@ def test_legacy_batch_upload_isolates_invalid_content(monkeypatch, tmp_path):
     engine.dispose()
 
 
+def test_legacy_batch_parse_failure_keeps_file_and_processes_next_item(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(username="batch-parse", password_hash="x", role="legal", department="法务部")
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(contracts.settings, "STORAGE_DIR", str(tmp_path))
+        calls = []
+
+        def parse(path):
+            calls.append(path)
+            if len(calls) == 1:
+                raise OCRError("C:/secret/contract.pdf")
+            return DocumentParseResult("合同有效条款", "native")
+
+        monkeypatch.setattr(contracts, "extract_document", parse)
+        result = contracts.batch_upload_contracts(
+            files=[_upload("broken.txt", b"first"), _upload("good.txt", b"second")],
+            contract_type="采购合同", db=db, user=user,
+        )
+        assert result[0]["error_code"] == "OCR_PROTOCOL_ERROR"
+        assert result[0]["status"] == "failed"
+        assert "secret" not in repr(result)
+        failed = db.get(Contract, result[0]["contract_id"])
+        assert failed.status == "failed"
+        from pathlib import Path
+        assert Path(failed.storage_path).is_file()
+        assert result[1]["status"] == "success"
+        assert db.get(Contract, result[1]["contract_id"]).status == "parsed"
+    engine.dispose()
+
+
+def test_parse_response_exposes_missing_pages_and_persists_reason(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user, contract = _create_uploaded_contract(db, tmp_path)
+        parsed = DocumentParseResult(
+            "甲方：测试公司", "mixed", requires_review=True,
+            review_reason="第 2 页未提取到有效文本", total_pages=3, missing_pages=(2,),
+        )
+        monkeypatch.setattr(contracts, "extract_document", lambda _: parsed)
+        response = contracts.parse_contract(contract.id, db, user)
+        assert response.total_pages == 3
+        assert response.missing_pages == [2]
+        db.expire_all()
+        assert db.get(Contract, contract.id).review_reason == parsed.review_reason
+        assert response.status == "review_required"
+    engine.dispose()
+
+
 def test_deleted_contract_does_not_block_reupload_with_same_idempotency_key(monkeypatch, tmp_path):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

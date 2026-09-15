@@ -123,6 +123,14 @@ def classify_contract_type(
     name = Path(filename).stem.lower()
     lines = text[:8000].splitlines()
     first_line = next((line.strip().lower() for line in lines if line.strip()), "")
+    if _MATERIAL_SEMANTICS.search(first_line) and not any(
+        marker in first_line for marker in ("合同", "协议")
+    ):
+        first_line = next((
+            line.strip().lower() for line in lines[1:6]
+            if line.strip() and not _MATERIAL_SEMANTICS.search(line)
+            and not re.match(r"(?:案例|文件|版本)编号\s*[：:]", line.strip())
+        ), first_line)
     title = first_line[:100]
     title_markers = ("附件", "条款")
     title_is_contract_type = _is_contract_title(first_line, available_types)
@@ -139,6 +147,12 @@ def classify_contract_type(
     material_name = bool(_MATERIAL_SEMANTICS.search(name))
     material_title = bool(_MATERIAL_SEMANTICS.search(first_line))
     trusted_title = title if title_is_contract_type else ""
+    service_agreement_title = bool(
+        "服务协议" in types
+        and re.fullmatch(r".{0,50}(?:培训|咨询|保险|检测|运维|托管).{0,30}服务协议", first_line)
+        and re.search(r"(?:^|\n)合同类型\s*[：:]\s*[^\n]{0,30}服务协议", heading)
+        and not material_title
+    )
     for source in (trusted_name, trusted_title):
         matches = [value for value in types if value.lower() in source]
         # 同一标题中较长的类型优先，避免“技术服务合同”同时命中“服务合同”。
@@ -154,6 +168,12 @@ def classify_contract_type(
                 primary.add(value)
                 headline_scored.add(value)
                 trusted_headline_scored.add(value)
+
+    if service_agreement_title:
+        scores["服务协议"] += 8
+        evidence["服务协议"].append(first_line)
+        primary.add("服务协议")
+        headline_scored.add("服务协议")
 
     # 文件名中的受控交易别名可以产生建议，但不足以单独自动放行。
     for value in types:
@@ -200,6 +220,8 @@ def classify_contract_type(
     margin = best.score - ranked[1].score if len(ranked) > 1 else best.score
     if margin < 4:
         confidence = min(confidence, 0.40 if margin == 0 else 0.55 if margin <= 1 else 0.70)
+    if service_agreement_title and best.contract_type not in trusted_headline_scored:
+        confidence = min(confidence, 0.70)
     eligible = (
         best.contract_type in trusted_headline_scored
         and best.contract_type in primary

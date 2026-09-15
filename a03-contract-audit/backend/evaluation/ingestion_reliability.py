@@ -20,7 +20,7 @@ from app.services.parser.elements import (
     ElementResult,
     extract_element_result,
 )
-from app.services.parser.extractor import extract_document
+from app.services.parser.extractor import extract_uploaded_document
 from evaluation.datasets.frozen_contracts_v3.cases import load_cases
 from evaluation.elements import evaluate_dataset
 
@@ -129,6 +129,16 @@ def evaluate_ingestion(
         failures.append("element_zero_field")
     if missing_evidence_count > 0:
         failures.append("element_evidence")
+    missing_pdf_page_count = 0
+    for item in valid_results:
+        missing_pages = set(item.get("missing_pages") or ())
+        total_pages = item.get("total_pages")
+        covered_pages = item.get("covered_pages")
+        if isinstance(total_pages, int) and total_pages > 0 and covered_pages is not None:
+            missing_pages.update(set(range(1, total_pages + 1)) - set(covered_pages))
+        missing_pdf_page_count += len(missing_pages)
+    if missing_pdf_page_count:
+        failures.append("pdf_page_coverage")
 
     safe_elements = sanitize_element_report(element_report)
     metrics = {
@@ -139,6 +149,7 @@ def evaluate_ingestion(
             item.get("error_code") == "OCR_UNAVAILABLE" for item in valid_results
         ),
         "missing_evidence_count": missing_evidence_count,
+        "missing_pdf_page_count": missing_pdf_page_count,
         "element_macro_f1": overall_f1,
     }
     return IngestionReport(
@@ -314,7 +325,7 @@ def evaluate_contract_set(
         gold_records.append(_gold_record(case, path))
         try:
             validate_upload(path.name, path.read_bytes())
-            parsed = extract_document(str(path))
+            parsed = extract_uploaded_document(path.name, path.read_bytes())
             elements = extract_element_result(parsed)
             predictions[case_id] = elements.values
             evidence, missing = _evidence_positions(elements)
@@ -347,6 +358,12 @@ def evaluate_contract_set(
                 "error_code": None,
                 "parse_source": parsed.source,
                 "ocr_confidence": parsed.ocr_confidence,
+                "total_pages": parsed.total_pages,
+                "missing_pages": list(parsed.missing_pages),
+                "covered_pages": sorted({
+                    block.anchor.page_number for block in parsed.blocks
+                    if block.anchor.page_number is not None
+                }),
                 "requires_review": requires_review,
                 "classification": {
                     "expected": expected,
@@ -365,6 +382,9 @@ def evaluate_contract_set(
                 "error_code": error_code,
                 "parse_source": None,
                 "ocr_confidence": None,
+                "total_pages": None,
+                "missing_pages": [],
+                "covered_pages": [],
                 "requires_review": False,
                 "classification": {},
                 "elements": {},

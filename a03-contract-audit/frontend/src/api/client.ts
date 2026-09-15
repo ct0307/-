@@ -1,14 +1,32 @@
-import axios from 'axios'
+import axios, { type AxiosRequestConfig } from 'axios'
+import { clearSessionStorage, SESSION_KEYS } from '@/utils/session'
+
+// 响应拦截器返回的是 res.data（业务数据本体），不是 AxiosResponse。
+// 用独立接口声明实例类型，让 api 层直接拿到泛型数据，避免逐处 as unknown as 双重断言。
+export interface ApiClient {
+  get<T = any>(url: string, config?: AxiosRequestConfig): Promise<T>
+  delete<T = any>(url: string, config?: AxiosRequestConfig): Promise<T>
+  post<T = any>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>
+  put<T = any>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>
+  patch<T = any>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T>
+}
 
 // 统一后端接口客户端。开发期经 vite proxy 转发到 :8000。
-const client = axios.create({
+const instance = axios.create({
   baseURL: '/api/v1',
   timeout: 30000,
 })
 
+// 401 处理器由应用入口注册（登出 + router 跳转）。
+// 拦截器不直接依赖 router / auth store，避免 client → store → api → client 的循环引用。
+let onUnauthorized: (() => void) | null = null
+export function setUnauthorizedHandler(handler: () => void): void {
+  onUnauthorized = handler
+}
+
 // 请求拦截：附带 JWT
-client.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token')
+instance.interceptors.request.use((config) => {
+  const token = localStorage.getItem(SESSION_KEYS.token)
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -42,18 +60,21 @@ export function extractHttpErrorDetail(detail: unknown): { code?: string; messag
   }
 }
 
-client.interceptors.response.use(
+instance.interceptors.response.use(
   (res) => res.data,
   (err) => {
-    // 401：凭证失效，清 token 跳登录
-    if (err.response?.status === 401) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('role')
-      localStorage.removeItem('username')
-      localStorage.removeItem('department')
-      localStorage.removeItem('authorized_departments')
-      localStorage.removeItem('qijian-active-audit')
-      if (location.pathname !== '/login') {
+    // 只清理发起请求时的会话，避免旧请求迟到的 401 注销新登录用户。
+    const currentToken = localStorage.getItem(SESSION_KEYS.token)
+    const requestAuthorization = err.config?.headers?.Authorization
+    const belongsToCurrentSession = currentToken
+      ? requestAuthorization === `Bearer ${currentToken}`
+      : !requestAuthorization
+    if (err.response?.status === 401 && belongsToCurrentSession) {
+      clearSessionStorage()
+      if (onUnauthorized) {
+        onUnauthorized()
+      } else if (location.pathname !== '/login') {
+        // 兜底：处理器未注册时（如测试环境）整页跳转
         location.href = '/login'
       }
     }
@@ -83,5 +104,7 @@ client.interceptors.response.use(
     return Promise.reject(err)
   },
 )
+
+const client = instance as unknown as ApiClient
 
 export default client

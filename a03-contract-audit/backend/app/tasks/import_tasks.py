@@ -90,6 +90,8 @@ def parse_import_item(item_id: int) -> dict:
             item.status = "failed"
             item.error_code = failure.code
             item.error_message = failure.message
+            if item.contract is not None:
+                item.contract.status = "failed"
             log.error(
                 "import.parse_failed",
                 item_id=item.id,
