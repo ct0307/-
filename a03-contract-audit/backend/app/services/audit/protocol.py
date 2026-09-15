@@ -3,7 +3,7 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-AUDIT_PROTOCOL_VERSION = "candidate-v3"
+AUDIT_PROTOCOL_VERSION = "candidate-v4"
 AUDIT_JSON_FORMAT = {"type": "json_object"}
 
 
@@ -44,11 +44,52 @@ def parse_risk_envelope(text: str) -> RiskEnvelope:
     return RiskEnvelope.model_validate_json(stripped)
 
 
+class RiskFinding(BaseModel):
+    """候选发现阶段的紧凑输出，不承载长篇分析。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+    level: Literal["high", "medium", "low"]
+    category: str = Field(min_length=2, max_length=64)
+    quote: str = Field(min_length=2, max_length=320)
+
+    _strip_level = field_validator("level", mode="before")(_strip_string)
+
+
+class RiskFindingEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+    risks: list[RiskFinding] = Field(max_length=5)
+    has_more: bool
+
+
+class RiskEnrichment(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+    reason: str = Field(min_length=4, max_length=400)
+    suggestion: str = Field(min_length=4, max_length=400)
+
+
+def parse_risk_finding_envelope(text: str) -> RiskFindingEnvelope:
+    stripped = text.strip()
+    if not stripped.startswith("{") or not stripped.endswith("}"):
+        raise ValueError("候选输出必须是 JSON 对象")
+    return RiskFindingEnvelope.model_validate_json(stripped)
+
+
+def parse_risk_enrichment(text: str) -> RiskEnrichment:
+    stripped = text.strip()
+    if not stripped.startswith("{") or not stripped.endswith("}"):
+        raise ValueError("风险补全输出必须是 JSON 对象")
+    return RiskEnrichment.model_validate_json(stripped)
+
+
 ReviewIssueCode = Literal[
     "OUTPUT_TRUNCATED",
     "INVALID_MODEL_OUTPUT",
     "MODEL_TIMEOUT",
     "MODEL_UNAVAILABLE",
+    "MODEL_REJECTED",
     "PAGINATION_EXHAUSTED",
     "EVIDENCE_UNRESOLVED",
     "ORIGINAL_TEXT_UNRESOLVED",

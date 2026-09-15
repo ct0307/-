@@ -7,6 +7,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from types import GeneratorType
+from typing import Literal
 
 
 class _ImmutableResponseFormat(dict[str, str]):
@@ -57,6 +58,7 @@ class ChatOptions:
     max_output_tokens: int | None = None
     response_format: dict[str, str] | None = None
     request_id: str | None = None
+    thinking: Literal["enabled", "disabled"] | None = None
 
     def __post_init__(self) -> None:
         if self.response_format is not None:

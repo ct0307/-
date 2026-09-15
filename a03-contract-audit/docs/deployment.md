@@ -143,9 +143,10 @@ npm run build
 
 ```env
 LLM_PROVIDER=deepseek       # qwen / deepseek / openclaw
-LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_BASE_URL=https://yorhamc.com/v1
 LLM_API_KEY=sk-xxxxx
-LLM_MODEL=deepseek-chat
+LLM_MODEL=deepseek-v4-flash
+LLM_MAX_OUTPUT_TOKENS=3200
 LLM_TIMEOUT=120
 ```
 
@@ -156,6 +157,7 @@ LLM_PROVIDER=qwen
 LLM_BASE_URL=http://10.x.x.x:11434/v1   # 内网 Ollama 地址
 LLM_API_KEY=                              # 内网无需 Key
 LLM_MODEL=qwen2.5:14b
+LLM_MAX_OUTPUT_TOKENS=3200
 ```
 
 ### 安全配置

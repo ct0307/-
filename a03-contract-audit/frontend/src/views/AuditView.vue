@@ -239,7 +239,7 @@ const batchProgressStatus = computed(() => {
 })
 
 function batchItemProgress(item: AuditBatchItem) {
-  return batchItemProgressDisplay(item.progress, item.progress_stage)
+  return batchItemProgressDisplay(item.progress, item.progress_stage, item.status)
 }
 
 async function retryAuditBatch() {
@@ -466,6 +466,8 @@ const onboardSteps = [
                   :percentage="batchItemProgress(item).percentage ?? 0"
                   :status="item.progress_stage === 'failed'
                     ? 'exception'
+                    : item.status === 'review_required'
+                      ? 'warning'
                     : item.progress_stage === 'completed'
                       ? 'success'
                       : undefined"

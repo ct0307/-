@@ -154,7 +154,7 @@ def test_default_repository_ignores_legacy_candidates_without_provenance(store):
     assert current_repository.load_valid(current_request) == result()
     with store() as db:
         rows = db.scalars(select(models.AuditWindowRun)).all()
-        assert {row.protocol_version for row in rows} == {"candidate-v1", "candidate-v3"}
+        assert {row.protocol_version for row in rows} == {"candidate-v1", "candidate-v4"}
         legacy_row = next(row for row in rows if row.protocol_version == "candidate-v1")
         assert legacy_row.result_json == legacy_json
 

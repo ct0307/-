@@ -131,6 +131,7 @@ def test_prompt_and_response_are_limited_to_authorized_candidate_and_evidence():
     assert "不得发送的额外资料" not in user
     assert "不得引入新法规" in system
     assert options.response_format == {"type": "json_object"}
+    assert options.thinking == "disabled"
 
 
 def test_untrusted_secondary_evidence_id_becomes_manual_required():

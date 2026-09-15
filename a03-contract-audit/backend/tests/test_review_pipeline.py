@@ -503,7 +503,7 @@ def test_non_retryable_model_rejection_is_safely_mapped_without_retry():
 
     assert len(adapter.calls) == 1
     assert result.candidates == []
-    assert [issue.code for issue in result.issues] == ["INVALID_MODEL_OUTPUT"]
+    assert [issue.code for issue in result.issues] == ["MODEL_REJECTED"]
 
 
 def test_request_ids_are_stable_and_exclude_contract_body():

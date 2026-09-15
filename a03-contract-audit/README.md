@@ -147,9 +147,11 @@ python -m scripts.seed_demo
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `LLM_PROVIDER` | `qwen` | `qwen` / `deepseek` / `openclaw` |
+| `LLM_PROVIDER` | `deepseek` | `qwen` / `deepseek` / `openclaw` |
 | `LLM_API_KEY` | _(必填)_ | 对应 LLM 服务的 API Key |
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | 私有化模型端点 |
+| `LLM_BASE_URL` | `https://yorhamc.com/v1` | OpenAI 兼容模型端点 |
+| `LLM_MODEL` | `deepseek-v4-flash` | 合同审查模型 |
+| `LLM_MAX_OUTPUT_TOKENS` | `3200` | 单次模型调用最大输出 token 数 |
 | `FILE_ENCRYPT_KEY` | _(空=不加密)_ | Fernet 密钥；生产为空或格式错误时拒绝启动 |
 | `DB_BACKEND` | `sqlite` | `sqlite` / `postgres` |
 | `JWT_SECRET` | `CHANGE_ME` | 生产必须替换为至少 32 位独立密钥 |

@@ -72,6 +72,19 @@ test('batch item displays each persisted progress stage with the backend percent
   })
 })
 
+test('review-required completion describes processing state without claiming audit completion', () => {
+  expect(batchItemProgressDisplay(100, 'completed', 'review_required')).toEqual({
+    label: '处理完成，待人工复核',
+    percentage: 100,
+    indeterminate: false,
+  })
+  expect(batchItemProgressDisplay(undefined, undefined, 'review_required')).toEqual({
+    label: '处理完成，待人工复核',
+    percentage: 100,
+    indeterminate: false,
+  })
+})
+
 test('batch item preserves persisted failure progress and clamps backend percentages', () => {
   expect(batchItemProgressDisplay(68, 'failed')).toEqual({
     label: '审查失败',

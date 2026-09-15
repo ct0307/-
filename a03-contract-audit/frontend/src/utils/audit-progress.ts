@@ -1,4 +1,4 @@
-import type { AuditProgressStage } from '@/api/types'
+import type { AuditItemStatus, AuditProgressStage } from '@/api/types'
 
 export type AuditUiState = 'idle' | 'running' | 'done' | 'failed'
 
@@ -111,14 +111,22 @@ export function auditProgressDisplay(state: AuditUiState): AuditProgressDisplay 
 
 export function batchItemProgressDisplay(
   progress: number | null | undefined,
-  progressStage: AuditProgressStage,
+  progressStage: AuditProgressStage | undefined,
+  itemStatus?: AuditItemStatus,
 ): AuditProgressDisplay {
+  const terminalPercentage = itemStatus === 'done' || itemStatus === 'review_required'
+    ? 100
+    : 0
   const percentage = Number.isFinite(progress)
     ? Math.min(100, Math.max(0, progress as number))
-    : 0
+    : terminalPercentage
 
   return {
-    label: BATCH_ITEM_PROGRESS_LABELS[progressStage],
+    label: itemStatus === 'review_required'
+      ? '处理完成，待人工复核'
+      : progressStage
+        ? BATCH_ITEM_PROGRESS_LABELS[progressStage]
+        : '',
     percentage,
     indeterminate: false,
   }

@@ -200,6 +200,7 @@ class SecondaryReviewer:
                 options=ChatOptions(
                     response_format=AUDIT_JSON_FORMAT,
                     request_id=f"secondary-{claim_id}"[:128],
+                    thinking="disabled",
                 ),
             )
             if response.finish_reason == "length":

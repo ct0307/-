@@ -14,6 +14,16 @@ from app.api.v1.endpoints.runtime import PublicRuntimeStatus
 client = TestClient(app)
 
 
+def test_default_llm_configuration_targets_verified_relay_without_a_secret():
+    config = Settings(_env_file=None)
+
+    assert config.LLM_PROVIDER == "deepseek"
+    assert config.LLM_BASE_URL == "https://yorhamc.com/v1"
+    assert config.LLM_MODEL == "deepseek-v4-flash"
+    assert config.LLM_MAX_OUTPUT_TOKENS == 3200
+    assert config.LLM_API_KEY == ""
+
+
 def test_live_health_is_public_and_reports_process_liveness():
     response = client.get("/health/live")
 
@@ -182,6 +192,7 @@ def test_preflight_readiness_forces_a_fresh_runtime_probe(monkeypatch):
         return PublicRuntimeStatus(status="online", checked_at="2026-09-11T10:00:00Z")
 
     monkeypatch.setattr(main_module, "_get_cached_runtime_status", cached_status)
+    monkeypatch.setattr(main_module.settings, "LLM_API_KEY", "test-key")
 
     checks = main_module.collect_readiness()
 

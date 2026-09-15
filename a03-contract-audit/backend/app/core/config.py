@@ -67,13 +67,13 @@ class Settings(BaseSettings):
     DB_BACKEND: str = "sqlite"
     SQLITE_PATH: str = "storage/a03_dev.db"
 
-    # LLM Adapter：默认对接私有化模型，避免合同数据出公网
-    LLM_PROVIDER: str = "qwen"  # qwen / deepseek / openclaw
-    LLM_BASE_URL: str = "http://localhost:11434/v1"
+    # LLM Adapter：当前项目测试基线使用 DeepSeek 中转；生产环境需评估合同出公网风险
+    LLM_PROVIDER: str = "deepseek"  # qwen / deepseek / openclaw
+    LLM_BASE_URL: str = "https://yorhamc.com/v1"
     LLM_API_KEY: str = ""
-    LLM_MODEL: str = "qwen2.5:14b"
+    LLM_MODEL: str = "deepseek-v4-flash"
     LLM_TIMEOUT: int = 120
-    LLM_MAX_OUTPUT_TOKENS: int = 1600
+    LLM_MAX_OUTPUT_TOKENS: int = 3200
     # 整体审查软时限必须短于任务 30 分钟租约，防止恢复任务与旧 worker 重叠。
     AUDIT_DEADLINE_SECONDS: int = Field(default=1500, gt=0, lt=1800)
 

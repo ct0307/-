@@ -35,6 +35,7 @@ _QUALITY_REASON_MESSAGES = {
     "INVALID_MODEL_OUTPUT": "模型输出格式无效",
     "MODEL_TIMEOUT": "模型调用超时",
     "MODEL_UNAVAILABLE": "模型服务不可用",
+    "MODEL_REJECTED": "模型供应商拒绝了审查请求",
     "PAGINATION_EXHAUSTED": "模型分页审查未完成",
     "EVIDENCE_UNRESOLVED": "风险依据尚未核验",
     "ORIGINAL_TEXT_UNRESOLVED": "风险原文尚未核验",

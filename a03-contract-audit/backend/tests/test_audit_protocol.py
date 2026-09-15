@@ -11,6 +11,7 @@ from app.services.audit.protocol import (
     RiskCandidate,
     ReviewedRiskCandidate,
     RiskEnvelope,
+    RiskFindingEnvelope,
     SecondaryDecision,
     SecondaryEnvelope,
     parse_risk_envelope,
@@ -52,6 +53,7 @@ EXPECTED_REVIEW_ISSUE_CODES = {
     "INVALID_MODEL_OUTPUT",
     "MODEL_TIMEOUT",
     "MODEL_UNAVAILABLE",
+    "MODEL_REJECTED",
     "PAGINATION_EXHAUSTED",
     "EVIDENCE_UNRESOLVED",
     "ORIGINAL_TEXT_UNRESOLVED",
@@ -66,7 +68,7 @@ EXPECTED_REVIEW_ISSUE_CODES = {
 
 
 def test_protocol_constants_define_json_object_contract():
-    assert AUDIT_PROTOCOL_VERSION == "candidate-v3"
+    assert AUDIT_PROTOCOL_VERSION == "candidate-v4"
     assert AUDIT_JSON_FORMAT == {"type": "json_object"}
 
 
@@ -403,6 +405,23 @@ def test_risk_envelope_enforces_exact_risk_limit():
     assert len(envelope.risks) == 5
     with pytest.raises(ValidationError):
         RiskEnvelope.model_validate({"risks": [risk_payload()] * 6, "has_more": False})
+
+
+def test_risk_finding_envelope_accepts_the_five_candidate_page_contract():
+    finding = {
+        "level": "high",
+        "category": "付款风险",
+        "quote": "乙方应在收到全部款项后履行义务。",
+    }
+
+    envelope = RiskFindingEnvelope(
+        risks=[finding] * 5,
+        has_more=False,
+    )
+
+    assert len(envelope.risks) == 5
+    with pytest.raises(ValidationError):
+        RiskFindingEnvelope(risks=[finding] * 6, has_more=False)
 
 
 def test_agent_review_result_defaults_are_independent():

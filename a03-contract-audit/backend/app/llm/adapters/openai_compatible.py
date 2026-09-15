@@ -145,6 +145,8 @@ class OpenAICompatibleAdapter(LLMAdapter):
         }
         if options and options.response_format:
             payload["response_format"] = dict(options.response_format)
+        if options and options.thinking and self.model.lower().startswith("deepseek"):
+            payload["thinking"] = {"type": options.thinking}
         data, latency_ms = self._post(
             "/chat/completions",
             payload,

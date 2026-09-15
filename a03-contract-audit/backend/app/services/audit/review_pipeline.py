@@ -12,7 +12,12 @@ from app.services.audit.protocol import (
     AgentReviewResult,
     ReviewIssue,
     ReviewedRiskCandidate,
+    RiskEnrichment,
     RiskEnvelope,
+    RiskFinding,
+    RiskFindingEnvelope,
+    parse_risk_enrichment,
+    parse_risk_finding_envelope,
     parse_risk_envelope,
 )
 from app.services.rag.contract_structure import ContractWindow, split_contract_window
@@ -36,6 +41,12 @@ class WindowReviewRequest:
     system_prompt: str
     build_user_prompt: Callable[[ReviewWindow, int, tuple[str, ...]], str]
     deadline: float | None = None
+    discovery_system_prompt: str | None = None
+    build_discovery_prompt: Callable[
+        [ReviewWindow, int, tuple[str, ...], tuple[RiskFinding, ...], int], str
+    ] | None = None
+    enrichment_system_prompt: str | None = None
+    build_enrichment_prompt: Callable[[ReviewWindow, RiskFinding, bool], str] | None = None
 
 
 class WindowCheckpoint(Protocol):
@@ -96,13 +107,27 @@ class _PageOutcome:
     issue: ReviewIssue | None = None
 
 
+@dataclass(frozen=True)
+class _DiscoveryOutcome:
+    kind: Literal["valid", "truncated", "issue"]
+    envelope: RiskFindingEnvelope | None = None
+    issue: ReviewIssue | None = None
+
+
+@dataclass(frozen=True)
+class _EnrichmentOutcome:
+    kind: Literal["valid", "truncated", "issue"]
+    enrichment: RiskEnrichment | None = None
+    issue: ReviewIssue | None = None
+
+
 class WindowReviewer:
     def __init__(
         self,
         adapter: LLMAdapter,
         checkpoint: WindowCheckpoint | None = None,
         max_split_depth: int = 2,
-        max_pages: int = 3,
+        max_pages: int = 8,
         max_call_attempts: int = 3,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -132,6 +157,17 @@ class WindowReviewer:
         return result
 
     def _review_uncached(self, request: WindowReviewRequest) -> AgentReviewResult:
+        two_stage_fields = (
+            request.discovery_system_prompt,
+            request.build_discovery_prompt,
+            request.enrichment_system_prompt,
+            request.build_enrichment_prompt,
+        )
+        if any(value is not None for value in two_stage_fields):
+            if not all(value is not None for value in two_stage_fields):
+                raise ValueError("两阶段审查配置必须完整")
+            return self._review_two_stage_uncached(request)
+
         candidates: list[ReviewedRiskCandidate] = []
         for page in range(1, self._max_pages + 1):
             if self._deadline_expired(request):
@@ -177,6 +213,277 @@ class WindowReviewer:
             complete=False,
             planned_windows=1,
             completed_windows=0,
+        )
+
+    def _review_two_stage_uncached(
+        self,
+        request: WindowReviewRequest,
+    ) -> AgentReviewResult:
+        candidates: list[ReviewedRiskCandidate] = []
+        accepted: list[RiskFinding] = []
+        for page in range(1, self._max_pages + 1):
+            if self._deadline_expired(request):
+                return self._deadline_result(request, candidates)
+
+            outcome = self._review_discovery_page(
+                request, page, tuple(accepted), page_size=5,
+            )
+            if outcome.kind == "truncated":
+                outcome = self._review_discovery_page(
+                    request, page, tuple(accepted), page_size=1,
+                )
+            if outcome.kind == "truncated":
+                recovered = self._recover_truncated(request)
+                return recovered.model_copy(update={
+                    "candidates": self._deduplicate(
+                        request.agent, [*candidates, *recovered.candidates]
+                    ),
+                })
+            if outcome.kind == "issue":
+                return AgentReviewResult(
+                    candidates=self._deduplicate(request.agent, candidates),
+                    issues=[outcome.issue] if outcome.issue is not None else [],
+                    complete=False,
+                    planned_windows=1,
+                    completed_windows=0,
+                )
+
+            assert outcome.envelope is not None
+            for finding in outcome.envelope.risks:
+                if self._finding_seen(finding, accepted):
+                    continue
+                detail = self._review_enrichment(request, page, finding)
+                if detail.kind != "valid":
+                    issue = detail.issue or self._issue(request, "OUTPUT_TRUNCATED")
+                    return AgentReviewResult(
+                        candidates=self._deduplicate(request.agent, candidates),
+                        issues=[issue],
+                        complete=False,
+                        planned_windows=1,
+                        completed_windows=0,
+                    )
+                assert detail.enrichment is not None
+                candidates.append(ReviewedRiskCandidate(
+                    level=finding.level,
+                    category=finding.category,
+                    quote=finding.quote,
+                    reason=detail.enrichment.reason,
+                    suggestion=detail.enrichment.suggestion,
+                    source_window_id=request.review_window.window.window_id,
+                    source_clause_ids=list(request.review_window.window.clause_ids),
+                ))
+                accepted.append(finding)
+
+            if not outcome.envelope.has_more:
+                return AgentReviewResult(
+                    candidates=self._deduplicate(request.agent, candidates),
+                    complete=True,
+                    planned_windows=1,
+                    completed_windows=1,
+                )
+
+        return AgentReviewResult(
+            candidates=self._deduplicate(request.agent, candidates),
+            issues=[self._issue(request, "PAGINATION_EXHAUSTED")],
+            complete=False,
+            planned_windows=1,
+            completed_windows=0,
+        )
+
+    def _review_discovery_page(
+        self,
+        request: WindowReviewRequest,
+        page: int,
+        accepted: tuple[RiskFinding, ...],
+        *,
+        page_size: int,
+    ) -> _DiscoveryOutcome:
+        assert request.build_discovery_prompt is not None
+        assert request.discovery_system_prompt is not None
+        user_prompt = request.build_discovery_prompt(
+            request.review_window, page, request.dimensions, accepted, page_size
+        )
+        invalid_outputs = 0
+        retryable_failures = 0
+        for attempt in range(1, self._max_call_attempts + 1):
+            if self._deadline_expired(request):
+                return _DiscoveryOutcome(
+                    kind="issue",
+                    issue=self._issue(request, "AUDIT_DEADLINE_EXCEEDED"),
+                )
+            options = ChatOptions(
+                response_format=AUDIT_JSON_FORMAT,
+                request_id=self._request_id(
+                    request, page, attempt, stage=f"discovery-{page_size}"
+                ),
+                thinking="disabled",
+            )
+            try:
+                response = self._adapter.chat(
+                    request.discovery_system_prompt, user_prompt, options=options
+                )
+            except LLMError as error:
+                error_code = self._map_error_code(error.code)
+                self._checkpoint.record_call(
+                    request, page=page, attempt=attempt, response=None,
+                    validation_status="error", error_code=error_code,
+                )
+                if not error.retryable or attempt >= self._max_call_attempts:
+                    return _DiscoveryOutcome(
+                        kind="issue", issue=self._issue(request, error_code)
+                    )
+                if not self._can_wait(request, retryable_failures):
+                    return _DiscoveryOutcome(
+                        kind="issue",
+                        issue=self._issue(request, "AUDIT_DEADLINE_EXCEEDED"),
+                    )
+                self._sleep(retryable_failures)
+                retryable_failures += 1
+                continue
+
+            if response.finish_reason == "length":
+                self._checkpoint.record_call(
+                    request, page=page, attempt=attempt, response=response,
+                    validation_status="truncated", error_code="OUTPUT_TRUNCATED",
+                )
+                return _DiscoveryOutcome(kind="truncated")
+            try:
+                if not isinstance(response.text, str):
+                    raise ValueError("模型响应正文必须是字符串")
+                try:
+                    envelope = parse_risk_finding_envelope(response.text)
+                except ValueError:
+                    legacy = parse_risk_envelope(response.text)
+                    envelope = RiskFindingEnvelope(
+                        risks=[
+                            RiskFinding(
+                                level=item.level,
+                                category=item.category,
+                                quote=item.quote,
+                            )
+                            for item in legacy.risks
+                        ],
+                        has_more=legacy.has_more,
+                    )
+                if len(envelope.risks) > page_size:
+                    raise ValueError("候选数量超过当前页容量")
+            except ValueError:
+                invalid_outputs += 1
+                self._checkpoint.record_call(
+                    request, page=page, attempt=attempt, response=response,
+                    validation_status="invalid", error_code="INVALID_MODEL_OUTPUT",
+                )
+                if invalid_outputs >= 2 or attempt >= self._max_call_attempts:
+                    return _DiscoveryOutcome(
+                        kind="issue",
+                        issue=self._issue(request, "INVALID_MODEL_OUTPUT"),
+                    )
+                continue
+            self._checkpoint.record_call(
+                request, page=page, attempt=attempt, response=response,
+                validation_status="valid", error_code=None,
+            )
+            return _DiscoveryOutcome(kind="valid", envelope=envelope)
+        return _DiscoveryOutcome(
+            kind="issue", issue=self._issue(request, "INVALID_MODEL_OUTPUT")
+        )
+
+    def _review_enrichment(
+        self,
+        request: WindowReviewRequest,
+        page: int,
+        finding: RiskFinding,
+    ) -> _EnrichmentOutcome:
+        assert request.build_enrichment_prompt is not None
+        assert request.enrichment_system_prompt is not None
+        max_attempts = min(2, self._max_call_attempts)
+        for attempt in range(1, max_attempts + 1):
+            if self._deadline_expired(request):
+                return _EnrichmentOutcome(
+                    kind="issue",
+                    issue=self._issue(request, "AUDIT_DEADLINE_EXCEEDED"),
+                )
+            concise = attempt > 1
+            user_prompt = request.build_enrichment_prompt(
+                request.review_window, finding, concise
+            )
+            digest = hashlib.sha256(
+                f"{finding.category}\0{finding.quote}".encode("utf-8")
+            ).hexdigest()[:12]
+            options = ChatOptions(
+                response_format=AUDIT_JSON_FORMAT,
+                request_id=self._request_id(
+                    request, page, attempt, stage=f"enrichment-{digest}"
+                ),
+                thinking="disabled",
+            )
+            try:
+                response = self._adapter.chat(
+                    request.enrichment_system_prompt, user_prompt, options=options
+                )
+            except LLMError as error:
+                error_code = self._map_error_code(error.code)
+                self._checkpoint.record_call(
+                    request, page=page, attempt=attempt, response=None,
+                    validation_status="error", error_code=error_code,
+                )
+                if not error.retryable or attempt >= max_attempts:
+                    return _EnrichmentOutcome(
+                        kind="issue", issue=self._issue(request, error_code)
+                    )
+                continue
+            if response.finish_reason == "length":
+                self._checkpoint.record_call(
+                    request, page=page, attempt=attempt, response=response,
+                    validation_status="truncated", error_code="OUTPUT_TRUNCATED",
+                )
+                if attempt >= max_attempts:
+                    return _EnrichmentOutcome(kind="truncated")
+                continue
+            try:
+                if not isinstance(response.text, str):
+                    raise ValueError("模型响应正文必须是字符串")
+                try:
+                    enrichment = parse_risk_enrichment(response.text)
+                except ValueError:
+                    legacy = parse_risk_envelope(response.text)
+                    if len(legacy.risks) != 1:
+                        raise ValueError("旧协议补全结果必须只有一条风险")
+                    legacy_item = legacy.risks[0]
+                    if (
+                        legacy_item.category != finding.category
+                        or legacy_item.quote != finding.quote
+                    ):
+                        raise ValueError("旧协议补全结果与候选不一致")
+                    enrichment = RiskEnrichment(
+                        reason=legacy_item.reason,
+                        suggestion=legacy_item.suggestion,
+                    )
+            except ValueError:
+                self._checkpoint.record_call(
+                    request, page=page, attempt=attempt, response=response,
+                    validation_status="invalid", error_code="INVALID_MODEL_OUTPUT",
+                )
+                if attempt >= max_attempts:
+                    return _EnrichmentOutcome(
+                        kind="issue",
+                        issue=self._issue(request, "INVALID_MODEL_OUTPUT"),
+                    )
+                continue
+            self._checkpoint.record_call(
+                request, page=page, attempt=attempt, response=response,
+                validation_status="valid", error_code=None,
+            )
+            return _EnrichmentOutcome(kind="valid", enrichment=enrichment)
+        return _EnrichmentOutcome(
+            kind="issue", issue=self._issue(request, "INVALID_MODEL_OUTPUT")
+        )
+
+    @staticmethod
+    def _finding_seen(finding: RiskFinding, accepted: list[RiskFinding]) -> bool:
+        return any(
+            item.category == finding.category and item.quote == finding.quote
+            for item in accepted
         )
 
     def _review_page(
@@ -328,7 +635,7 @@ class WindowReviewer:
 
     @staticmethod
     def _map_error_code(code: str) -> str:
-        if code in {"MODEL_TIMEOUT", "MODEL_UNAVAILABLE"}:
+        if code in {"MODEL_TIMEOUT", "MODEL_UNAVAILABLE", "MODEL_REJECTED"}:
             return code
         return "INVALID_MODEL_OUTPUT"
 
@@ -339,6 +646,7 @@ class WindowReviewer:
             "INVALID_MODEL_OUTPUT": "模型未返回有效的审查 JSON",
             "MODEL_TIMEOUT": "模型调用超时且已达到重试上限",
             "MODEL_UNAVAILABLE": "模型暂时不可用且已达到重试上限",
+            "MODEL_REJECTED": "模型供应商拒绝了审查请求",
             "PAGINATION_EXHAUSTED": "模型仍有后续结果但已达到分页上限",
             "AUDIT_DEADLINE_EXCEEDED": "审查达到整体时限，未启动新的模型调用",
         }
@@ -376,12 +684,14 @@ class WindowReviewer:
         request: WindowReviewRequest,
         page: int,
         attempt: int,
+        stage: str | None = None,
     ) -> str:
-        return (
+        base = (
             f"audit:{request.audit_job_id}:{request.audit_generation}:"
             f"{request.agent}:{request.review_window.window.window_id}:"
             f"{page}:{attempt}"
         )
+        return f"{base}:{stage}" if stage else base
 
     @staticmethod
     def _deduplicate(

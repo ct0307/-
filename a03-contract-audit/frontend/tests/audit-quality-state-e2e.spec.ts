@@ -208,6 +208,7 @@ test('review_required exposes the reason and partial result without retry', asyn
   const region = await prepare(page, 'review_required')
 
   await expect(region.getByText('二次复核发现证据支持关系存在冲突')).toBeVisible()
+  await expect(region.getByText('处理完成，待人工复核', { exact: true })).toBeVisible()
   await expect(region.getByRole('button', { name: `查看 ${filename} 的审查结果` })).toBeVisible()
   await expect(region.getByRole('button', { name: '重试失败项' })).toHaveCount(0)
 })
@@ -224,7 +225,7 @@ test('restores an active quality-state batch from the url after reload', async (
   await expect(page).toHaveURL(/\bimport=42\b/)
   await expect(page).toHaveURL(/\bbatch=88\b/)
 
-  await page.reload()
+  await page.reload({ waitUntil: 'domcontentloaded' })
 
   const region = page.getByRole('region', { name: '审查批次 88' })
   await expect(region.getByText('结果校验中', { exact: true })).toBeVisible()

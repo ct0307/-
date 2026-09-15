@@ -157,11 +157,13 @@ def test_chat_options_override_budget_and_add_structured_request_fields(monkeypa
             max_output_tokens=320,
             response_format={"type": "json_object"},
             request_id="request-123",
+            thinking="disabled",
         ),
     )
 
     assert captured["json"]["max_tokens"] == 320
     assert captured["json"]["response_format"] == {"type": "json_object"}
+    assert captured["json"]["thinking"] == {"type": "disabled"}
     assert captured["headers"]["X-Request-ID"] == "request-123"
 
 

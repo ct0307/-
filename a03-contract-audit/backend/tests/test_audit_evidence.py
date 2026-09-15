@@ -56,9 +56,13 @@ def test_agent_failure_preserves_other_agents_verified_risk_and_shared_context(m
             calls.append((system, user, kwargs))
             if "你是财务" in system:
                 return LLMResponse(text="invalid json", model="test")
+            if "补全单条" in system:
+                return LLMResponse(text=json.dumps({
+                    "reason": "关联方交易需检查价格公允性",
+                    "suggestion": "明确价格公允性证明",
+                }, ensure_ascii=False), model="test")
             return LLMResponse(text=json.dumps({"risks": [{
                 "level": "high", "category": "关联交易", "quote": "关联方提供服务",
-                "reason": "关联方交易需检查价格公允性", "suggestion": "明确价格公允性证明",
             }], "has_more": False}, ensure_ascii=False), model="test")
     monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
     monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
@@ -68,9 +72,10 @@ def test_agent_failure_preserves_other_agents_verified_risk_and_shared_context(m
     assert result["risks"][0]["tier"] == "red"
     assert result["coverage"] == {"planned": 2, "completed": 1}
     assert any(issue["code"] == "INVALID_MODEL_OUTPUT" for issue in result["issues"])
-    assert "结构化 Claims" in calls[1][1] and "关联交易" in calls[1][1]
-    assert "严格的 JSON 对象" in calls[0][0]
-    assert "has_more" in calls[0][0] and "最多5条" in calls[0][0]
+    finance_discovery = next(user for system, user, _kwargs in calls if "你是财务" in system)
+    assert "结构化 Claims" in finance_discovery and "关联交易" in finance_discovery
+    assert "严格 JSON 对象" in calls[0][0]
+    assert "has_more" in calls[0][0]
     assert "第1页" in calls[0][1]
     assert calls[0][2]["options"].response_format == {"type": "json_object"}
 
@@ -134,6 +139,47 @@ def test_selected_dimensions_are_enforced_in_agent_prompt(monkeypatch):
     assert "本次仅审查以下维度：保密条款审查" in captured[0]
 
 
+def test_agent_audit_wires_compact_discovery_and_bounded_enrichment(monkeypatch):
+    from app.services.audit.protocol import AgentReviewResult, RiskFinding
+    from app.services.audit.review_pipeline import WindowReviewer
+
+    captured = []
+
+    def capture_request(_self, request):
+        captured.append(request)
+        return AgentReviewResult(complete=True)
+
+    monkeypatch.setattr(WindowReviewer, "review", capture_request)
+    monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
+
+    auditor._agent_audit(
+        "legal", {}, "第一条 付款期限未约定。", {"elements": {}},
+        dimensions=["legal"],
+    )
+
+    request = captured[0]
+    assert request.discovery_system_prompt is not None
+    assert request.enrichment_system_prompt is not None
+    assert request.build_discovery_prompt is not None
+    assert request.build_enrichment_prompt is not None
+    finding = RiskFinding(
+        level="high", category="付款风险", quote="第一条 付款期限未约定。"
+    )
+    discovery = request.build_discovery_prompt(
+        request.review_window, 2, request.dimensions, (finding,), 1
+    )
+    enrichment = request.build_enrichment_prompt(
+        request.review_window, finding, True
+    )
+
+    assert '"category": "付款风险"' in discovery
+    assert '"quote_hash":' in discovery
+    assert '"quote_excerpt": "第一条 付款期限未约定。"' in discovery
+    assert "每页最多1条" in discovery
+    assert "只补全这一条候选" in enrichment
+    assert "每个字段不超过160字" in enrichment
+
+
 def test_confidentiality_dimension_runs_legal_agent(monkeypatch):
     calls: list[str] = []
 
@@ -154,16 +200,25 @@ def test_prompt_leaves_formal_basis_to_grounding(monkeypatch):
     class Adapter:
         def chat(self, system: str, _user: str, **_kwargs) -> LLMResponse:
             captured.append(system)
-            return LLMResponse(text='{"risks": [], "has_more": false}', model="test")
+            if "补全单条" in system:
+                return LLMResponse(
+                    text='{"reason":"需要核验付款安排","suggestion":"补充明确付款安排"}',
+                    model="test",
+                )
+            return LLMResponse(
+                text='{"risks":[{"level":"medium","category":"付款风险","quote":"合同正文"}],"has_more":false}',
+                model="test",
+            )
 
     monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
     monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
 
     auditor._agent_audit("legal", {}, "合同正文", {"elements": {}})
 
-    assert "basis(依据来源)" not in captured[0]
-    assert "reason(风险原因)" in captured[0]
-    assert "confidence(0-100" not in captured[0]
+    assert all("basis(依据来源)" not in prompt for prompt in captured)
+    assert "reason" not in captured[0]
+    assert "reason" in captured[1]
+    assert all("confidence(0-100" not in prompt for prompt in captured)
 
 
 def test_truncated_model_output_is_rejected(monkeypatch):
@@ -394,7 +449,12 @@ def test_whitespace_variants_keep_verified_quote_and_shared_claim(monkeypatch, a
     )
 
     class Adapter:
-        def chat(self, *_args, **_kwargs):
+        def chat(self, system, *_args, **_kwargs):
+            if "补全单条" in system:
+                return LLMResponse(text=json.dumps({
+                    "reason": "付款条件需要进一步核验",
+                    "suggestion": "补充明确付款条件",
+                }), model="test")
             return LLMResponse(text=json.dumps(pages.pop(0)), model="test")
 
     monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
