@@ -26,7 +26,7 @@
 - Modify: `frontend/src/stores/import-inbox.ts:58-69,175-180,237-259`
 - Test: `frontend/tests/import-inbox-store.spec.ts`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `frontend/tests/import-inbox-store.spec.ts` 增加第二个就绪项 fixture，并加入以下测试：
 
@@ -95,7 +95,7 @@ test('toggles all ready items without selecting failed items', async () => {
 })
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run:
 
@@ -106,7 +106,7 @@ npx.cmd playwright test tests/import-inbox-store.spec.ts
 
 Expected: FAIL，提示 `auditTargetIds` 或 `toggleAllReady` 不存在。
 
-- [ ] **Step 3: 实现最小 store 能力**
+- [x] **Step 3: 实现最小 store 能力**
 
 在 `selectableIds` 后增加稳定顺序的就绪列表和派生状态：
 
@@ -136,7 +136,7 @@ function toggleAllReady() {
 
 从 store 返回 `readyIds`、`auditTargetIds`、`allReadySelected`、`someReadySelected` 和 `toggleAllReady`。保留现有 `updateSelection()`，确保状态变化时移除不再就绪的 ID。
 
-- [ ] **Step 4: 运行 store 测试并确认通过**
+- [x] **Step 4: 运行 store 测试并确认通过**
 
 Run:
 

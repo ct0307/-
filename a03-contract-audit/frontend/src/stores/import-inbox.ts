@@ -55,8 +55,18 @@ export function createImportInboxStore(
     let pendingUpload: PendingUpload | null = null
     let timer: ReturnType<typeof setTimeout> | null = null
 
-    const selectableIds = computed(() => new Set(
-      batch.value?.items.filter((item) => item.status === 'ready').map((item) => item.id) ?? [],
+    const readyIds = computed(() => (
+      batch.value?.items.filter((item) => item.status === 'ready').map((item) => item.id) ?? []
+    ))
+    const selectableIds = computed(() => new Set(readyIds.value))
+    const auditTargetIds = computed(() => (
+      selectedIds.value.length ? [...selectedIds.value] : [...readyIds.value]
+    ))
+    const allReadySelected = computed(() => (
+      readyIds.value.length > 0 && selectedIds.value.length === readyIds.value.length
+    ))
+    const someReadySelected = computed(() => (
+      selectedIds.value.length > 0 && !allReadySelected.value
     ))
     const summary = computed(() => {
       const items = batch.value?.items ?? []
@@ -179,6 +189,10 @@ export function createImportInboxStore(
         : [...selectedIds.value, id]
     }
 
+    function toggleAllReady() {
+      selectedIds.value = allReadySelected.value ? [] : [...readyIds.value]
+    }
+
     async function confirm(itemId: number, contractType: string, department: string) {
       if (!batch.value) return null
       loading.value = true
@@ -241,7 +255,11 @@ export function createImportInboxStore(
       polling,
       error,
       lastAddedCount,
+      readyIds,
       selectableIds,
+      auditTargetIds,
+      allReadySelected,
+      someReadySelected,
       summary,
       create,
       resume,
@@ -249,6 +267,7 @@ export function createImportInboxStore(
       startPolling,
       stopPolling,
       toggleSelected,
+      toggleAllReady,
       confirm,
       retry,
       removeRecord,

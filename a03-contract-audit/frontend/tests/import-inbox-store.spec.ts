@@ -18,6 +18,13 @@ const readyItem: ImportItem = {
   requires_review: false,
 }
 
+const secondReadyItem: ImportItem = {
+  ...readyItem,
+  id: 4,
+  contract_id: 14,
+  filename: '服务合同.pdf',
+}
+
 const failedItem: ImportItem = {
   ...readyItem,
   id: 2,
@@ -76,6 +83,62 @@ test('keeps failed items while allowing only ready items to be selected', async 
 
   expect(store.selectedIds).toEqual([readyItem.id])
   expect(store.summary).toEqual({ total: 3, ready: 1, needsConfirmation: 0, failed: 2 })
+})
+
+test('uses all ready items when there is no explicit selection', async () => {
+  const store = createImportInboxStore(api({
+    getImport: async () => ({
+      ...batchFixture,
+      total: 4,
+      ready: 2,
+      items: [...batchFixture.items, secondReadyItem],
+    }),
+  }), 'all-ready-targets')()
+
+  await store.resume(batchFixture.id)
+
+  expect(store.auditTargetIds).toEqual([readyItem.id, secondReadyItem.id])
+  expect(store.allReadySelected).toBe(false)
+  expect(store.someReadySelected).toBe(false)
+})
+
+test('uses only explicitly selected ready items', async () => {
+  const store = createImportInboxStore(api({
+    getImport: async () => ({
+      ...batchFixture,
+      total: 4,
+      ready: 2,
+      items: [...batchFixture.items, secondReadyItem],
+    }),
+  }), 'selected-targets')()
+
+  await store.resume(batchFixture.id)
+  store.toggleSelected(secondReadyItem.id)
+
+  expect(store.auditTargetIds).toEqual([secondReadyItem.id])
+  expect(store.allReadySelected).toBe(false)
+  expect(store.someReadySelected).toBe(true)
+})
+
+test('toggles all ready items without selecting failed items', async () => {
+  const store = createImportInboxStore(api({
+    getImport: async () => ({
+      ...batchFixture,
+      total: 4,
+      ready: 2,
+      items: [...batchFixture.items, secondReadyItem],
+    }),
+  }), 'toggle-all-ready')()
+
+  await store.resume(batchFixture.id)
+  store.toggleAllReady()
+
+  expect(store.selectedIds).toEqual([readyItem.id, secondReadyItem.id])
+  expect(store.allReadySelected).toBe(true)
+  expect(store.someReadySelected).toBe(false)
+
+  store.toggleAllReady()
+  expect(store.selectedIds).toEqual([])
 })
 
 test('removes an upload failure through the record endpoint only', async () => {
