@@ -12,6 +12,7 @@ from app.services.imports.classifier import classify_contract_type
 from app.services.imports.errors import parse_failure
 from app.services.imports.service import summarize_import, target_status
 from app.services.parser.elements import (
+    element_evidence_payload,
     extract_element_result,
     legacy_element_values,
     merge_element_review,
@@ -46,6 +47,7 @@ def parse_import_item(item_id: int) -> dict:
             apply_parse_quality(item.contract, parsed)
             element_result = extract_element_result(parsed)
             elements = legacy_element_values(element_result.values, text=parsed.text)
+            evidence_payload = element_evidence_payload(element_result)
             requires_review, review_reason = merge_element_review(parsed, element_result)
             item.contract.requires_review = requires_review
             item.contract.review_reason = review_reason
@@ -62,6 +64,10 @@ def parse_import_item(item_id: int) -> dict:
                 available_types=available,
             )
             item.contract.elements_json = json.dumps(elements, ensure_ascii=False)
+            item.contract.element_evidence_json = json.dumps(
+                evidence_payload,
+                ensure_ascii=False,
+            )
             item.contract.suggested_type = suggestion.suggested_type
             item.contract.type_confidence = suggestion.confidence
             item.contract.type_evidence_json = json.dumps(suggestion.evidence, ensure_ascii=False)

@@ -606,9 +606,11 @@ def test_import_task_persists_legacy_payment_string(monkeypatch, tmp_path):
     import_tasks.parse_import_item.run(item_id)
 
     with Session(engine) as db:
-        payment_terms = json.loads(
-            db.get(ImportBatchItem, item_id).contract.elements_json
-        )["payment_terms"]
+        stored_contract = db.get(ImportBatchItem, item_id).contract
+        payment_terms = json.loads(stored_contract.elements_json)["payment_terms"]
         assert payment_terms == "签订后支付50%；验收后支付50%"
         assert isinstance(payment_terms, str)
+        evidence = json.loads(stored_contract.element_evidence_json)
+        assert evidence["schema_version"] == 1
+        assert len(evidence["fields"]["payment_terms"]) == 2
     engine.dispose()

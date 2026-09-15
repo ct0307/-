@@ -134,6 +134,7 @@ class ParseResponse(BaseModel):
     contract_id: int
     status: Literal["parsed", "review_required"] = "parsed"
     elements: dict
+    element_evidence: dict = Field(default_factory=dict)
     text_length: int
     requires_review: bool = False
     ocr_confidence: float | None = None

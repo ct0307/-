@@ -32,6 +32,7 @@ from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
 from app.services.audit.runner import apply_parse_quality, run_audit
 from app.services.imports.errors import parse_failure, pdf_text_empty_failure
 from app.services.parser.elements import (
+    element_evidence_payload,
     extract_element_result,
     legacy_element_values,
     merge_element_review,
@@ -392,12 +393,17 @@ def parse_contract(
         # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
         element_result = extract_element_result(parsed)
         elements = legacy_element_values(element_result.values, text=parsed.text)
+        evidence_payload = element_evidence_payload(element_result)
         requires_review, review_reason = merge_element_review(parsed, element_result)
         contract.requires_review = requires_review
         contract.review_reason = review_reason
         contract.status = "review_required" if requires_review else "parsed"
         contract.elements_json = json.dumps(
             elements,
+            ensure_ascii=False,
+        )
+        contract.element_evidence_json = json.dumps(
+            evidence_payload,
             ensure_ascii=False,
         )
         audit_log.record(db, user_id=user.id, action="parse", target=f"contract:{contract_id}")
@@ -411,6 +417,7 @@ def parse_contract(
         contract_id=contract_id,
         status=contract.status,
         elements=elements,
+        element_evidence=evidence_payload["fields"],
         text_length=len(parsed.text),
         requires_review=contract.requires_review,
         ocr_confidence=contract.ocr_confidence,

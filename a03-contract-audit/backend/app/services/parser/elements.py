@@ -1,7 +1,7 @@
 """合同六要素的确定性抽取、校验与原文证据定位。"""
 
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Literal
 
 from app.services.parser.extractor import DocumentParseResult
@@ -35,6 +35,21 @@ class ElementResult:
     evidence: dict[str, ElementEvidence | list[ElementEvidence]]
     review_fields: tuple[str, ...]
     source_text: str
+
+
+def element_evidence_payload(result: ElementResult) -> dict[str, object]:
+    """构造可持久化的版本化证据，不包含合同全文。"""
+    fields: dict[str, object] = {}
+    for field, value in result.evidence.items():
+        if isinstance(value, list):
+            fields[field] = [asdict(item) for item in value]
+        else:
+            fields[field] = asdict(value)
+    return {
+        "schema_version": 1,
+        "fields": fields,
+        "review_fields": list(result.review_fields),
+    }
 
 
 @dataclass(frozen=True)
