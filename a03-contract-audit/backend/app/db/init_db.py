@@ -2,6 +2,7 @@
 
 SQLite 开发期直接 create_all；PostgreSQL 交付期改走 alembic 迁移。
 """
+import json
 import os
 
 from sqlalchemy import inspect, text
@@ -13,7 +14,7 @@ from app.db.session import Base, SessionLocal, engine
 
 # 导入模型以注册到 Base.metadata（必须，否则 create_all 建不出表）
 from app.models import models  # noqa: F401
-from app.models.models import User
+from app.models.models import ContractTypeProfile, LookupItem, User
 
 log = get_logger("db")
 
@@ -25,6 +26,23 @@ _SEED_USERS = [
     {"username": "business", "password": "business123", "role": "business", "department": "采购中心"},
 ]
 
+_CONTRACT_TYPE_PROFILE_SEEDS = (
+    ("软件开发外包合同", ("软件开发", "软件外包", "系统开发"), ("软件开发", "系统开发", "源代码", "软件外包")),
+    ("技术服务合同", ("技术服务", "技术支持", "技术维护"), ("技术服务", "技术支持", "技术维护")),
+    ("采购合同", ("采购", "购置"), ("采购", "购置", "供货", "设备")),
+    ("销售合同", ("销售", "出售"), ("销售", "出售", "售卖")),
+    ("劳动合同", ("劳动",), ("劳动关系", "试用期", "工资")),
+    ("租赁合同", ("租赁", "承租", "出租"), ("租赁", "承租", "出租")),
+    ("保密协议", ("保密协议",), ("专项保密协议",)),
+    ("合作协议", ("合作协议",), ("合作项目",)),
+    ("服务协议", ("服务协议",), ("提供服务",)),
+    ("框架协议", ("框架",), ("框架合作", "框架采购")),
+    ("技术开发合同", ("技术开发", "研发"), ("技术开发", "研发", "技术成果")),
+    ("合作合同", ("合作合同",), ("合作项目",)),
+    ("服务合同", ("服务合同",), ("提供服务",)),
+    ("劳务合同", ("劳务",), ("劳务", "劳务报酬", "劳务人员")),
+)
+
 
 def init_db() -> None:
     # 生产 PostgreSQL 必须由 Alembic 管理，应用进程不得绕过迁移直接建表。
@@ -32,6 +50,7 @@ def init_db() -> None:
     if settings.DB_BACKEND == "sqlite":
         Base.metadata.create_all(bind=engine)
         _migrate_dev_columns()
+        _seed_contract_type_profiles()
     if settings.APP_ENV != "prod":
         _seed_users()
     log.info("db.init", backend=settings.DB_BACKEND, tables=list(Base.metadata.tables.keys()))
@@ -234,6 +253,42 @@ def _seed_users() -> None:
                     role=u["role"],
                     department=u["department"],
                 ))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _seed_contract_type_profiles() -> None:
+    db = SessionLocal()
+    try:
+        lookups = {
+            row.value: row
+            for row in db.query(LookupItem)
+            .filter(LookupItem.category == "contract_type")
+            .all()
+        }
+        for sort_order, (value, aliases, positive_signals) in enumerate(
+            _CONTRACT_TYPE_PROFILE_SEEDS
+        ):
+            lookup = lookups.get(value)
+            if lookup is None:
+                lookup = LookupItem(
+                    category="contract_type",
+                    value=value,
+                    sort_order=sort_order,
+                )
+                db.add(lookup)
+                db.flush()
+                lookups[value] = lookup
+            if lookup.contract_type_profile is None:
+                lookup.contract_type_profile = ContractTypeProfile(
+                    aliases_json=json.dumps(aliases, ensure_ascii=False),
+                    positive_signals_json=json.dumps(
+                        positive_signals,
+                        ensure_ascii=False,
+                    ),
+                    negative_signals_json="[]",
+                )
         db.commit()
     finally:
         db.close()
