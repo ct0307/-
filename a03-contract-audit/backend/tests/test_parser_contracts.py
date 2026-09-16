@@ -38,6 +38,28 @@ def test_uploaded_document_bytes_do_not_enter_encrypted_storage_reader(monkeypat
     assert result.source == "native"
 
 
+def _docx_bytes_with_image(
+    *,
+    image_size: tuple[int, int] | None = None,
+    text: str = "",
+) -> bytes:
+    from docx import Document
+    from docx.shared import Inches
+    from PIL import Image
+
+    document = Document()
+    if text:
+        document.add_paragraph(text)
+    if image_size is not None:
+        image_stream = BytesIO()
+        Image.new("RGB", image_size, "white").save(image_stream, format="PNG")
+        image_stream.seek(0)
+        document.add_picture(image_stream, width=Inches(6))
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
 class _EmptyPage:
     def extract_text(self) -> str:
         return ""
@@ -71,6 +93,34 @@ def test_docx_preserves_paragraph_and_table_order_with_blocks():
     assert result.blocks[0].anchor.paragraph_index == 0
     assert result.blocks[1].anchor.table_index == 0
     assert result.blocks[1].anchor.row_index == 0
+
+
+def test_image_only_docx_requires_manual_review():
+    result = extractor._extract_docx_result(
+        _docx_bytes_with_image(image_size=(1600, 2200))
+    )
+
+    assert result.requires_review is True
+    assert result.review_reason == "DOCX 疑似图片型文档，未提取到足够正文"
+
+
+def test_docx_with_normal_text_and_small_logo_does_not_require_review():
+    text = "合同正文包含双方主体、服务内容、付款安排和违约责任。" * 12
+
+    result = extractor._extract_docx_result(
+        _docx_bytes_with_image(image_size=(300, 100), text=text)
+    )
+
+    assert result.text == text
+    assert result.requires_review is False
+    assert result.review_reason is None
+
+
+def test_empty_docx_requires_manual_review_with_distinct_reason():
+    result = extractor._extract_docx_result(_docx_bytes_with_image())
+
+    assert result.requires_review is True
+    assert result.review_reason == "DOCX 正文为空"
 
 
 def test_pdf_exposes_page_numbered_blocks(monkeypatch):

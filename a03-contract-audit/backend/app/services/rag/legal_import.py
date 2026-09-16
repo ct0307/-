@@ -23,6 +23,7 @@ from app.services.rag.legal_sources import (
     split_legal_article,
     validate_article_set,
 )
+from app.services.rag.revision import bump_knowledge_revision
 
 
 _MANIFEST_PATH = BASE_DIR / "resources" / "legal_sources" / "manifest.json"
@@ -298,6 +299,7 @@ def apply_legal_import(
         for chunk, row in zip(chunks, rows):
             row.legal_article_id = article_rows[chunk["article_key"]].id
             db.add(row)
+        bump_knowledge_revision(db)
         if commit:
             db.commit()
     except Exception:

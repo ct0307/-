@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+import json
 import time
 from typing import Callable, Literal, Protocol
 
+from app.core.config import settings
 from app.llm.base import ChatOptions, LLMAdapter, LLMError, LLMResponse
 from app.services.audit.protocol import (
     AUDIT_JSON_FORMAT,
@@ -13,6 +15,7 @@ from app.services.audit.protocol import (
     ReviewIssue,
     ReviewedRiskCandidate,
     RiskEnrichment,
+    RiskEnrichmentItem,
     RiskEnvelope,
     RiskFinding,
     RiskFindingEnvelope,
@@ -28,6 +31,11 @@ class ReviewWindow:
     window: ContractWindow
     parent_window_id: str | None = None
     depth: int = 0
+
+
+def enrichment_candidate_id(window_id: str, finding: RiskFinding) -> str:
+    payload = f"{window_id}\0{finding.category}\0{finding.quote}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,9 @@ class WindowReviewRequest:
     ] | None = None
     enrichment_system_prompt: str | None = None
     build_enrichment_prompt: Callable[[ReviewWindow, RiskFinding, bool], str] | None = None
+    build_enrichment_batch_prompt: Callable[
+        [ReviewWindow, tuple[RiskFinding, ...], bool], str
+    ] | None = None
 
 
 class WindowCheckpoint(Protocol):
@@ -101,6 +112,67 @@ class NullWindowCheckpoint:
 
 
 @dataclass(frozen=True)
+class WindowCallObservation:
+    request: WindowReviewRequest
+    page: int
+    attempt: int
+    response: LLMResponse | None
+    validation_status: str
+    error_code: str | None
+
+
+@dataclass(frozen=True)
+class BufferedWindowExecution:
+    result: AgentReviewResult
+    observations: tuple[WindowCallObservation, ...]
+    saved_results: tuple[tuple[WindowReviewRequest, AgentReviewResult], ...]
+
+
+class BufferedWindowCheckpoint:
+    """工作线程内只记录内存观测，不打开数据库会话。"""
+
+    def __init__(self) -> None:
+        self._observations: list[WindowCallObservation] = []
+        self._saved_results: list[tuple[WindowReviewRequest, AgentReviewResult]] = []
+
+    def load_valid(self, request: WindowReviewRequest) -> AgentReviewResult | None:
+        return None
+
+    def save_valid(
+        self,
+        request: WindowReviewRequest,
+        result: AgentReviewResult,
+    ) -> None:
+        self._saved_results.append((request, result))
+
+    def record_call(
+        self,
+        request: WindowReviewRequest,
+        *,
+        page: int,
+        attempt: int,
+        response: LLMResponse | None,
+        validation_status: str,
+        error_code: str | None,
+    ) -> None:
+        self._observations.append(WindowCallObservation(
+            request=request,
+            page=page,
+            attempt=attempt,
+            response=response,
+            validation_status=validation_status,
+            error_code=error_code,
+        ))
+
+    def execution(self, result: AgentReviewResult) -> BufferedWindowExecution:
+        return BufferedWindowExecution(
+            result=result,
+            observations=tuple(self._observations),
+            saved_results=tuple(self._saved_results),
+        )
+
+
+@dataclass(frozen=True)
 class _PageOutcome:
     kind: Literal["valid", "truncated", "issue"]
     envelope: RiskEnvelope | None = None
@@ -119,6 +191,12 @@ class _EnrichmentOutcome:
     kind: Literal["valid", "truncated", "issue"]
     enrichment: RiskEnrichment | None = None
     issue: ReviewIssue | None = None
+
+
+@dataclass(frozen=True)
+class _BatchEnrichmentOutcome:
+    enrichments: dict[str, RiskEnrichment]
+    failed: tuple[RiskFinding, ...]
 
 
 class WindowReviewer:
@@ -249,30 +327,74 @@ class WindowReviewer:
                 )
 
             assert outcome.envelope is not None
+            page_findings: list[RiskFinding] = []
             for finding in outcome.envelope.risks:
-                if self._finding_seen(finding, accepted):
+                if self._finding_seen(finding, accepted) or self._finding_seen(
+                    finding, page_findings
+                ):
                     continue
-                detail = self._review_enrichment(request, page, finding)
-                if detail.kind != "valid":
-                    issue = detail.issue or self._issue(request, "OUTPUT_TRUNCATED")
-                    return AgentReviewResult(
-                        candidates=self._deduplicate(request.agent, candidates),
-                        issues=[issue],
-                        complete=False,
-                        planned_windows=1,
-                        completed_windows=0,
+                page_findings.append(finding)
+
+            if (
+                settings.AUDIT_BATCH_ENRICHMENT_ENABLED
+                and request.build_enrichment_batch_prompt is not None
+            ):
+                for offset in range(0, len(page_findings), 5):
+                    batch = tuple(page_findings[offset:offset + 5])
+                    batch_outcome = self._review_enrichment_batch(
+                        request, page, batch
                     )
-                assert detail.enrichment is not None
-                candidates.append(ReviewedRiskCandidate(
-                    level=finding.level,
-                    category=finding.category,
-                    quote=finding.quote,
-                    reason=detail.enrichment.reason,
-                    suggestion=detail.enrichment.suggestion,
-                    source_window_id=request.review_window.window.window_id,
-                    source_clause_ids=list(request.review_window.window.clause_ids),
-                ))
-                accepted.append(finding)
+                    resolved = dict(batch_outcome.enrichments)
+                    for finding in batch_outcome.failed:
+                        candidate_id = enrichment_candidate_id(
+                            request.review_window.window.window_id, finding
+                        )
+                        if self._deadline_expired(request):
+                            self._append_resolved_enrichments(
+                                request, batch, resolved, candidates, accepted
+                            )
+                            return self._deadline_result(request, candidates)
+                        detail = self._review_enrichment(request, page, finding)
+                        if detail.kind != "valid":
+                            self._append_resolved_enrichments(
+                                request, batch, resolved, candidates, accepted
+                            )
+                            issue = detail.issue or self._issue(
+                                request, "OUTPUT_TRUNCATED"
+                            )
+                            return AgentReviewResult(
+                                candidates=self._deduplicate(
+                                    request.agent, candidates
+                                ),
+                                issues=[issue],
+                                complete=False,
+                                planned_windows=1,
+                                completed_windows=0,
+                            )
+                        assert detail.enrichment is not None
+                        resolved[candidate_id] = detail.enrichment
+                    self._append_resolved_enrichments(
+                        request, batch, resolved, candidates, accepted
+                    )
+            else:
+                for finding in page_findings:
+                    detail = self._review_enrichment(request, page, finding)
+                    if detail.kind != "valid":
+                        issue = detail.issue or self._issue(
+                            request, "OUTPUT_TRUNCATED"
+                        )
+                        return AgentReviewResult(
+                            candidates=self._deduplicate(request.agent, candidates),
+                            issues=[issue],
+                            complete=False,
+                            planned_windows=1,
+                            completed_windows=0,
+                        )
+                    assert detail.enrichment is not None
+                    candidates.append(self._reviewed_candidate(
+                        request, finding, detail.enrichment
+                    ))
+                    accepted.append(finding)
 
             if not outcome.envelope.has_more:
                 return AgentReviewResult(
@@ -478,6 +600,142 @@ class WindowReviewer:
         return _EnrichmentOutcome(
             kind="issue", issue=self._issue(request, "INVALID_MODEL_OUTPUT")
         )
+
+    def _review_enrichment_batch(
+        self,
+        request: WindowReviewRequest,
+        page: int,
+        findings: tuple[RiskFinding, ...],
+    ) -> _BatchEnrichmentOutcome:
+        assert request.build_enrichment_batch_prompt is not None
+        assert request.enrichment_system_prompt is not None
+        if not findings or self._deadline_expired(request):
+            return _BatchEnrichmentOutcome({}, findings)
+
+        prompt = request.build_enrichment_batch_prompt(
+            request.review_window, findings, False
+        )
+        ids = {
+            enrichment_candidate_id(
+                request.review_window.window.window_id, finding
+            ): finding
+            for finding in findings
+        }
+        options = ChatOptions(
+            response_format=AUDIT_JSON_FORMAT,
+            request_id=self._request_id(
+                request, page, 1, stage=f"enrichment-batch-{len(findings)}"
+            ),
+            thinking="disabled",
+        )
+        response: LLMResponse | None = None
+        try:
+            response = self._adapter.chat(
+                request.enrichment_system_prompt, prompt, options=options
+            )
+        except LLMError as error:
+            self._checkpoint.record_call(
+                request, page=page, attempt=1, response=None,
+                validation_status="error",
+                error_code=self._map_error_code(error.code),
+            )
+            return _BatchEnrichmentOutcome({}, findings)
+
+        if response.finish_reason == "length":
+            self._checkpoint.record_call(
+                request, page=page, attempt=1, response=response,
+                validation_status="truncated", error_code="OUTPUT_TRUNCATED",
+            )
+            return _BatchEnrichmentOutcome({}, findings)
+
+        try:
+            raw_items = self._batch_enrichment_items(response.text)
+        except (TypeError, ValueError):
+            self._checkpoint.record_call(
+                request, page=page, attempt=1, response=response,
+                validation_status="invalid", error_code="INVALID_MODEL_OUTPUT",
+            )
+            return _BatchEnrichmentOutcome({}, findings)
+
+        by_id: dict[str, list[RiskEnrichmentItem]] = {}
+        for raw in raw_items:
+            try:
+                item = RiskEnrichmentItem.model_validate(raw)
+            except (TypeError, ValueError):
+                continue
+            if item.candidate_id in ids:
+                by_id.setdefault(item.candidate_id, []).append(item)
+
+        enrichments = {
+            candidate_id: RiskEnrichment(
+                reason=items[0].reason,
+                suggestion=items[0].suggestion,
+            )
+            for candidate_id, items in by_id.items()
+            if len(items) == 1
+        }
+        failed = tuple(
+            finding
+            for candidate_id, finding in ids.items()
+            if candidate_id not in enrichments
+        )
+        self._checkpoint.record_call(
+            request, page=page, attempt=1, response=response,
+            validation_status="valid" if not failed else "partial",
+            error_code=None if not failed else "INVALID_MODEL_OUTPUT",
+        )
+        return _BatchEnrichmentOutcome(enrichments, failed)
+
+    @staticmethod
+    def _batch_enrichment_items(text: object) -> list[object]:
+        if not isinstance(text, str):
+            raise ValueError("批量补全输出正文类型无效")
+        stripped = text.strip()
+        if not stripped.startswith("{") or not stripped.endswith("}"):
+            raise ValueError("批量补全输出必须是 JSON 对象")
+        payload = json.loads(stripped)
+        if not isinstance(payload, dict) or set(payload) != {"items"}:
+            raise ValueError("批量补全顶层字段无效")
+        items = payload["items"]
+        if not isinstance(items, list) or not 1 <= len(items) <= 5:
+            raise ValueError("批量补全 items 数量无效")
+        return items
+
+    @staticmethod
+    def _reviewed_candidate(
+        request: WindowReviewRequest,
+        finding: RiskFinding,
+        enrichment: RiskEnrichment,
+    ) -> ReviewedRiskCandidate:
+        return ReviewedRiskCandidate(
+            level=finding.level,
+            category=finding.category,
+            quote=finding.quote,
+            reason=enrichment.reason,
+            suggestion=enrichment.suggestion,
+            source_window_id=request.review_window.window.window_id,
+            source_clause_ids=list(request.review_window.window.clause_ids),
+        )
+
+    def _append_resolved_enrichments(
+        self,
+        request: WindowReviewRequest,
+        findings: tuple[RiskFinding, ...],
+        enrichments: dict[str, RiskEnrichment],
+        candidates: list[ReviewedRiskCandidate],
+        accepted: list[RiskFinding],
+    ) -> None:
+        for finding in findings:
+            candidate_id = enrichment_candidate_id(
+                request.review_window.window.window_id, finding
+            )
+            enrichment = enrichments.get(candidate_id)
+            if enrichment is None:
+                continue
+            candidates.append(self._reviewed_candidate(
+                request, finding, enrichment
+            ))
+            accepted.append(finding)
 
     @staticmethod
     def _finding_seen(finding: RiskFinding, accepted: list[RiskFinding]) -> bool:

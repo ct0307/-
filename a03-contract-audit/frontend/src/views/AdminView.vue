@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 权限与审计（仅 admin）：角色权限矩阵 + 操作审计日志 + LLM 调用记录。
 import { computed, onMounted, ref } from 'vue'
+import { Setting } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createLookup,
@@ -8,14 +9,22 @@ import {
   getAccessMatrix,
   getAuditLogs,
   getContractTrash,
+  getContractTypeProfiles,
   getDepartmentScopeUsers,
   getLlmCalls,
   getLookups,
   restoreContractDraft,
   updateUserDepartments,
+  updateContractTypeProfile,
 } from '@/api/admin'
 import type { AccessRole, AuditLogRow, LlmCallRow, Perm } from '@/mock/admin'
-import type { ContractTrashItem, DepartmentScopeUser, LookupItem } from '@/api/admin'
+import type {
+  ContractTrashItem,
+  ContractTypeProfile,
+  ContractTypeProfileUpdate,
+  DepartmentScopeUser,
+  LookupItem,
+} from '@/api/admin'
 import DemoBadge from '@/components/common/DemoBadge.vue'
 
 const modules = ref<string[]>([])
@@ -47,7 +56,13 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(() => { load(); loadLookups(); loadDepartmentScopes(); loadTrash() })
+onMounted(() => {
+  load()
+  loadLookups()
+  loadContractTypeProfiles()
+  loadDepartmentScopes()
+  loadTrash()
+})
 
 const filteredLogs = computed(() => {
   const kw = keyword.value.trim()
@@ -113,6 +128,19 @@ const ctypes = ref<LookupItem[]>([])
 const newDept = ref('')
 const newCtype = ref('')
 const lookupLoading = ref(false)
+const profiles = ref<Record<number, ContractTypeProfile>>({})
+const profileLoading = ref(false)
+const profileLoadError = ref('')
+const profileDrawerOpen = ref(false)
+const profileSaving = ref(false)
+const profileEditorError = ref('')
+const editingProfile = ref<ContractTypeProfile | null>(null)
+const profileDraft = ref({
+  enabled: true,
+  aliases: '',
+  positiveSignals: '',
+  negativeSignals: '',
+})
 const scopeUsers = ref<DepartmentScopeUser[]>([])
 const scopeDrafts = ref<Record<number, string[]>>({})
 const scopeSavingId = ref<number | null>(null)
@@ -185,13 +213,86 @@ async function loadLookups() {
   }
 }
 
+async function loadContractTypeProfiles(): Promise<ContractTypeProfile[]> {
+  profileLoading.value = true
+  profileLoadError.value = ''
+  try {
+    const rows = await getContractTypeProfiles()
+    profiles.value = Object.fromEntries(rows.map((profile) => [profile.lookup_item_id, profile]))
+    return rows
+  } catch (error) {
+    profileLoadError.value = error instanceof Error ? error.message : '规则加载失败'
+    return []
+  } finally {
+    profileLoading.value = false
+  }
+}
+
+function openProfileEditor(item: LookupItem) {
+  const profile = profiles.value[item.id]
+  if (!profile) return
+  editingProfile.value = profile
+  profileDraft.value = {
+    enabled: profile.enabled,
+    aliases: profile.aliases.join('\n'),
+    positiveSignals: profile.positive_signals.join('\n'),
+    negativeSignals: profile.negative_signals.join('\n'),
+  }
+  profileEditorError.value = ''
+  profileDrawerOpen.value = true
+}
+
+function normalizeProfileLines(value: string): string[] {
+  return [...new Set(value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))]
+}
+
+function responseStatus(error: unknown): number | undefined {
+  return (error as { response?: { status?: number } })?.response?.status
+}
+
+async function saveProfile() {
+  const profile = editingProfile.value
+  if (!profile) return
+  const body: ContractTypeProfileUpdate = {
+    aliases: normalizeProfileLines(profileDraft.value.aliases),
+    positive_signals: normalizeProfileLines(profileDraft.value.positiveSignals),
+    negative_signals: normalizeProfileLines(profileDraft.value.negativeSignals),
+    enabled: profileDraft.value.enabled,
+    version: profile.version,
+  }
+  profileSaving.value = true
+  profileEditorError.value = ''
+  try {
+    const updated = await updateContractTypeProfile(profile.lookup_item_id, body)
+    profiles.value[updated.lookup_item_id] = updated
+    editingProfile.value = updated
+    profileDrawerOpen.value = false
+    ElMessage.success('分类规则已保存')
+  } catch (error) {
+    if (responseStatus(error) === 409) {
+      profileEditorError.value = '规则已被更新，请刷新后重试'
+      const refreshed = await loadContractTypeProfiles()
+      const latest = refreshed.find((item) => item.lookup_item_id === profile.lookup_item_id)
+      if (latest) editingProfile.value = latest
+    } else {
+      profileEditorError.value = error instanceof Error ? error.message : '分类规则保存失败'
+    }
+  } finally {
+    profileSaving.value = false
+  }
+}
+
 async function addLookup(category: 'department' | 'contract_type') {
   const val = category === 'department' ? newDept.value.trim() : newCtype.value.trim()
   if (!val) return
   try {
     const item = await createLookup(category, val)
     if (category === 'department') { depts.value.push(item); newDept.value = '' }
-    else { ctypes.value.push(item); newCtype.value = '' }
+    else {
+      ctypes.value.push(item)
+      newCtype.value = ''
+      await loadContractTypeProfiles()
+    }
     ElMessage.success('已添加')
   } catch (e: unknown) {
     const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
@@ -206,7 +307,12 @@ async function removeLookup(category: 'department' | 'contract_type', id: number
   try {
     await deleteLookup(id)
     if (category === 'department') depts.value = depts.value.filter((i) => i.id !== id)
-    else ctypes.value = ctypes.value.filter((i) => i.id !== id)
+    else {
+      ctypes.value = ctypes.value.filter((i) => i.id !== id)
+      const nextProfiles = { ...profiles.value }
+      delete nextProfiles[id]
+      profiles.value = nextProfiles
+    }
     ElMessage.success('已删除')
   } catch {
     ElMessage.error('删除失败')
@@ -502,14 +608,37 @@ function exportCsv() {
               <el-input v-model="newCtype" placeholder="输入合同类型" clearable @keyup.enter="addLookup('contract_type')" />
               <el-button type="primary" :icon="'Plus'" @click="addLookup('contract_type')">添加</el-button>
             </div>
+            <div v-if="profileLoadError" class="profile-load-error" role="alert">
+              <span>规则加载失败</span>
+              <el-button
+                link
+                type="primary"
+                aria-label="重新加载分类规则"
+                @click="loadContractTypeProfiles"
+              >重新加载</el-button>
+            </div>
             <el-empty v-if="!ctypes.length" description="暂无类型，点击添加" />
             <ul v-else class="lookup-list">
               <li v-for="item in ctypes" :key="item.id" class="lookup-item">
                 <span>{{ item.value }}</span>
-                <el-button
-                  type="danger" size="small" :icon="'Delete'" circle plain
-                  @click="removeLookup('contract_type', item.id, item.value)"
-                />
+                <span class="lookup-actions">
+                  <el-tooltip content="编辑分类规则">
+                    <el-button
+                      size="small"
+                      :icon="Setting"
+                      circle
+                      plain
+                      :disabled="profileLoading || !profiles[item.id]"
+                      :aria-label="`编辑${item.value}规则`"
+                      @click="openProfileEditor(item)"
+                    />
+                  </el-tooltip>
+                  <el-button
+                    type="danger" size="small" :icon="'Delete'" circle plain
+                    :aria-label="`删除${item.value}`"
+                    @click="removeLookup('contract_type', item.id, item.value)"
+                  />
+                </span>
               </li>
             </ul>
           </el-card>
@@ -550,6 +679,71 @@ function exportCsv() {
         </div>
       </el-tab-pane>
     </el-tabs>
+
+    <el-drawer
+      v-model="profileDrawerOpen"
+      class="profile-drawer"
+      :title="`${editingProfile?.value ?? ''}分类规则`"
+      :aria-label="`${editingProfile?.value ?? ''}分类规则`"
+      size="min(460px, 100vw)"
+      destroy-on-close
+    >
+      <div class="profile-form">
+        <div class="profile-switch-row">
+          <div>
+            <strong>启用语义规则</strong>
+            <span>关闭后仍可通过精确标题或明示类型识别</span>
+          </div>
+          <el-switch v-model="profileDraft.enabled" aria-label="启用语义规则" />
+        </div>
+        <el-alert
+          v-if="profileEditorError"
+          :title="profileEditorError"
+          type="warning"
+          :closable="false"
+          show-icon
+        />
+        <el-form label-position="top">
+          <el-form-item label="别名">
+            <el-input
+              v-model="profileDraft.aliases"
+              type="textarea"
+              :rows="4"
+              aria-label="别名"
+              placeholder="每行一项"
+            />
+          </el-form-item>
+          <el-form-item label="正向信号">
+            <el-input
+              v-model="profileDraft.positiveSignals"
+              type="textarea"
+              :rows="5"
+              aria-label="正向信号"
+              placeholder="每行一项"
+            />
+          </el-form-item>
+          <el-form-item label="负向信号">
+            <el-input
+              v-model="profileDraft.negativeSignals"
+              type="textarea"
+              :rows="4"
+              aria-label="负向信号"
+              placeholder="每行一项"
+            />
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <div class="profile-footer">
+          <el-button @click="profileDrawerOpen = false">取消</el-button>
+          <el-button
+            type="primary"
+            :loading="profileSaving"
+            @click="saveProfile"
+          >保存规则</el-button>
+        </div>
+      </template>
+    </el-drawer>
   </div>
 </template>
 
@@ -704,10 +898,66 @@ function exportCsv() {
   font-size: 13px;
   color: var(--ivory);
 }
+.lookup-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.profile-load-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-left: 2px solid var(--amber);
+  font-size: 12px;
+}
+.profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.profile-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.profile-switch-row strong {
+  display: block;
+  color: var(--ivory);
+  font-size: 13px;
+}
+.profile-switch-row span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.profile-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 @media (max-width: 1180px) {
   .llm-stats { grid-template-columns: 1fr 1fr; }
   .config-grid { grid-template-columns: 1fr; }
   .scope-row { grid-template-columns: 1fr; }
+}
+@media (max-width: 480px) {
+  .lookup-add { align-items: stretch; flex-direction: column; }
+  .lookup-item { gap: 10px; }
+  .lookup-item > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+  .profile-switch-row { align-items: flex-start; }
+  :global(.profile-drawer .el-drawer__body) { padding: 16px; }
+  :global(.profile-drawer .el-drawer__footer) { padding: 12px 16px; }
 }
 .trash-pane {
   min-height: 180px;

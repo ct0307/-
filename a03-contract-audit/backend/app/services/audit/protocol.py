@@ -70,6 +70,23 @@ class RiskEnrichment(BaseModel):
     suggestion: str = Field(min_length=4, max_length=400)
 
 
+class RiskEnrichmentItem(RiskEnrichment):
+    candidate_id: str = Field(min_length=8, max_length=64)
+
+
+class RiskEnrichmentBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
+
+    items: list[RiskEnrichmentItem] = Field(min_length=1, max_length=5)
+
+    @model_validator(mode="after")
+    def reject_duplicate_candidate_ids(self) -> Self:
+        candidate_ids = [item.candidate_id for item in self.items]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("批量补全 candidate_id 不能重复")
+        return self
+
+
 def parse_risk_finding_envelope(text: str) -> RiskFindingEnvelope:
     stripped = text.strip()
     if not stripped.startswith("{") or not stripped.endswith("}"):
@@ -82,6 +99,13 @@ def parse_risk_enrichment(text: str) -> RiskEnrichment:
     if not stripped.startswith("{") or not stripped.endswith("}"):
         raise ValueError("风险补全输出必须是 JSON 对象")
     return RiskEnrichment.model_validate_json(stripped)
+
+
+def parse_risk_enrichment_batch(text: str) -> RiskEnrichmentBatch:
+    stripped = text.strip()
+    if not stripped.startswith("{") or not stripped.endswith("}"):
+        raise ValueError("批量风险补全输出必须是 JSON 对象")
+    return RiskEnrichmentBatch.model_validate_json(stripped)
 
 
 ReviewIssueCode = Literal[

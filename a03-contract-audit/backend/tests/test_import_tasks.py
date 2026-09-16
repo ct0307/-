@@ -1,11 +1,23 @@
 """导入解析任务测试。"""
 
+from io import BytesIO
+
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.core.crypto import encrypt_bytes
 from app.db.session import Base
-from app.models.models import Contract, ImportBatch, ImportBatchItem, LookupItem, User
+from app.models.models import (
+    Contract,
+    ContractTypeProfile,
+    ImportBatch,
+    ImportBatchItem,
+    LookupItem,
+    User,
+)
+from app.services.audit import runner as audit_runner
+from app.services.parser.extractor import DocumentParseResult
 from app.services.parser.ocr import OCRUnavailable
 from app.services.imports.classifier import TypeSuggestion
 from app.services.parser.elements import ElementResult
@@ -17,6 +29,21 @@ def _db():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     return engine
+
+
+def _image_only_docx_bytes() -> bytes:
+    from docx import Document
+    from docx.shared import Inches
+    from PIL import Image
+
+    image_stream = BytesIO()
+    Image.new("RGB", (1600, 2200), "white").save(image_stream, format="PNG")
+    image_stream.seek(0)
+    document = Document()
+    document.add_picture(image_stream, width=Inches(6))
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
 
 
 def test_parse_import_item_persists_type_suggestion(monkeypatch, tmp_path):
@@ -51,6 +78,124 @@ def test_parse_import_item_persists_type_suggestion(monkeypatch, tmp_path):
         assert item.contract.suggested_type == "采购合同"
         assert item.contract.contract_type == "采购合同"
         assert item.contract.type_confirmed_at is None
+
+
+def test_parse_import_item_round_trips_gb18030_text_without_loss(monkeypatch, tmp_path):
+    engine = _db()
+    source = "合同类型：采购合同\n甲方向乙方采购设备并约定验收。"
+    captured: dict[str, str] = {}
+    with Session(engine) as db:
+        user = User(
+            username="gb18030-legal",
+            password_hash="x",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.flush()
+        path = tmp_path / "gb18030.txt"
+        path.write_bytes(encrypt_bytes(source.encode("gb18030")))
+        contract = Contract(
+            filename="采购合同.txt",
+            storage_path=str(path),
+            uploaded_by=user.id,
+            department=user.department,
+        )
+        batch = ImportBatch(
+            owner_id=user.id,
+            idempotency_key="gb18030-task",
+            total=1,
+        )
+        batch.items.append(
+            ImportBatchItem(filename=contract.filename, contract=contract, status="queued")
+        )
+        lookup = LookupItem(category="contract_type", value="采购合同")
+        lookup.contract_type_profile = ContractTypeProfile(
+            aliases_json='["采购"]',
+            positive_signals_json='["采购", "设备"]',
+            negative_signals_json="[]",
+        )
+        db.add_all([batch, lookup])
+        db.commit()
+        item_id = batch.items[0].id
+
+    def capture_elements(parsed):
+        captured["text"] = parsed.text
+        return ElementResult({}, {}, (), parsed.text)
+
+    monkeypatch.setattr(import_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(import_tasks, "extract_element_result", capture_elements)
+
+    result = import_tasks.parse_import_item.run(item_id)
+
+    with Session(engine) as db:
+        item = db.get(ImportBatchItem, item_id)
+        assert result["status"] == "awaiting_confirmation"
+        assert captured["text"] == source
+        assert item.contract.suggested_type == "采购合同"
+
+
+def test_parse_cache_reuses_async_import_parse_during_audit(monkeypatch, tmp_path):
+    engine = _db()
+    parsed_text = "异步导入合同正文" * 60
+    with Session(engine) as db:
+        user = User(
+            username="import-cache-legal",
+            password_hash="x",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.flush()
+        contract = Contract(
+            filename="cache.txt",
+            storage_path=str(tmp_path / "cache.txt"),
+            uploaded_by=user.id,
+            department=user.department,
+            content_sha256="c" * 64,
+        )
+        batch = ImportBatch(
+            owner_id=user.id,
+            idempotency_key="import-cache-task",
+            total=1,
+        )
+        batch.items.append(
+            ImportBatchItem(filename=contract.filename, contract=contract, status="queued")
+        )
+        db.add(batch)
+        db.commit()
+        item_id = batch.items[0].id
+
+    monkeypatch.setattr(import_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(
+        import_tasks,
+        "extract_document",
+        lambda _path: DocumentParseResult(parsed_text, "native"),
+    )
+
+    import_tasks.parse_import_item.run(item_id)
+
+    with Session(engine) as db:
+        item = db.get(ImportBatchItem, item_id)
+        monkeypatch.setattr(
+            audit_runner,
+            "extract_document",
+            lambda _path: pytest.fail("审查不应重复解析异步导入合同"),
+        )
+        monkeypatch.setattr(
+            audit_runner,
+            "audit_contract",
+            lambda *_args, **_kwargs: {
+                "risks": [],
+                "cross_checks": [],
+                "issues": [],
+                "coverage": {"planned": 1, "completed": 1},
+            },
+        )
+
+        result = audit_runner.run_audit(db, item.contract)
+
+        assert result["status"] == "done"
 
 
 def test_parse_import_item_passes_classification_and_parse_review_gates(monkeypatch, tmp_path):
@@ -96,6 +241,69 @@ def test_parse_import_item_passes_classification_and_parse_review_gates(monkeypa
     assert result["status"] == "awaiting_confirmation"
     assert captured["auto_ready_eligible"] is True
     assert captured["requires_review"] is True
+
+
+def test_parse_import_item_keeps_image_only_docx_awaiting_confirmation(
+    monkeypatch,
+    tmp_path,
+):
+    engine = _db()
+    with Session(engine) as db:
+        user = User(
+            username="image-review-legal",
+            password_hash="x",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.flush()
+        path = tmp_path / "image-only.docx"
+        path.write_bytes(encrypt_bytes(_image_only_docx_bytes()))
+        contract = Contract(
+            filename="采购合同.docx",
+            storage_path=str(path),
+            uploaded_by=user.id,
+            department=user.department,
+        )
+        batch = ImportBatch(
+            owner_id=user.id,
+            idempotency_key="task-image-docx-review",
+            total=1,
+        )
+        batch.items.append(
+            ImportBatchItem(filename=contract.filename, contract=contract, status="queued")
+        )
+        db.add(batch)
+        lookup = LookupItem(category="contract_type", value="采购合同")
+        lookup.contract_type_profile = ContractTypeProfile(
+            aliases_json='["采购", "购置"]',
+            positive_signals_json='["采购", "供货", "设备"]',
+            negative_signals_json="[]",
+        )
+        db.add(lookup)
+        db.commit()
+        item_id = batch.items[0].id
+
+    monkeypatch.setattr(import_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(
+        import_tasks,
+        "classify_contract_type",
+        lambda **_: TypeSuggestion(
+            "采购合同",
+            0.99,
+            ["filename:采购合同"],
+            auto_ready_eligible=True,
+        ),
+    )
+
+    result = import_tasks.parse_import_item.run(item_id)
+
+    with Session(engine) as db:
+        item = db.get(ImportBatchItem, item_id)
+        assert result["status"] == "awaiting_confirmation"
+        assert item.status == "awaiting_confirmation"
+        assert item.contract.requires_review is True
+        assert item.contract.review_reason == "DOCX 疑似图片型文档，未提取到足够正文"
 
 
 def test_parse_import_item_hides_parser_failure_details(monkeypatch, tmp_path):

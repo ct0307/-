@@ -11,6 +11,7 @@ from app.services.audit.runner import apply_parse_quality
 from app.services.imports.classifier import classify_contract_type
 from app.services.imports.errors import parse_failure
 from app.services.imports.service import summarize_import, target_status
+from app.services.imports.type_profiles import load_type_profiles
 from app.services.parser.elements import (
     element_evidence_payload,
     extract_element_result,
@@ -18,6 +19,7 @@ from app.services.parser.elements import (
     merge_element_review,
 )
 from app.services.parser.extractor import extract_document
+from app.services.parser.cache import save_parse_cache
 from app.tasks.celery_app import celery_app
 
 log = get_logger("imports")
@@ -45,6 +47,8 @@ def parse_import_item(item_id: int) -> dict:
                 raise ValueError("合同记录不存在")
             parsed = extract_document(item.contract.storage_path)
             apply_parse_quality(item.contract, parsed)
+            if item.contract.content_sha256:
+                save_parse_cache(db, item.contract, parsed)
             element_result = extract_element_result(parsed)
             elements = legacy_element_values(element_result.values, text=parsed.text)
             evidence_payload = element_evidence_payload(element_result, parsed=parsed)
@@ -62,6 +66,7 @@ def parse_import_item(item_id: int) -> dict:
                 filename=item.filename,
                 text=parsed.text,
                 available_types=available,
+                profiles=load_type_profiles(db, available),
             )
             item.contract.elements_json = json.dumps(elements, ensure_ascii=False)
             item.contract.element_evidence_json = json.dumps(

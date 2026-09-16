@@ -10,9 +10,11 @@ from sqlalchemy.orm import Session
 from app.db.session import Base
 from app.models.models import (
     Contract,
+    ContractTypeProfile,
     ImportAppendRequest,
     ImportBatch,
     ImportBatchItem,
+    LookupItem,
     User,
 )
 
@@ -94,5 +96,56 @@ def test_import_request_idempotency_is_persisted_and_unique_per_batch():
             idempotency_key="append-key",
             request_fingerprint="b" * 64,
         ))
+        with pytest.raises(IntegrityError):
+            db.commit()
+
+
+def test_contract_type_profile_is_one_to_one_with_lookup_and_cascades():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        lookup = LookupItem(
+            category="contract_type",
+            value="居间合同",
+            sort_order=0,
+        )
+        lookup.contract_type_profile = ContractTypeProfile(
+            aliases_json='["居间协议"]',
+            positive_signals_json='["居间服务"]',
+            negative_signals_json="[]",
+        )
+        db.add(lookup)
+        db.commit()
+
+        lookup_id = lookup.id
+        profile_id = lookup.contract_type_profile.id
+        assert lookup.contract_type_profile.version == 1
+        assert lookup.contract_type_profile.enabled is True
+
+        db.delete(lookup)
+        db.commit()
+
+        assert db.get(LookupItem, lookup_id) is None
+        assert db.get(ContractTypeProfile, profile_id) is None
+
+
+def test_contract_type_profile_rejects_duplicate_lookup_assignment():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        lookup = LookupItem(
+            category="contract_type",
+            value="居间合同",
+            sort_order=0,
+        )
+        db.add(lookup)
+        db.flush()
+        db.add_all(
+            [
+                ContractTypeProfile(lookup_item_id=lookup.id),
+                ContractTypeProfile(lookup_item_id=lookup.id),
+            ]
+        )
+
         with pytest.raises(IntegrityError):
             db.commit()

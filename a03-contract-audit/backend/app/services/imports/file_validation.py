@@ -13,6 +13,8 @@ from zipfile import BadZipFile, LargeZipFile, ZipFile, ZipInfo
 
 import fitz
 
+from app.services.parser.text_decoder import TextDecodeError, decode_text_bytes
+
 
 _ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 _ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
@@ -151,18 +153,7 @@ def _is_unsafe_zip_path(name: str) -> bool:
 
 
 def _validate_text(content: bytes) -> str:
-    if b"\x00" in content:
-        raise FileValidationError("TEXT_ENCODING_ERROR")
-
-    for encoding in ("utf-8-sig", "gb18030"):
-        try:
-            text = content.decode(encoding, errors="strict")
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        raise FileValidationError("TEXT_ENCODING_ERROR")
-
-    if not text.strip() or not any(char.isprintable() and not char.isspace() for char in text):
-        raise FileValidationError("TEXT_EMPTY")
-    return encoding
+    try:
+        return decode_text_bytes(content).encoding
+    except TextDecodeError as error:
+        raise FileValidationError(error.code) from error

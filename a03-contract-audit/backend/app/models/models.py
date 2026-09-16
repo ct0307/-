@@ -11,11 +11,13 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
     false,
     func,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -77,6 +79,31 @@ class Contract(Base):
     clauses: Mapped[list["ContractClause"]] = relationship(
         back_populates="contract", cascade="all, delete-orphan"
     )
+    parse_cache: Mapped["ContractParseCache | None"] = relationship(
+        back_populates="contract", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class ContractParseCache(Base):
+    """按合同、内容哈希和解析器签名隔离的加密解析结果。"""
+
+    __tablename__ = "contract_parse_caches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("contracts.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    parser_signature: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    contract: Mapped["Contract"] = relationship(back_populates="parse_cache")
 
 
 class ContractClause(Base):
@@ -406,6 +433,18 @@ class KnowledgeChunk(Base):
     legal_article: Mapped["LegalArticle | None"] = relationship(back_populates="chunks")
 
 
+class KnowledgeIndexState(Base):
+    """知识库索引的单例修订号；用于使检索快照在写入后失效。"""
+
+    __tablename__ = "knowledge_index_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class AuditLog(Base):
     """审计日志：谁在何时对什么做了什么。企业追责与合规刚需。"""
     __tablename__ = "audit_logs"
@@ -498,6 +537,49 @@ class LookupItem(Base):
     value: Mapped[str] = mapped_column(String(128))
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    contract_type_profile: Mapped["ContractTypeProfile | None"] = relationship(
+        back_populates="lookup_item",
+        cascade="all, delete-orphan",
+        single_parent=True,
+        uselist=False,
+    )
+
+
+class ContractTypeProfile(Base):
+    """合同类型字典项的一对一分类规则。"""
+
+    __tablename__ = "contract_type_profiles"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lookup_item_id: Mapped[int] = mapped_column(
+        ForeignKey("lookup_items.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    aliases_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    positive_signals_json: Mapped[str] = mapped_column(
+        Text,
+        default="[]",
+        server_default="[]",
+    )
+    negative_signals_json: Mapped[str] = mapped_column(
+        Text,
+        default="[]",
+        server_default="[]",
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    lookup_item: Mapped["LookupItem"] = relationship(
+        back_populates="contract_type_profile"
+    )
 
 
 class Rectification(Base):

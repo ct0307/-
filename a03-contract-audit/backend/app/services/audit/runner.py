@@ -26,6 +26,7 @@ from app.services.parser.extractor import (
     extract_document,
     extract_elements,
 )
+from app.services.parser.cache import get_cached_parse, save_parse_cache
 
 log = get_logger("audit_runner")
 
@@ -266,6 +267,7 @@ def run_audit(
             contract_id=contract_id,
             status=final_status,
             parse_ms=int(timings.get("parse_ms", 0)),
+            parse_cache_hit=bool(timings.get("parse_cache_hit", False)),
             legal_agent_ms=int(timings.get("legal_agent_ms", 0)),
             finance_agent_ms=int(timings.get("finance_agent_ms", 0)),
             grounding_ms=int(timings.get("grounding_ms", 0)),
@@ -329,7 +331,24 @@ def _compute_audit(
 ) -> dict:
     """计算审查结果，不修改合同或风险表。"""
     parse_started = time.perf_counter()
-    parsed = extract_document(storage_path)
+    cache_contract = db.get(Contract, contract_id)
+    parsed = (
+        get_cached_parse(db, cache_contract)
+        if cache_contract is not None else None
+    )
+    parse_cache_hit = parsed is not None
+    cacheable = bool(
+        cache_contract is not None and cache_contract.content_sha256
+    )
+    if db.in_transaction():
+        db.rollback()
+    if parsed is None:
+        parsed = extract_document(storage_path)
+        if cacheable:
+            cache_contract = db.get(Contract, contract_id)
+            assert cache_contract is not None
+            save_parse_cache(db, cache_contract, parsed)
+            db.commit()
     if progress_callback is not None:
         progress_callback(15, "parsing")
     parse_ms = round((time.perf_counter() - parse_started) * 1000)
@@ -400,7 +419,11 @@ def _compute_audit(
         "_risks": risk_payloads,
         "_issues": issues,
         "_coverage": coverage,
-        "_timings": {"parse_ms": parse_ms, **audit_timings},
+        "_timings": {
+            "parse_ms": parse_ms,
+            "parse_cache_hit": parse_cache_hit,
+            **audit_timings,
+        },
     }
 
 

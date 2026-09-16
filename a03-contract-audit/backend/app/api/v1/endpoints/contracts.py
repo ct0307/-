@@ -40,6 +40,7 @@ from app.services.parser.elements import (
 from app.services.parser.extractor import (
     extract_document,
 )
+from app.services.parser.cache import save_parse_cache
 from app.tasks.dispatcher import dispatch_audit_item
 
 router = APIRouter()
@@ -215,6 +216,7 @@ def batch_upload_contracts(
                 department=user.department,
                 status="uploaded",
                 uploaded_by=user.id,
+                content_sha256=hashlib.sha256(content).hexdigest(),
             )
             db.add(contract)
             db.flush()  # 获取 id 但不提交，出错可回滚
@@ -224,6 +226,7 @@ def batch_upload_contracts(
             try:
                 parsed = extract_document(stored_path)
                 apply_parse_quality(contract, parsed)
+                save_parse_cache(db, contract, parsed)
                 element_result = extract_element_result(parsed)
                 elements = legacy_element_values(element_result.values, text=parsed.text)
                 evidence_payload = element_evidence_payload(element_result, parsed=parsed)
@@ -417,6 +420,8 @@ def parse_contract(
             db.rollback()
             _raise_parse_error(contract_id, empty_error, failure=pdf_text_empty_failure())
         apply_parse_quality(contract, parsed)
+        if contract.content_sha256:
+            save_parse_cache(db, contract, parsed)
         # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
         element_result = extract_element_result(parsed)
         elements = legacy_element_values(element_result.values, text=parsed.text)

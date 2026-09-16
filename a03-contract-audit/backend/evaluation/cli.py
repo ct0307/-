@@ -23,6 +23,7 @@ from evaluation.audit_comparison import (
     compare_audit_candidates,
     quality_gate_failures,
 )
+from evaluation.audit_performance import compare_runs, load_run, render_markdown
 from evaluation.audit_quality import evaluate_audit_files
 from evaluation.benchmark_runner import (
     OpenAICompatibleTarget,
@@ -114,6 +115,12 @@ def _write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False),
         encoding="utf-8",
     )
+    temporary.replace(path)
+
+
+def _write_text_atomic(path: Path, value: str) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(value, encoding="utf-8")
     temporary.replace(path)
 
 
@@ -587,6 +594,15 @@ def _run_report(args: argparse.Namespace) -> int:
     }[result.status]
 
 
+def _run_audit_performance(args: argparse.Namespace) -> int:
+    report = compare_runs(load_run(args.baseline), load_run(args.candidate))
+    _write_json_atomic(args.json_output, report.to_dict())
+    _write_text_atomic(args.markdown_output, render_markdown(report))
+    if report.quality.gate_passed is None:
+        return EXIT_BLOCKED
+    return EXIT_OK if report.quality.gate_passed else EXIT_FAILED
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="A03 硬指标证据流水线")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -640,6 +656,13 @@ def build_parser() -> argparse.ArgumentParser:
     audit_compare.add_argument("--candidate", action="append", required=True)
     audit_compare.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
     audit_compare.add_argument("--run-id")
+    audit_performance = subcommands.add_parser(
+        "audit-performance", help="对比脱敏审查摘要的性能与质量"
+    )
+    audit_performance.add_argument("--baseline", type=Path, required=True)
+    audit_performance.add_argument("--candidate", type=Path, required=True)
+    audit_performance.add_argument("--json-output", type=Path, required=True)
+    audit_performance.add_argument("--markdown-output", type=Path, required=True)
     report = subcommands.add_parser("report", help="校验证据并生成 Markdown 报告")
     report.add_argument("--run-dir", type=Path, required=True)
     return parser
@@ -662,6 +685,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_audit_quality(args)
         if args.command == "audit-compare":
             return _run_audit_compare(args)
+        if args.command == "audit-performance":
+            return _run_audit_performance(args)
         if args.command == "report":
             return _run_report(args)
         raise ValueError(f"未知子命令: {args.command}")

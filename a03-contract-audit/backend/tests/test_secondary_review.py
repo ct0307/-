@@ -1,5 +1,6 @@
 import json
 
+from app.core.config import settings
 from app.llm.base import LLMError, LLMResponse
 from app.services.audit import auditor
 from app.services.audit.protocol import ReviewIssue
@@ -53,6 +54,13 @@ def _decision(claim_id: str, verdict: str = "confirm", **changes) -> str:
     return json.dumps({"decisions": [decision]}, ensure_ascii=False)
 
 
+def _batch_decisions(*decisions: tuple[str, str, dict]) -> str:
+    payload = []
+    for claim_id, verdict, changes in decisions:
+        payload.append(json.loads(_decision(claim_id, verdict, **changes))["decisions"][0])
+    return json.dumps({"decisions": payload}, ensure_ascii=False)
+
+
 class QueueAdapter:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -72,6 +80,227 @@ class CallRecorder:
 
     def record_call(self, **values):
         self.calls.append(values)
+
+
+def test_five_secondary_candidates_use_one_batch_model_call(monkeypatch):
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
+    claim_ids = [f"C-BATCH-{index:02d}" for index in range(5)]
+    adapter = QueueAdapter([
+        _batch_decisions(*((claim_id, "confirm", {}) for claim_id in claim_ids))
+    ])
+
+    result = SecondaryReviewer(adapter).review(
+        risks=[_risk(claim_id, level="high") for claim_id in claim_ids],
+        conflict_claim_ids=set(),
+    )
+
+    assert len(adapter.calls) == 1
+    assert set(result.by_claim) == set(claim_ids)
+    assert all(outcome.status == "confirmed" for outcome in result.by_claim.values())
+    prompt = json.loads(adapter.calls[0][1])
+    assert [item["candidate"]["claim_id"] for item in prompt["items"]] == claim_ids
+
+
+def test_batch_secondary_matches_serial_claims_and_evidence_with_fewer_calls(
+    monkeypatch,
+):
+    claim_ids = [f"C-AB-TEST-{index:02d}" for index in range(5)]
+    risks = [_risk(claim_id, level="high") for claim_id in claim_ids]
+    serial_adapter = QueueAdapter([_decision(claim_id) for claim_id in claim_ids])
+    batch_adapter = QueueAdapter([
+        _batch_decisions(*((claim_id, "confirm", {}) for claim_id in claim_ids))
+    ])
+
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", False)
+    serial = SecondaryReviewer(serial_adapter).review(
+        risks=risks,
+        conflict_claim_ids=set(),
+    )
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
+    batch = SecondaryReviewer(batch_adapter).review(
+        risks=risks,
+        conflict_claim_ids=set(),
+    )
+
+    assert batch.by_claim == serial.by_claim
+    assert len(serial_adapter.calls) == 5
+    assert len(batch_adapter.calls) == 1
+
+
+def test_six_secondary_candidates_are_chunked_five_plus_one(monkeypatch):
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
+    claim_ids = [f"C-CHUNK-{index:02d}" for index in range(6)]
+    adapter = QueueAdapter([
+        _batch_decisions(*((claim_id, "confirm", {}) for claim_id in claim_ids[:5])),
+        _batch_decisions((claim_ids[5], "confirm", {})),
+    ])
+
+    result = SecondaryReviewer(adapter).review(
+        risks=[_risk(claim_id, level="high") for claim_id in claim_ids],
+        conflict_claim_ids=set(),
+    )
+
+    assert len(adapter.calls) == 2
+    assert all(result.by_claim[claim_id].status == "confirmed" for claim_id in claim_ids)
+
+
+def test_missing_secondary_decision_retries_only_missing_claim(monkeypatch):
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
+    claim_ids = [f"C-MISSING-{index:02d}" for index in range(5)]
+    adapter = QueueAdapter([
+        _batch_decisions(*((claim_id, "confirm", {}) for claim_id in claim_ids[:4])),
+        _decision(claim_ids[4]),
+    ])
+
+    result = SecondaryReviewer(adapter).review(
+        risks=[_risk(claim_id, level="high") for claim_id in claim_ids],
+        conflict_claim_ids=set(),
+    )
+
+    assert len(adapter.calls) == 2
+    assert json.loads(adapter.calls[1][1])["candidate"]["claim_id"] == claim_ids[4]
+    assert all(result.by_claim[claim_id].status == "confirmed" for claim_id in claim_ids)
+
+
+def test_duplicate_and_unknown_batch_claims_preserve_other_valid_items(monkeypatch):
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
+    claim_ids = ["C-VALID-001", "C-DUPLICATE", "C-MISSING-01"]
+    adapter = QueueAdapter([
+        _batch_decisions(
+            (claim_ids[0], "confirm", {}),
+            (claim_ids[1], "confirm", {}),
+            (claim_ids[1], "reject", {}),
+            ("C-UNKNOWN-01", "confirm", {}),
+        ),
+        _decision(claim_ids[1]),
+        _decision(claim_ids[2]),
+    ])
+
+    result = SecondaryReviewer(adapter).review(
+        risks=[_risk(claim_id, level="high") for claim_id in claim_ids],
+        conflict_claim_ids=set(),
+    )
+
+    assert len(adapter.calls) == 3
+    assert result.by_claim[claim_ids[0]].status == "confirmed"
+    assert result.by_claim[claim_ids[1]].status == "confirmed"
+    assert result.by_claim[claim_ids[2]].status == "confirmed"
+
+
+def test_cross_claim_evidence_retries_only_the_invalid_claim(monkeypatch):
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
+    first = _risk("C-EVIDENCE-1", level="high")
+    second = _risk(
+        "C-EVIDENCE-2",
+        level="high",
+        evidence_ids=["EV-LAW-002"],
+        rag_sources=[{"content": "第二项证据", "source": "来源二"}],
+    )
+    adapter = QueueAdapter([
+        _batch_decisions(
+            ("C-EVIDENCE-1", "confirm", {"evidence_ids": ["EV-LAW-002"]}),
+            ("C-EVIDENCE-2", "confirm", {"evidence_ids": ["EV-LAW-002"]}),
+        ),
+        _decision("C-EVIDENCE-1"),
+    ])
+
+    result = SecondaryReviewer(adapter).review(
+        risks=[first, second],
+        conflict_claim_ids=set(),
+    )
+
+    assert len(adapter.calls) == 2
+    batch_prompt = json.loads(adapter.calls[0][1])
+    authorized = {
+        item["candidate"]["claim_id"]: {
+            evidence["evidence_id"] for evidence in item["authorized_evidence"]
+        }
+        for item in batch_prompt["items"]
+    }
+    assert authorized == {
+        "C-EVIDENCE-1": {"EV-LAW-001"},
+        "C-EVIDENCE-2": {"EV-LAW-002"},
+    }
+    assert all(outcome.status == "confirmed" for outcome in result.by_claim.values())
+
+
+def test_batch_missing_claim_does_not_fallback_after_deadline(monkeypatch):
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
+    now = [0.0]
+
+    class AdvancingBatchAdapter(QueueAdapter):
+        def chat(self, *args, **kwargs):
+            response = super().chat(*args, **kwargs)
+            now[0] = 2.0
+            return response
+
+    adapter = AdvancingBatchAdapter([
+        _batch_decisions(("C-DEADLINE-1", "confirm", {}))
+    ])
+
+    result = SecondaryReviewer(adapter, clock=lambda: now[0]).review(
+        risks=[
+            _risk("C-DEADLINE-1", level="high"),
+            _risk("C-DEADLINE-2", level="high"),
+        ],
+        conflict_claim_ids=set(),
+        deadline=1.0,
+    )
+
+    assert len(adapter.calls) == 1
+    assert result.by_claim["C-DEADLINE-1"].status == "confirmed"
+    assert result.by_claim["C-DEADLINE-2"].status == "manual_required"
+    assert "时限" in result.by_claim["C-DEADLINE-2"].reason
+
+
+def test_truncated_secondary_batch_falls_back_to_each_claim(monkeypatch):
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
+
+    class TruncatedBatchAdapter(QueueAdapter):
+        def chat(self, system, user, *, options=None, **kwargs):
+            self.calls.append((system, user, options))
+            response = self.responses.pop(0)
+            if isinstance(response, LLMResponse):
+                return response
+            return LLMResponse(text=response, model="secondary-test")
+
+    claim_ids = ["C-TRUNCATED-1", "C-TRUNCATED-2"]
+    adapter = TruncatedBatchAdapter([
+        LLMResponse(
+            text=_batch_decisions((claim_ids[0], "confirm", {})),
+            model="secondary-test",
+            finish_reason="length",
+        ),
+        _decision(claim_ids[0]),
+        _decision(claim_ids[1]),
+    ])
+
+    result = SecondaryReviewer(adapter).review(
+        risks=[_risk(claim_id, level="high") for claim_id in claim_ids],
+        conflict_claim_ids=set(),
+    )
+
+    assert len(adapter.calls) == 3
+    assert all(result.by_claim[claim_id].status == "confirmed" for claim_id in claim_ids)
+
+
+def test_secondary_batch_timeout_falls_back_without_losing_claims(monkeypatch):
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
+    timeout = LLMError("provider detail", code="MODEL_TIMEOUT", retryable=True)
+    claim_ids = ["C-TIMEOUT-01", "C-TIMEOUT-02"]
+    adapter = QueueAdapter([
+        timeout,
+        _decision(claim_ids[0]),
+        _decision(claim_ids[1]),
+    ])
+
+    result = SecondaryReviewer(adapter).review(
+        risks=[_risk(claim_id, level="high") for claim_id in claim_ids],
+        conflict_claim_ids=set(),
+    )
+
+    assert len(adapter.calls) == 3
+    assert all(result.by_claim[claim_id].status == "confirmed" for claim_id in claim_ids)
 
 
 def test_only_high_conflict_and_unclear_evidence_items_call_secondary_model():

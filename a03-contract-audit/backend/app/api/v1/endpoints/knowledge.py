@@ -28,6 +28,7 @@ from app.services.rag.legal_import import (
     preview_legal_import,
 )
 from app.services.rag.legal_sources import LegalSourceError
+from app.services.rag.revision import bump_knowledge_revision
 
 router = APIRouter()
 
@@ -510,6 +511,8 @@ def import_knowledge(
         db, user_id=user.id, action="import_knowledge", target=payload.category,
         detail=f"mode={split.mode} chunks={count} skipped={skipped}",
     )
+    if count:
+        bump_knowledge_revision(db)
     db.commit()
     return {
         "category": payload.category,
@@ -598,6 +601,8 @@ async def import_knowledge_file(
             f"skipped={skipped} placeholders_filtered={filtered_placeholders}"
         ),
     )
+    if count or deleted:
+        bump_knowledge_revision(db)
     db.commit()
     return {
         "source": source,
@@ -816,5 +821,6 @@ def delete_knowledge(
     if not chunk:
         raise HTTPException(status_code=404, detail="知识条目不存在")
     db.delete(chunk)
+    bump_knowledge_revision(db)
     db.commit()
     return {"deleted": chunk_id}
