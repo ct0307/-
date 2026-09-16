@@ -30,6 +30,11 @@ class ReviewWindow:
     depth: int = 0
 
 
+def enrichment_candidate_id(window_id: str, finding: RiskFinding) -> str:
+    payload = f"{window_id}\0{finding.category}\0{finding.quote}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
 @dataclass(frozen=True)
 class WindowReviewRequest:
     contract_id: int | str | None

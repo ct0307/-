@@ -1,3 +1,4 @@
+import json
 from typing import get_args
 
 import pytest
@@ -9,11 +10,13 @@ from app.services.audit.protocol import (
     AgentReviewResult,
     ReviewIssue,
     RiskCandidate,
+    RiskEnrichmentBatch,
     ReviewedRiskCandidate,
     RiskEnvelope,
     RiskFindingEnvelope,
     SecondaryDecision,
     SecondaryEnvelope,
+    parse_risk_enrichment_batch,
     parse_risk_envelope,
 )
 
@@ -39,6 +42,59 @@ def secondary_decision_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def enrichment_item(candidate_id: str, **overrides):
+    payload = {
+        "candidate_id": candidate_id,
+        "reason": "付款条件缺少足够履约保障。",
+        "suggestion": "增加验收标准并保留合理尾款。",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_enrichment_batch_accepts_five_unique_items():
+    payload = {
+        "items": [enrichment_item(f"candidate-{index}") for index in range(5)]
+    }
+
+    parsed = parse_risk_enrichment_batch(
+        json.dumps(payload, ensure_ascii=False)
+    )
+
+    assert len(parsed.items) == 5
+    assert parsed.items[0].candidate_id == "candidate-0"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"items": [enrichment_item(f"candidate-{index}") for index in range(6)]},
+        {
+            "items": [
+                enrichment_item("candidate-1"),
+                enrichment_item("candidate-1"),
+            ]
+        },
+        {"items": [enrichment_item("short")]},
+        {"items": [enrichment_item("candidate-1")], "unexpected": True},
+    ],
+)
+def test_enrichment_batch_rejects_invalid_size_ids_or_extra_fields(payload):
+    with pytest.raises((ValueError, ValidationError)):
+        parse_risk_enrichment_batch(json.dumps(payload, ensure_ascii=False))
+
+
+@pytest.mark.parametrize("text", ["[]", "```json\n{}\n```", "prefix {}"])
+def test_enrichment_batch_rejects_non_object_framing(text):
+    with pytest.raises(ValueError):
+        parse_risk_enrichment_batch(text)
+
+
+def test_enrichment_batch_requires_at_least_one_item():
+    with pytest.raises(ValidationError):
+        RiskEnrichmentBatch(items=[])
 
 
 RISK_STRING_BOUNDS = (

@@ -5,6 +5,7 @@ import pytest
 
 from app.llm.base import LLMError, LLMResponse
 from app.services.audit.protocol import AgentReviewResult
+from app.services.audit.protocol import RiskFinding
 from app.services.rag.contract_structure import ContractWindow
 
 
@@ -123,6 +124,25 @@ def _request(window=None, prompt_calls=None):
         system_prompt="只输出严格 JSON。",
         build_user_prompt=build_user_prompt,
     )
+
+
+def test_enrichment_candidate_id_is_deterministic_and_opaque():
+    from app.services.audit.review_pipeline import enrichment_candidate_id
+
+    finding = RiskFinding(
+        level="high",
+        category="付款风险",
+        quote="甲方应在验收后付款。",
+    )
+
+    first = enrichment_candidate_id("window-1", finding)
+    second = enrichment_candidate_id("window-1", finding)
+
+    assert first == second
+    assert len(first) == 32
+    assert "付款风险" not in first
+    assert "甲方应在验收后付款" not in first
+    assert enrichment_candidate_id("window-2", finding) != first
 
 
 def test_split_candidates_keep_leaf_provenance_through_json_round_trip():
