@@ -67,14 +67,16 @@ def _git_state() -> tuple[str, bool]:
             ["git", "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
         ).stdout.strip()
         dirty = bool(
             subprocess.run(
                 ["git", "status", "--porcelain"],
                 check=True,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
             ).stdout.strip()
         )
         return commit, dirty

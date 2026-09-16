@@ -1,10 +1,29 @@
 """评测证据必须可追溯、只追加且不泄露敏感内容。"""
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
+from evaluation import evidence
 from evaluation.evidence import EvidenceWriter, redact, sha256_file
+
+
+def test_git_state_decodes_git_output_as_utf8(monkeypatch):
+    calls = []
+    outputs = iter(["abc123\n", "?? 合同.docx\n"])
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(stdout=next(outputs))
+
+    monkeypatch.setattr(evidence.subprocess, "run", fake_run)
+
+    assert evidence._git_state() == ("abc123", True)
+    assert len(calls) == 2
+    assert all(kwargs["encoding"] == "utf-8" for _, kwargs in calls)
+    assert all(kwargs["errors"] == "replace" for _, kwargs in calls)
+    assert all("text" not in kwargs for _, kwargs in calls)
 
 
 def test_evidence_writer_creates_versioned_manifest(tmp_path):
