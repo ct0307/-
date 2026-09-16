@@ -39,8 +39,9 @@ from app.db.session import SessionLocal
 from app.llm.base import LLMError
 from app.llm.factory import get_embedding_adapter
 from app.models.models import KnowledgeChunk, LegalArticle
-from app.services.rag.revision import bump_knowledge_revision
+from app.services.rag.revision import bump_knowledge_revision, current_knowledge_revision
 from app.services.rag.legal_sources import chinese_number_to_int, int_to_chinese_number
+from app.services.rag.snapshot import RetrievalSnapshot, SnapshotStore
 
 log = get_logger("rag")
 
@@ -107,6 +108,90 @@ _FALLBACK_RULES: list[dict] = [
 
 # BM25 索引缓存：{fingerprint, bm25, docs}。docs 为纯数据元组，不持 ORM 对象。
 _bm25_cache: dict | None = None
+_snapshot_store = SnapshotStore()
+
+
+def _load_docs_from_session(db: Session) -> tuple[tuple, ...]:
+    rows = db.query(
+        KnowledgeChunk.id, KnowledgeChunk.content,
+        KnowledgeChunk.source, KnowledgeChunk.embedding,
+        KnowledgeChunk.category, KnowledgeChunk.article_number,
+        KnowledgeChunk.version, KnowledgeChunk.effective_date,
+        KnowledgeChunk.expiry_date, KnowledgeChunk.applicable_contract_types,
+        KnowledgeChunk.applicable_dimensions, KnowledgeChunk.embedding_model,
+        KnowledgeChunk.embedding_dimension, KnowledgeChunk.scope_mode,
+        KnowledgeChunk.legal_article_id, KnowledgeChunk.chunk_index,
+        KnowledgeChunk.chunk_count, LegalArticle.content,
+    ).outerjoin(
+        LegalArticle, KnowledgeChunk.legal_article_id == LegalArticle.id
+    ).all()
+    return tuple(tuple(row) for row in rows)
+
+
+def _load_docs_uncached() -> tuple[tuple, ...]:
+    db = SessionLocal()
+    try:
+        return _load_docs_from_session(db)
+    finally:
+        db.close()
+
+
+def _build_retrieval_snapshot(db: Session, revision: int) -> RetrievalSnapshot:
+    from rank_bm25 import BM25Okapi
+
+    docs = _load_docs_from_session(db)
+    bm25 = BM25Okapi([_tokenize(doc[1]) for doc in docs]) if docs else None
+    vector_ids: list[int] = []
+    vectors: list[np.ndarray] = []
+    expected_model = _configured_embedding_model()
+    for doc in docs:
+        if not doc[3] or _doc_value(doc, 11) != expected_model:
+            continue
+        vector = _parse_stored_vector(doc[3])
+        if vector is None:
+            log.warning("rag.invalid_stored_vector", chunk_id=doc[0])
+            continue
+        if vector.size != settings.EMBED_DIM:
+            log.warning(
+                "rag.embedding_dimension_mismatch",
+                chunk_id=doc[0], stored_dim=vector.size, query_dim=settings.EMBED_DIM,
+            )
+            continue
+        vector_ids.append(doc[0])
+        vectors.append(vector)
+    matrix = (
+        np.stack(vectors)
+        if vectors
+        else np.empty((0, settings.EMBED_DIM), dtype=np.float32)
+    )
+    matrix.setflags(write=False)
+    return RetrievalSnapshot(
+        revision=revision,
+        docs=docs,
+        bm25=bm25,
+        bm25_doc_ids=tuple(doc[0] for doc in docs),
+        vector_doc_ids=tuple(vector_ids),
+        vector_matrix=matrix,
+    )
+
+
+def _get_retrieval_snapshot() -> RetrievalSnapshot:
+    db = SessionLocal()
+    try:
+        revision = current_knowledge_revision(db)
+        identity = (
+            db.get_bind(),
+            revision,
+            settings.EMBED_BACKEND.lower(),
+            _configured_embedding_model(),
+            settings.EMBED_DIM,
+        )
+        return _snapshot_store.get(
+            identity,
+            lambda: _build_retrieval_snapshot(db, revision),
+        )
+    finally:
+        db.close()
 
 
 def retrieve(
@@ -126,24 +211,13 @@ def retrieve(
     避免合同自身的“第X条”编号被当作法条引用劫持检索）。
     """
     plan = build_query_plan(query)
-    db = SessionLocal()
+    snapshot: RetrievalSnapshot | None = None
     try:
-        # 一次取全量切片（BM25 需全部；向量路只用非空向量）
-        rows = db.query(
-            KnowledgeChunk.id, KnowledgeChunk.content,
-            KnowledgeChunk.source, KnowledgeChunk.embedding,
-            KnowledgeChunk.category, KnowledgeChunk.article_number,
-            KnowledgeChunk.version, KnowledgeChunk.effective_date,
-            KnowledgeChunk.expiry_date, KnowledgeChunk.applicable_contract_types,
-            KnowledgeChunk.applicable_dimensions, KnowledgeChunk.embedding_model,
-            KnowledgeChunk.embedding_dimension, KnowledgeChunk.scope_mode,
-            KnowledgeChunk.legal_article_id, KnowledgeChunk.chunk_index,
-            KnowledgeChunk.chunk_count, LegalArticle.content,
-        ).outerjoin(
-            LegalArticle, KnowledgeChunk.legal_article_id == LegalArticle.id
-        ).all()
-    finally:
-        db.close()
+        snapshot = _get_retrieval_snapshot()
+        rows = snapshot.docs
+    except Exception as exc:
+        log.warning("rag.snapshot_unavailable", error_type=type(exc).__name__)
+        rows = _load_docs_uncached()
 
     if not rows:
         results = _keyword_search(plan.expanded_query, top_k)
@@ -152,7 +226,7 @@ def retrieve(
 
     # docs: id/content/source/embedding/category/article/version/effective/expiry/
     #       contract_types/dimensions/embedding_model/embedding_dimension/scope_mode
-    docs = [tuple(r) for r in rows]
+    docs = list(rows)
     docs = _filter_docs(
         docs,
         contract_type=contract_type,
@@ -186,7 +260,12 @@ def retrieve(
         return [result]
 
     # —— BM25 路（全部切片参与）——
-    bm25_rank = _bm25_search(plan.expanded_query, docs)
+    full_snapshot = (
+        snapshot
+        if snapshot is not None and len(docs) == len(snapshot.docs)
+        else None
+    )
+    bm25_rank = _bm25_search(plan.expanded_query, docs, snapshot=full_snapshot)
 
     # —— 向量路（仅非空向量参与）——
     vec_rank: dict[int, int] = {}
@@ -194,7 +273,7 @@ def retrieve(
     vec_docs = [d for d in docs if d[3]]
     if vec_docs:
         try:
-            vec_rank = _vector_search(query, vec_docs)
+            vec_rank = _vector_search(query, vec_docs, snapshot=snapshot)
             vec_ok = True
         except LLMError:
             log.warning("rag.embed_unavailable", fallback="bm25_only")
@@ -438,7 +517,25 @@ def _filter_docs(
     return filtered
 
 
-def _vector_search(query: str, vec_docs: list[tuple]) -> dict[int, int]:
+def _vector_search(
+    query: str,
+    vec_docs: list[tuple],
+    *,
+    snapshot: RetrievalSnapshot | None = None,
+) -> dict[int, int]:
+    if snapshot is not None:
+        return _vector_search_snapshot(
+            query,
+            snapshot,
+            allowed_ids={doc[0] for doc in vec_docs},
+        )
+    return _vector_search_uncached(query, vec_docs)
+
+
+def _vector_search_uncached(
+    query: str,
+    vec_docs: list[tuple],
+) -> dict[int, int]:
     """向量检索：返回 {doc_id: rank}（rank 从 0 起，越小越相关）。
 
     本地 bge 模型按官方建议在查询侧加检索指令前缀（文档侧入库时不加），
@@ -488,6 +585,56 @@ def _vector_search(query: str, vec_docs: list[tuple]) -> dict[int, int]:
 
     order = [idx for idx in np.argsort(scores)[::-1] if scores[idx] >= _MIN_VECTOR_SIMILARITY]
     return {valid_docs[idx][0]: rank for rank, idx in enumerate(order[:_PER_ROUTE_N])}
+
+
+def _vector_search_snapshot(
+    query: str,
+    snapshot: RetrievalSnapshot,
+    *,
+    allowed_ids: set[int],
+) -> dict[int, int]:
+    """在已解析的只读向量矩阵上检索，按当前作用域过滤候选。"""
+    if snapshot.vector_matrix.shape[0] == 0:
+        return {}
+    adapter = get_embedding_adapter()
+    query_text = query
+    if settings.EMBED_BACKEND.lower() == "local" and settings.EMBED_QUERY_PREFIX:
+        query_text = settings.EMBED_QUERY_PREFIX + query
+    query_vectors = adapter.embed([query_text])
+    if len(query_vectors) != 1:
+        raise LLMError(
+            f"embedding 查询向量数量异常：expected=1, actual={len(query_vectors)}"
+        )
+    query_vec = _coerce_vector(query_vectors[0])
+    if query_vec is None:
+        raise LLMError("embedding 查询向量格式无效")
+    if snapshot.vector_matrix.shape[1] != query_vec.size:
+        raise LLMError(
+            "embedding 查询向量维度与快照不一致："
+            f"snapshot={snapshot.vector_matrix.shape[1]}, query={query_vec.size}"
+        )
+
+    indexes = [
+        index
+        for index, doc_id in enumerate(snapshot.vector_doc_ids)
+        if doc_id in allowed_ids
+    ]
+    if not indexes:
+        return {}
+    matrix = snapshot.vector_matrix[indexes]
+    doc_ids = [snapshot.vector_doc_ids[index] for index in indexes]
+    q_norm = query_vec / (np.linalg.norm(query_vec) + 1e-8)
+    m_norm = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-8)
+    scores = m_norm @ q_norm
+    order = [
+        index
+        for index in np.argsort(scores)[::-1]
+        if scores[index] >= _MIN_VECTOR_SIMILARITY
+    ]
+    return {
+        doc_ids[index]: rank
+        for rank, index in enumerate(order[:_PER_ROUTE_N])
+    }
 
 
 def _coerce_vector(value) -> np.ndarray | None:
@@ -563,11 +710,37 @@ def embedding_signature(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _bm25_search(query: str, docs: list[tuple]) -> dict[int, int]:
+def _bm25_search_snapshot(
+    query: str,
+    snapshot: RetrievalSnapshot,
+) -> dict[int, int]:
+    if snapshot.bm25 is None:
+        return {}
+    tokens = _tokenize(query)
+    if not tokens:
+        return {}
+    scores = snapshot.bm25.get_scores(tokens)
+    order = np.argsort(scores)[::-1]
+    ranked = [
+        (snapshot.bm25_doc_ids[index], rank)
+        for rank, index in enumerate(order)
+        if scores[index] > 0
+    ][:_PER_ROUTE_N]
+    return {doc_id: rank for doc_id, rank in ranked}
+
+
+def _bm25_search(
+    query: str,
+    docs: list[tuple],
+    *,
+    snapshot: RetrievalSnapshot | None = None,
+) -> dict[int, int]:
     """BM25 检索：返回 {doc_id: rank}（rank 从 0 起，越小越相关）。
 
     命中数为 0（query 无词落在语料）时返回空 dict。
     """
+    if snapshot is not None:
+        return _bm25_search_snapshot(query, snapshot)
     bm25, doc_ids = _get_bm25_index(docs)
     tokens = _tokenize(query)
     if not tokens:
