@@ -14,7 +14,7 @@ from app.db.session import Base, SessionLocal, engine
 
 # 导入模型以注册到 Base.metadata（必须，否则 create_all 建不出表）
 from app.models import models  # noqa: F401
-from app.models.models import ContractTypeProfile, LookupItem, User
+from app.models.models import ContractTypeProfile, KnowledgeIndexState, LookupItem, User
 
 log = get_logger("db")
 
@@ -54,6 +54,7 @@ def init_db() -> None:
     if settings.DB_BACKEND == "sqlite":
         Base.metadata.create_all(bind=engine)
         _migrate_dev_columns()
+        _seed_knowledge_index_state()
         _seed_contract_type_profiles()
     if settings.APP_ENV != "prod":
         _seed_users()
@@ -297,5 +298,15 @@ def _seed_contract_type_profiles() -> None:
             if lookup.contract_type_profile is None:
                 lookup.contract_type_profile = ContractTypeProfile()
         db.commit()
+    finally:
+        db.close()
+
+
+def _seed_knowledge_index_state() -> None:
+    db = SessionLocal()
+    try:
+        if db.get(KnowledgeIndexState, 1) is None:
+            db.add(KnowledgeIndexState(id=1, revision=0))
+            db.commit()
     finally:
         db.close()

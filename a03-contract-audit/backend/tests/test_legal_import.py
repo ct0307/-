@@ -20,6 +20,7 @@ from app.services.rag.legal_import import (
     verify_preview_token,
 )
 from app.api.v1.endpoints import knowledge
+from app.services.rag.revision import current_knowledge_revision
 
 
 RESOURCES = Path(__file__).parents[1] / "resources" / "legal_sources"
@@ -155,6 +156,7 @@ def test_apply_imports_complete_parent_child_knowledge_atomically(db, monkeypatc
     monkeypatch.setattr(retriever, "get_embedding_adapter", lambda: adapter)
     monkeypatch.setattr(retriever.settings, "EMBED_DIM", 2)
 
+    before_revision = current_knowledge_revision(db)
     result = apply_legal_import(
         db,
         filename="中华人民共和国民法典.txt",
@@ -173,6 +175,7 @@ def test_apply_imports_complete_parent_child_knowledge_atomically(db, monkeypatc
     assert db.query(KnowledgeChunk).filter(
         KnowledgeChunk.legal_article_id.isnot(None)
     ).count() == result.chunk_count
+    assert current_knowledge_revision(db) == before_revision + 1
 
 
 def test_repeated_apply_reuses_embeddings_without_growing_rows(db, monkeypatch):

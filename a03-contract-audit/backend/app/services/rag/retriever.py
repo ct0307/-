@@ -39,6 +39,7 @@ from app.db.session import SessionLocal
 from app.llm.base import LLMError
 from app.llm.factory import get_embedding_adapter
 from app.models.models import KnowledgeChunk, LegalArticle
+from app.services.rag.revision import bump_knowledge_revision
 from app.services.rag.legal_sources import chinese_number_to_int, int_to_chinese_number
 
 log = get_logger("rag")
@@ -700,6 +701,7 @@ def index_documents(chunks: list[dict], db: Session | None = None) -> int:
         rows = prepare_documents(chunks)
         for row in rows:
             db.add(row)
+        bump_knowledge_revision(db)
         db.commit()
         log.info("rag.index", count=len(chunks))
         return len(chunks)

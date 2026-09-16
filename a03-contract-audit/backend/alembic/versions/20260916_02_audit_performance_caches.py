@@ -42,9 +42,25 @@ def upgrade() -> None:
         ["contract_id"],
         unique=False,
     )
+    op.create_table(
+        "knowledge_index_state",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("revision", sa.Integer(), server_default="0", nullable=False),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.execute(
+        sa.text("INSERT INTO knowledge_index_state (id, revision) VALUES (1, 0)")
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("knowledge_index_state")
     op.drop_index(
         "ix_contract_parse_caches_contract_id",
         table_name="contract_parse_caches",

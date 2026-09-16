@@ -11,6 +11,7 @@ from app.llm.base import LLMError
 from app.models.models import KnowledgeChunk, LegalArticle, LegalSource
 from app.services.rag import retriever
 from app.services.rag.legal_sync import apply_legal_sync, plan_legal_sync
+from app.services.rag.revision import current_knowledge_revision
 
 
 class FakeEmbeddingAdapter:
@@ -203,6 +204,7 @@ def test_first_and_repeated_sync_are_idempotent(db):
         patch.object(retriever, "get_embedding_adapter", return_value=adapter),
         patch.object(retriever.settings, "EMBED_DIM", 2),
     ):
+        before_revision = current_knowledge_revision(db)
         first = apply_legal_sync(db, MANIFEST)
         second = apply_legal_sync(db, MANIFEST)
 
@@ -211,6 +213,7 @@ def test_first_and_repeated_sync_are_idempotent(db):
     assert db.query(LegalArticle).count() == 3
     assert db.query(KnowledgeChunk).filter(KnowledgeChunk.category == "law").count() == 3
     assert second.reuse_embedding_count == 3
+    assert current_knowledge_revision(db) == before_revision + 2
 
 
 def test_embedding_failure_keeps_existing_legal_knowledge(db):

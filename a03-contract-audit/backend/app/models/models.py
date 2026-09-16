@@ -433,6 +433,18 @@ class KnowledgeChunk(Base):
     legal_article: Mapped["LegalArticle | None"] = relationship(back_populates="chunks")
 
 
+class KnowledgeIndexState(Base):
+    """知识库索引的单例修订号；用于使检索快照在写入后失效。"""
+
+    __tablename__ = "knowledge_index_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class AuditLog(Base):
     """审计日志：谁在何时对什么做了什么。企业追责与合规刚需。"""
     __tablename__ = "audit_logs"

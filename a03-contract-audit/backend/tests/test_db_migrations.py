@@ -199,6 +199,14 @@ def test_performance_cache_migration_round_trip():
             for constraint in unique_constraints
         )
         assert any(index["column_names"] == ["contract_id"] for index in indexes)
+        assert inspector.has_table("knowledge_index_state")
+        revision_row = connection.execute(
+            select(Table(
+                "knowledge_index_state", MetaData(), autoload_with=connection
+            ).c.revision)
+        ).scalar_one()
+        assert revision_row == 0
 
         migration.downgrade()
         assert not inspect(connection).has_table("contract_parse_caches")
+        assert not inspect(connection).has_table("knowledge_index_state")

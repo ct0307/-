@@ -21,6 +21,7 @@ from app.services.rag.legal_sources import (
     validate_article_set,
     verify_source_file,
 )
+from app.services.rag.revision import bump_knowledge_revision
 
 
 _LEGACY_SOURCES = ("民法典-合同编.txt",)
@@ -225,4 +226,5 @@ def apply_legal_sync(
         for chunk, row in zip(bundle.chunks, rows):
             row.legal_article_id = article_rows[chunk["article_key"]].id
             db.add(row)
+        bump_knowledge_revision(db)
     return report
