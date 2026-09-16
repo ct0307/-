@@ -88,8 +88,11 @@ onMounted(async () => {
 })
 
 onMounted(async () => {
-  const importId = Number(route.query.import)
-  if (!Number.isInteger(importId) || importId <= 0) return
+  const requestedImportId = Number(route.query.import)
+  const importId = Number.isInteger(requestedImportId) && requestedImportId > 0
+    ? requestedImportId
+    : inbox.batch?.id
+  if (!importId) return
   try {
     await inbox.resume(importId)
   } catch {
@@ -100,15 +103,19 @@ onMounted(async () => {
 watch(
   () => route.query.batch,
   async (value) => {
-    const batchId = Number(value)
-    if (!Number.isInteger(batchId) || batchId <= 0) {
-      batchStore.reset()
-      return
-    }
+    const requestedBatchId = Number(value)
+    const batchId = Number.isInteger(requestedBatchId) && requestedBatchId > 0
+      ? requestedBatchId
+      : batchStore.batch?.id
+    if (!batchId) return
     try {
       await batchStore.resume(batchId)
     } catch {
-      if (Number(route.query.batch) === batchId) {
+      const currentRequestedBatchId = Number(route.query.batch)
+      const currentBatchId = Number.isInteger(currentRequestedBatchId) && currentRequestedBatchId > 0
+        ? currentRequestedBatchId
+        : batchStore.batch?.id
+      if (currentBatchId === batchId) {
         ElMessage.error(batchStore.error || '审查批次恢复失败')
       }
     }
