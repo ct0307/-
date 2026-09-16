@@ -100,13 +100,20 @@ onMounted(async () => {
   }
 })
 
+let batchRouteInitialized = false
+
 watch(
   () => route.query.batch,
   async (value) => {
+    const isInitialRoute = !batchRouteInitialized
+    batchRouteInitialized = true
     const requestedBatchId = Number(value)
-    const batchId = Number.isInteger(requestedBatchId) && requestedBatchId > 0
-      ? requestedBatchId
-      : batchStore.batch?.id
+    const hasRequestedBatch = Number.isInteger(requestedBatchId) && requestedBatchId > 0
+    if (!hasRequestedBatch && !isInitialRoute) {
+      if (route.name === 'audit') batchStore.reset()
+      return
+    }
+    const batchId = hasRequestedBatch ? requestedBatchId : batchStore.batch?.id
     if (!batchId) return
     try {
       await batchStore.resume(batchId)
