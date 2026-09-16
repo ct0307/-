@@ -145,6 +145,92 @@ def test_load_type_profiles_only_returns_enabled_available_contract_types():
             profiles["采购合同"] = TypeProfile()
 
 
+@pytest.mark.parametrize("label", ["合同类型", "协议类型", "文件类型"])
+def test_explicit_dictionary_value_is_high_weight_evidence(label):
+    result = classify_contract_type(
+        filename="x.docx",
+        text=f"{label}：居间合同\n正文",
+        available_types=["居间合同"],
+        profiles={},
+    )
+
+    assert result.suggested_type == "居间合同"
+    assert "explicit_type:居间合同" in result.evidence
+    assert result.conflict is False
+
+
+def test_unknown_explicit_type_is_not_fuzzily_matched():
+    result = classify_contract_type(
+        filename="x.docx",
+        text="合同类型：居间服务合同\n正文",
+        available_types=["居间合同"],
+        profiles={},
+    )
+
+    assert result.suggested_type == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "\n".join(["正文"] * 40 + ["合同类型：居间合同"]),
+        "甲" * 1800 + "\n合同类型：居间合同",
+    ],
+    ids=["after-40-nonempty-lines", "after-1800-characters"],
+)
+def test_explicit_type_outside_controlled_header_is_ignored(text):
+    result = classify_contract_type(
+        filename="x.docx",
+        text=text,
+        available_types=["居间合同"],
+        profiles={},
+    )
+
+    assert result.suggested_type == ""
+
+
+@pytest.mark.parametrize(
+    ("filename", "text"),
+    [
+        ("采购合同.docx", "合同类型：销售合同\n双方约定付款。"),
+        ("x.docx", "合同类型：销售合同\n采购人采购设备并要求供货。"),
+    ],
+    ids=["trusted-title", "strong-trade-signal"],
+)
+def test_explicit_type_conflict_never_auto_readies(monkeypatch, filename, text):
+    result = classify_contract_type(
+        filename=filename,
+        text=text,
+        available_types=["采购合同", "销售合同"],
+    )
+    monkeypatch.setattr(
+        import_service,
+        "settings",
+        type(
+            "Config",
+            (),
+            {
+                "CONTRACT_TYPE_AUTO_READY_ENABLED": True,
+                "CONTRACT_TYPE_READY_THRESHOLD": 0.85,
+            },
+        )(),
+    )
+
+    assert result.suggested_type == "销售合同"
+    assert {item.contract_type for item in result.candidates} == {
+        "采购合同",
+        "销售合同",
+    }
+    assert result.conflict is True
+    assert result.confidence == 0.40
+    assert result.auto_ready_eligible is False
+    assert target_status(
+        result.suggested_type,
+        result.confidence,
+        auto_ready_eligible=result.auto_ready_eligible,
+    ) == "awaiting_confirmation"
+
+
 def test_classifies_purchase_contract_with_high_confidence():
     result = classify_contract_type(
         filename="设备采购合同.pdf",

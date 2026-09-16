@@ -22,6 +22,7 @@ class TypeSuggestion:
     evidence: list[str]
     candidates: tuple[TypeCandidate, ...] = ()
     auto_ready_eligible: bool = False
+    conflict: bool = False
 
 
 _MATERIAL_SEMANTICS = re.compile(
@@ -34,6 +35,32 @@ _CONTROLLED_TITLE_SUFFIX = (
     r"|(?:[Vv](?:ersion)?\d+(?:\.\d+)*|\d{4}版)"
     r")?"
 )
+_EXPLICIT_TYPE_RE = re.compile(
+    r"^(?:合同类型|协议类型|文件类型)\s*[:：]\s*(?P<value>[^\r\n]{1,64})$"
+)
+
+
+def _find_explicit_type(text: str, available_types: list[str]) -> str:
+    values_by_casefold = {
+        value.strip().casefold(): value
+        for value in available_types
+        if value.strip()
+    }
+    nonempty_count = 0
+    for raw_line in text[:1800].splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        nonempty_count += 1
+        if nonempty_count > 40:
+            break
+        match = _EXPLICIT_TYPE_RE.fullmatch(line)
+        if not match:
+            continue
+        matched = values_by_casefold.get(match.group("value").strip().casefold())
+        if matched:
+            return matched
+    return ""
 
 
 def _is_trusted_title_prefix(prefix: str) -> bool:
@@ -177,6 +204,18 @@ def classify_contract_type(
                 f"negative:{signal}" for signal in negative_hits
             )
 
+    explicit_type = _find_explicit_type(text, types)
+    conflict = False
+    if explicit_type:
+        conflict = any(
+            value != explicit_type
+            and value in primary
+            and scores[value] >= 3
+            for value in types
+        )
+        scores[explicit_type] += 10
+        evidence[explicit_type].append(f"explicit_type:{explicit_type}")
+
     ranked = tuple(
         TypeCandidate(value, scores[value], tuple(dict.fromkeys(evidence[value])))
         for value in sorted(types, key=lambda item: (-scores[item], item))
@@ -186,19 +225,31 @@ def classify_contract_type(
         return TypeSuggestion("", 0.0, [])
 
     best = ranked[0]
-    confidence = 0.20 if best.score <= 0.25 else 0.50 if best.score < 3 else 0.70 if best.score < 6 else 0.90
+    confidence = (
+        0.20
+        if best.score <= 0.25
+        else 0.50
+        if best.score < 3
+        else 0.70
+        if best.score < 6
+        else 0.90
+    )
     margin = best.score - ranked[1].score if len(ranked) > 1 else best.score
     if margin < 4:
         confidence = min(confidence, 0.40 if margin == 0 else 0.55 if margin <= 1 else 0.70)
-    eligible = (
-        best.contract_type in trusted_headline_scored
-        and best.contract_type in primary
-        and best.score >= 6
-        and margin >= 4
-    )
+    if explicit_type:
+        confidence = 0.40 if conflict else 0.95
+        eligible = not conflict
+    else:
+        eligible = (
+            best.contract_type in trusted_headline_scored
+            and best.contract_type in primary
+            and best.score >= 6
+            and margin >= 4
+        )
     if material_name or material_title:
         eligible = False
     return TypeSuggestion(
         best.contract_type, confidence, list(best.evidence), ranked,
-        eligible,
+        eligible, conflict,
     )
