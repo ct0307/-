@@ -13,11 +13,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.api.v1.endpoints import auth, contracts, lookup
+from app.core.config import settings
 from app.core.security import hash_password
 from app.db.session import Base
 from app.models.models import (
     AuditLog,
     Contract,
+    ContractParseCache,
     ContractTypeProfile,
     LookupItem,
     Risk,
@@ -786,6 +788,100 @@ def test_parse_response_persists_ocr_quality(monkeypatch, tmp_path):
         assert response.ocr_confidence == 0.42
         assert contract.requires_review is True
         assert contract.review_reason == "OCR 平均置信度低于 75%"
+    engine.dispose()
+
+
+def test_parse_cache_reuses_synchronous_parse_during_audit(monkeypatch, tmp_path):
+    from app.services.audit import runner as audit_runner
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
+    with Session(engine) as db:
+        user, contract = _create_uploaded_contract(db, tmp_path)
+        contract.content_sha256 = "a" * 64
+        db.commit()
+        monkeypatch.setattr(contracts, "extract_document", lambda _path: parsed)
+
+        contracts.parse_contract(contract.id, db=db, user=user)
+
+        assert db.query(ContractParseCache).filter_by(
+            contract_id=contract.id
+        ).count() == 1
+        monkeypatch.setattr(
+            audit_runner,
+            "extract_document",
+            lambda _path: pytest.fail("审查不应重复解析已有缓存的合同"),
+        )
+        monkeypatch.setattr(
+            audit_runner,
+            "audit_contract",
+            lambda *_args, **_kwargs: {
+                "risks": [],
+                "cross_checks": [],
+                "issues": [],
+                "coverage": {"planned": 1, "completed": 1},
+            },
+        )
+
+        result = audit_runner.run_audit(db, contract)
+
+        assert result["status"] == "done"
+    engine.dispose()
+
+
+def test_parse_cache_reuses_legacy_batch_upload_parse_during_audit(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services.audit import runner as audit_runner
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    parsed = DocumentParseResult(text="批量合同正文" * 60, source="native")
+    with Session(engine) as db:
+        user = User(
+            username="batch-cache-legal",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+        monkeypatch.setattr(contracts, "extract_document", lambda _path: parsed)
+
+        uploaded = contracts.batch_upload_contracts(
+            files=[_upload("batch.txt", "批量合同正文".encode("utf-8"))],
+            contract_type="服务合同",
+            db=db,
+            user=user,
+        )
+        contract = db.get(Contract, uploaded[0]["contract_id"])
+
+        assert contract.content_sha256 is not None
+        assert db.query(ContractParseCache).filter_by(
+            contract_id=contract.id
+        ).count() == 1
+        monkeypatch.setattr(
+            audit_runner,
+            "extract_document",
+            lambda _path: pytest.fail("审查不应重复解析批量上传合同"),
+        )
+        monkeypatch.setattr(
+            audit_runner,
+            "audit_contract",
+            lambda *_args, **_kwargs: {
+                "risks": [],
+                "cross_checks": [],
+                "issues": [],
+                "coverage": {"planned": 1, "completed": 1},
+            },
+        )
+
+        result = audit_runner.run_audit(db, contract)
+
+        assert result["status"] == "done"
     engine.dispose()
 
 

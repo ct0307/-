@@ -2,6 +2,7 @@
 
 from io import BytesIO
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -15,6 +16,8 @@ from app.models.models import (
     LookupItem,
     User,
 )
+from app.services.audit import runner as audit_runner
+from app.services.parser.extractor import DocumentParseResult
 from app.services.parser.ocr import OCRUnavailable
 from app.services.imports.classifier import TypeSuggestion
 from app.services.parser.elements import ElementResult
@@ -129,6 +132,69 @@ def test_parse_import_item_round_trips_gb18030_text_without_loss(monkeypatch, tm
         assert result["status"] == "awaiting_confirmation"
         assert captured["text"] == source
         assert item.contract.suggested_type == "采购合同"
+
+
+def test_parse_cache_reuses_async_import_parse_during_audit(monkeypatch, tmp_path):
+    engine = _db()
+    parsed_text = "异步导入合同正文" * 60
+    with Session(engine) as db:
+        user = User(
+            username="import-cache-legal",
+            password_hash="x",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.flush()
+        contract = Contract(
+            filename="cache.txt",
+            storage_path=str(tmp_path / "cache.txt"),
+            uploaded_by=user.id,
+            department=user.department,
+            content_sha256="c" * 64,
+        )
+        batch = ImportBatch(
+            owner_id=user.id,
+            idempotency_key="import-cache-task",
+            total=1,
+        )
+        batch.items.append(
+            ImportBatchItem(filename=contract.filename, contract=contract, status="queued")
+        )
+        db.add(batch)
+        db.commit()
+        item_id = batch.items[0].id
+
+    monkeypatch.setattr(import_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(
+        import_tasks,
+        "extract_document",
+        lambda _path: DocumentParseResult(parsed_text, "native"),
+    )
+
+    import_tasks.parse_import_item.run(item_id)
+
+    with Session(engine) as db:
+        item = db.get(ImportBatchItem, item_id)
+        monkeypatch.setattr(
+            audit_runner,
+            "extract_document",
+            lambda _path: pytest.fail("审查不应重复解析异步导入合同"),
+        )
+        monkeypatch.setattr(
+            audit_runner,
+            "audit_contract",
+            lambda *_args, **_kwargs: {
+                "risks": [],
+                "cross_checks": [],
+                "issues": [],
+                "coverage": {"planned": 1, "completed": 1},
+            },
+        )
+
+        result = audit_runner.run_audit(db, item.contract)
+
+        assert result["status"] == "done"
 
 
 def test_parse_import_item_passes_classification_and_parse_review_gates(monkeypatch, tmp_path):

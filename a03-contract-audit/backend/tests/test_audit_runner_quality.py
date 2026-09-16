@@ -741,6 +741,61 @@ def test_run_audit_logs_structured_stage_timings_without_contract_text(monkeypat
     assert sensitive_text not in repr(fields)
 
 
+@pytest.mark.parametrize("invalidation", ["content_hash", "parser_signature"])
+def test_audit_parse_cache_miss_reparses_once_then_hits_cache(
+    monkeypatch,
+    db: Session,
+    invalidation,
+):
+    from app.services.parser import cache
+    from app.services.parser.cache import save_parse_cache
+
+    contract = _contract(db, f"cache-{invalidation}.txt")
+    contract.content_sha256 = "a" * 64
+    cached = DocumentParseResult(text="旧解析正文" * 60, source="native")
+    fresh = DocumentParseResult(text="新解析正文" * 60, source="native")
+    save_parse_cache(db, contract, cached)
+    db.commit()
+    if invalidation == "content_hash":
+        contract.content_sha256 = "b" * 64
+        db.commit()
+    else:
+        monkeypatch.setattr(cache, "OCR_MAX_PAGES", cache.OCR_MAX_PAGES + 1)
+
+    extract_calls = []
+    events: list[tuple[str, dict]] = []
+
+    def extract_once(_path):
+        extract_calls.append(1)
+        return fresh
+
+    monkeypatch.setattr(runner, "extract_document", extract_once)
+    monkeypatch.setattr(
+        runner,
+        "audit_contract",
+        lambda *_args, **_kwargs: {
+            "risks": [],
+            "cross_checks": [],
+            "issues": [],
+            "coverage": {"planned": 1, "completed": 1},
+        },
+    )
+    monkeypatch.setattr(
+        runner.log,
+        "info",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    runner.run_audit(db, contract)
+    runner.run_audit(db, contract)
+
+    assert extract_calls == [1]
+    performance = [
+        fields for event, fields in events if event == "audit.performance"
+    ]
+    assert [item["parse_cache_hit"] for item in performance] == [False, True]
+
+
 @pytest.mark.parametrize("audit_job_id", [None, 12])
 def test_window_calls_have_one_log_each_and_only_jobs_persist_checkpoints(
     monkeypatch, db: Session, audit_job_id,

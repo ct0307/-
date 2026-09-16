@@ -19,6 +19,7 @@ from app.services.parser.elements import (
     merge_element_review,
 )
 from app.services.parser.extractor import extract_document
+from app.services.parser.cache import save_parse_cache
 from app.tasks.celery_app import celery_app
 
 log = get_logger("imports")
@@ -46,6 +47,8 @@ def parse_import_item(item_id: int) -> dict:
                 raise ValueError("合同记录不存在")
             parsed = extract_document(item.contract.storage_path)
             apply_parse_quality(item.contract, parsed)
+            if item.contract.content_sha256:
+                save_parse_cache(db, item.contract, parsed)
             element_result = extract_element_result(parsed)
             elements = legacy_element_values(element_result.values, text=parsed.text)
             evidence_payload = element_evidence_payload(element_result)
