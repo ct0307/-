@@ -6,14 +6,18 @@ import argparse
 import hashlib
 import json
 import re
+from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from app.core.config import settings
 from app.services.imports.classifier import TypeSuggestion, classify_contract_type
 from app.services.imports.errors import parse_failure
 from app.services.imports.file_validation import FileValidationError, validate_upload
+from app.services.imports.type_profiles import TypeProfile
 from app.services.parser.elements import (
     ELEMENT_FIELDS,
     ElementEvidence,
@@ -30,6 +34,39 @@ DEFAULT_CONTRACT_TYPES = (
     "租赁合同", "保密协议", "合作协议", "服务协议", "框架协议",
     "技术开发合同", "合作合同", "服务合同", "劳务合同",
 )
+# 仅用于构造集评测，保持与数据库初始种子等价；线上分类始终从数据库加载规则。
+_EVALUATION_PROFILE_TERMS = (
+    (
+        "软件开发外包合同",
+        ("软件开发", "软件外包", "系统开发"),
+        ("软件开发", "系统开发", "源代码", "软件外包"),
+    ),
+    (
+        "技术服务合同",
+        ("技术服务", "技术支持", "技术维护"),
+        ("技术服务", "技术支持", "技术维护"),
+    ),
+    ("采购合同", ("采购", "购置"), ("采购", "购置", "供货", "设备")),
+    ("销售合同", ("销售", "出售"), ("销售", "出售", "售卖")),
+    ("劳动合同", ("劳动",), ("劳动关系", "试用期", "工资")),
+    ("租赁合同", ("租赁", "承租", "出租"), ("租赁", "承租", "出租")),
+    ("保密协议", ("保密协议", "保密", "商业秘密"), ("专项保密协议",)),
+    ("合作协议", ("合作协议",), ("合作项目",)),
+    ("服务协议", ("服务协议",), ("提供服务",)),
+    ("框架协议", ("框架",), ("框架合作", "框架采购")),
+    (
+        "技术开发合同",
+        ("技术开发", "研发"),
+        ("技术开发", "研发", "技术成果", "软件开发", "系统开发", "源代码"),
+    ),
+    ("合作合同", ("合作合同",), ("合作项目",)),
+    ("服务合同", ("服务合同",), ("提供服务",)),
+    ("劳务合同", ("劳务",), ("劳务", "劳务报酬", "劳务人员")),
+)
+EVALUATION_TYPE_PROFILES: Mapping[str, TypeProfile] = MappingProxyType({
+    value: TypeProfile(aliases=aliases, positive_signals=signals)
+    for value, aliases, signals in _EVALUATION_PROFILE_TERMS
+})
 _CASE_ID = re.compile(r"^(?P<case_id>(?:F|FX)3-\d{3})")
 _VALID_TERMINAL_STATUSES = {"parsed", "review_required"}
 _MIN_ELEMENT_F1 = 0.80
@@ -89,6 +126,7 @@ def evaluate_ingestion(
     element_report: Mapping[str, Any],
     supplemental_results: Sequence[Mapping[str, Any]] = (),
     missing_evidence_count: int = 0,
+    hardening_metrics: Mapping[str, Any] | None = None,
 ) -> IngestionReport:
     failures: list[str] = []
     if any(item.get("status") not in _VALID_TERMINAL_STATUSES for item in valid_results):
@@ -130,6 +168,19 @@ def evaluate_ingestion(
     if missing_evidence_count > 0:
         failures.append("element_evidence")
 
+    hardening = dict(hardening_metrics or {})
+    if hardening:
+        if not hardening.get("text_round_trip_equal", False):
+            failures.append("text_round_trip")
+        if not hardening.get("image_docx_reviewed", False):
+            failures.append("image_docx_review")
+        if int(hardening.get("logo_docx_false_review_count", 0)) > 0:
+            failures.append("logo_docx_false_review")
+        if not hardening.get("explicit_type_reachable", False):
+            failures.append("explicit_type_unreachable")
+        if int(hardening.get("type_conflict_auto_ready_count", 0)) > 0:
+            failures.append("type_conflict_auto_ready")
+
     safe_elements = sanitize_element_report(element_report)
     metrics = {
         "valid_count": len(valid_results),
@@ -140,6 +191,7 @@ def evaluate_ingestion(
         ),
         "missing_evidence_count": missing_evidence_count,
         "element_macro_f1": overall_f1,
+        **hardening,
     }
     return IngestionReport(
         passed=not failures,
@@ -292,16 +344,92 @@ def _classification_summary(rows: Sequence[Mapping[str, Any]], auto_ready_enable
     }
 
 
+def _generated_docx(*, text: str = "", image_size: tuple[int, int]) -> bytes:
+    from docx import Document
+    from docx.shared import Inches
+    from PIL import Image
+
+    document = Document()
+    if text:
+        document.add_paragraph(text)
+    image_stream = BytesIO()
+    Image.new("RGB", image_size, "white").save(image_stream, format="PNG")
+    image_stream.seek(0)
+    document.add_picture(image_stream, width=Inches(6))
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def evaluate_hardening_fixtures() -> dict[str, bool | int]:
+    """运行构造边界样本；结果只表达构造事实，不代表真实业务准确率。"""
+
+    source = "合同类型：采购合同\n甲方向乙方采购设备。"
+    logo_text = "合同正文包含双方主体、服务内容、付款安排和违约责任。" * 12
+    with TemporaryDirectory(prefix="ingestion-hardening-") as directory:
+        root = Path(directory)
+        text_path = root / "gb18030.txt"
+        image_path = root / "image-only.docx"
+        logo_path = root / "body-with-logo.docx"
+        text_path.write_bytes(source.encode("gb18030"))
+        image_path.write_bytes(_generated_docx(image_size=(1600, 2200)))
+        logo_path.write_bytes(
+            _generated_docx(text=logo_text, image_size=(300, 100))
+        )
+
+        validate_upload(text_path.name, text_path.read_bytes())
+        validate_upload(image_path.name, image_path.read_bytes())
+        validate_upload(logo_path.name, logo_path.read_bytes())
+        parsed_text = extract_document(str(text_path))
+        parsed_image = extract_document(str(image_path))
+        parsed_logo = extract_document(str(logo_path))
+
+    types = ["采购合同", "销售合同"]
+    profiles = MappingProxyType({
+        value: EVALUATION_TYPE_PROFILES[value]
+        for value in types
+    })
+    explicit = classify_contract_type(
+        filename="待分类.txt",
+        text=source,
+        available_types=types,
+        profiles=profiles,
+    )
+    conflict = classify_contract_type(
+        filename="销售合同.txt",
+        text="销售合同\n合同类型：采购合同\n乙方向甲方销售商品。",
+        available_types=types,
+        profiles=profiles,
+    )
+    return {
+        "text_round_trip_equal": parsed_text.text == source,
+        "image_docx_reviewed": parsed_image.requires_review,
+        "logo_docx_false_review_count": int(parsed_logo.requires_review),
+        "explicit_type_reachable": explicit.suggested_type == "采购合同",
+        "type_conflict_auto_ready_count": int(conflict.auto_ready_eligible),
+    }
+
+
 def evaluate_contract_set(
     dataset: Path,
     *,
     available_types: Sequence[str] = DEFAULT_CONTRACT_TYPES,
     auto_ready_enabled: bool | None = None,
+    profiles: Mapping[str, TypeProfile] | None = None,
 ) -> IngestionReport:
     root = dataset.resolve()
     valid_files, invalid_files = _discover_contract_set(root)
     cases = {case.case_id: case for case in load_cases()}
     enabled = settings.CONTRACT_TYPE_AUTO_READY_ENABLED if auto_ready_enabled is None else auto_ready_enabled
+    evaluation_profiles = (
+        profiles
+        if profiles is not None
+        else MappingProxyType({
+            value: EVALUATION_TYPE_PROFILES[value]
+            for value in available_types
+            if value in EVALUATION_TYPE_PROFILES
+        })
+    )
     valid_results: list[dict[str, Any]] = []
     predictions: dict[str, Mapping[str, Any]] = {}
     gold_records: list[dict[str, Any]] = []
@@ -323,6 +451,7 @@ def evaluate_contract_set(
                 filename=path.name,
                 text=parsed.text,
                 available_types=list(available_types),
+                profiles=evaluation_profiles,
             )
             expected = _expected_type(case)
             auto_ready = bool(
@@ -380,6 +509,7 @@ def evaluate_contract_set(
     ]
     raw_element_report = evaluate_dataset(gold_records, predictions)
     classification = _classification_summary(classification_rows, enabled)
+    hardening_metrics = evaluate_hardening_fixtures()
     evaluated = evaluate_ingestion(
         valid_results=valid_results,
         invalid_results=invalid_results,
@@ -387,6 +517,7 @@ def evaluate_contract_set(
         classification=classification,
         element_report=raw_element_report,
         missing_evidence_count=missing_evidence_count,
+        hardening_metrics=hardening_metrics,
     )
     metrics = {
         **evaluated.metrics,

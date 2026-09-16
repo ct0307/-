@@ -11,6 +11,7 @@ from app.services.parser.extractor import DocumentParseResult
 from evaluation.datasets.frozen_contracts_v3.cases import load_cases
 from evaluation.ingestion_reliability import (
     evaluate_contract_set,
+    evaluate_hardening_fixtures,
     evaluate_ingestion,
     sanitize_element_report,
 )
@@ -88,6 +89,43 @@ def test_gate_rejects_invalid_contract_creation_and_missing_evidence():
     }
 
 
+def test_gate_rejects_failed_hardening_checks():
+    report = evaluate_ingestion(
+        valid_results=[{"status": "parsed", "error_code": None}],
+        invalid_results=[{"status": "failed", "contract_id": None}],
+        classification={"high_confidence_false_ready": 0},
+        element_report=passing_element_report(),
+        hardening_metrics={
+            "text_round_trip_equal": False,
+            "image_docx_reviewed": False,
+            "logo_docx_false_review_count": 1,
+            "explicit_type_reachable": False,
+            "type_conflict_auto_ready_count": 1,
+        },
+    )
+
+    assert set(report.failures) == {
+        "text_round_trip",
+        "image_docx_review",
+        "logo_docx_false_review",
+        "explicit_type_unreachable",
+        "type_conflict_auto_ready",
+    }
+
+
+def test_generated_hardening_fixtures_cover_safe_boundaries():
+    metrics = evaluate_hardening_fixtures()
+
+    assert metrics == {
+        "text_round_trip_equal": True,
+        "image_docx_reviewed": True,
+        "logo_docx_false_review_count": 0,
+        "explicit_type_reachable": True,
+        "type_conflict_auto_ready_count": 0,
+    }
+    assert "甲方向乙方采购设备" not in json.dumps(metrics, ensure_ascii=False)
+
+
 def test_public_element_report_omits_contract_values():
     report = sanitize_element_report({
         "dataset_sha256": "a" * 64,
@@ -157,6 +195,17 @@ def test_contract_set_runner_evaluates_without_serializing_text(monkeypatch, tmp
         lambda **kwargs: TypeSuggestion("", 0.0, []),
     )
     monkeypatch.setattr(module, "evaluate_dataset", lambda gold, predictions: passing_element_report())
+    monkeypatch.setattr(
+        module,
+        "evaluate_hardening_fixtures",
+        lambda: {
+            "text_round_trip_equal": True,
+            "image_docx_reviewed": True,
+            "logo_docx_false_review_count": 0,
+            "explicit_type_reachable": True,
+            "type_conflict_auto_ready_count": 0,
+        },
+    )
 
     report = evaluate_contract_set(tmp_path, available_types=["采购合同"])
     payload = report.to_dict()
@@ -165,6 +214,10 @@ def test_contract_set_runner_evaluates_without_serializing_text(monkeypatch, tmp
     assert payload["metrics"]["valid_count"] == 50
     assert payload["metrics"]["invalid_count"] == 2
     assert payload["metrics"]["supplemental_count"] == 2
+    assert payload["metrics"]["text_round_trip_equal"] is True
+    assert payload["metrics"]["image_docx_reviewed"] is True
+    assert payload["metrics"]["explicit_type_reachable"] is True
+    assert payload["metrics"]["type_conflict_auto_ready_count"] == 0
     assert "合同原文" not in json.dumps(payload, ensure_ascii=False)
 
     def reject_one_valid(filename, content):

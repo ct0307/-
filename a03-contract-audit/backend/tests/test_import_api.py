@@ -1,6 +1,7 @@
 """可恢复合同导入 API 测试。"""
 
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,7 @@ from sqlalchemy.orm.query import Query
 
 from app.api.v1.endpoints import imports
 from app.core.config import settings
+from app.core.crypto import decrypt_bytes
 from app.db.session import Base
 from app.models.models import (
     AuditBatch,
@@ -60,6 +62,30 @@ def test_create_import_keeps_valid_files_when_one_file_is_invalid(monkeypatch, t
     assert [item.status for item in result.items] == ["queued", "failed"]
     assert result.items[1].error_code == "UNSUPPORTED_FILE_TYPE"
     assert db.query(Contract).count() == 1
+
+
+def test_create_import_preserves_gb18030_bytes_through_encrypted_storage(
+    monkeypatch,
+    tmp_path,
+):
+    db = _session()
+    legal = _user(db)
+    source = "合同类型：采购合同\n甲方向乙方采购设备。"
+    content = source.encode("gb18030")
+    monkeypatch.setattr(settings, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(imports, "_dispatch_import_item", lambda _item_id: "task-1")
+
+    result = imports.create_import(
+        files=[_file("采购合同.txt", content)],
+        idempotency_key="gb18030-round-trip",
+        department=legal.department,
+        db=db,
+        user=legal,
+    )
+
+    contract = db.get(Contract, result.items[0].contract_id)
+    assert contract is not None
+    assert decrypt_bytes(Path(contract.storage_path).read_bytes()) == content
 
 
 def test_create_import_rejects_corrupt_pdf_and_queues_valid_file(monkeypatch, tmp_path):

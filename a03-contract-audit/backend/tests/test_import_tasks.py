@@ -76,6 +76,61 @@ def test_parse_import_item_persists_type_suggestion(monkeypatch, tmp_path):
         assert item.contract.type_confirmed_at is None
 
 
+def test_parse_import_item_round_trips_gb18030_text_without_loss(monkeypatch, tmp_path):
+    engine = _db()
+    source = "合同类型：采购合同\n甲方向乙方采购设备并约定验收。"
+    captured: dict[str, str] = {}
+    with Session(engine) as db:
+        user = User(
+            username="gb18030-legal",
+            password_hash="x",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.flush()
+        path = tmp_path / "gb18030.txt"
+        path.write_bytes(encrypt_bytes(source.encode("gb18030")))
+        contract = Contract(
+            filename="采购合同.txt",
+            storage_path=str(path),
+            uploaded_by=user.id,
+            department=user.department,
+        )
+        batch = ImportBatch(
+            owner_id=user.id,
+            idempotency_key="gb18030-task",
+            total=1,
+        )
+        batch.items.append(
+            ImportBatchItem(filename=contract.filename, contract=contract, status="queued")
+        )
+        lookup = LookupItem(category="contract_type", value="采购合同")
+        lookup.contract_type_profile = ContractTypeProfile(
+            aliases_json='["采购"]',
+            positive_signals_json='["采购", "设备"]',
+            negative_signals_json="[]",
+        )
+        db.add_all([batch, lookup])
+        db.commit()
+        item_id = batch.items[0].id
+
+    def capture_elements(parsed):
+        captured["text"] = parsed.text
+        return ElementResult({}, {}, (), parsed.text)
+
+    monkeypatch.setattr(import_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(import_tasks, "extract_element_result", capture_elements)
+
+    result = import_tasks.parse_import_item.run(item_id)
+
+    with Session(engine) as db:
+        item = db.get(ImportBatchItem, item_id)
+        assert result["status"] == "awaiting_confirmation"
+        assert captured["text"] == source
+        assert item.contract.suggested_type == "采购合同"
+
+
 def test_parse_import_item_passes_classification_and_parse_review_gates(monkeypatch, tmp_path):
     engine = _db()
     with Session(engine) as db:
