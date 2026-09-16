@@ -1,8 +1,9 @@
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
+from app.core.config import settings
 from app.llm.base import LLMError, LLMResponse
 from app.services.audit.protocol import AgentReviewResult
 from app.services.audit.protocol import RiskFinding
@@ -124,6 +125,245 @@ def _request(window=None, prompt_calls=None):
         system_prompt="只输出严格 JSON。",
         build_user_prompt=build_user_prompt,
     )
+
+
+def _two_stage_batch_request(window=None, *, batch_calls=None, detail_calls=None):
+    from app.services.audit.review_pipeline import (
+        ReviewWindow,
+        WindowReviewRequest,
+        enrichment_candidate_id,
+    )
+
+    batch_calls = batch_calls if batch_calls is not None else []
+    detail_calls = detail_calls if detail_calls is not None else []
+    review_window = ReviewWindow(window or _window())
+
+    def build_discovery_prompt(_review_window, page, _dimensions, _accepted, page_size):
+        return f"page={page};page_size={page_size}"
+
+    def build_enrichment_prompt(_review_window, finding, concise):
+        detail_calls.append((review_window.window.window_id, finding, concise))
+        return json.dumps({"candidate": finding.model_dump(), "concise": concise})
+
+    def build_enrichment_batch_prompt(_review_window, findings, concise):
+        batch_calls.append((review_window.window.window_id, findings, concise))
+        return json.dumps({
+            "window_text": review_window.window.text,
+            "items": [
+                {
+                    "candidate_id": enrichment_candidate_id(
+                        review_window.window.window_id, finding
+                    ),
+                    "category": finding.category,
+                    "quote": finding.quote,
+                }
+                for finding in findings
+            ],
+        }, ensure_ascii=False)
+
+    return WindowReviewRequest(
+        contract_id="contract-7",
+        audit_job_id="job-11",
+        audit_generation=3,
+        agent="legal",
+        dimensions=("legal", "payment"),
+        review_window=review_window,
+        system_prompt="legacy",
+        build_user_prompt=lambda *_args: "legacy",
+        discovery_system_prompt="发现候选",
+        build_discovery_prompt=build_discovery_prompt,
+        enrichment_system_prompt="补全候选",
+        build_enrichment_prompt=build_enrichment_prompt,
+        build_enrichment_batch_prompt=build_enrichment_batch_prompt,
+    )
+
+
+def _finding_payload(index):
+    return {
+        "level": "high",
+        "category": f"风险类别{index}",
+        "quote": f"第{index}条 风险原文。",
+    }
+
+
+def _batch_enrichment_response(window_id, findings):
+    from app.services.audit.protocol import RiskFinding
+    from app.services.audit.review_pipeline import enrichment_candidate_id
+
+    return LLMResponse(
+        text=json.dumps({
+            "items": [
+                {
+                    "candidate_id": enrichment_candidate_id(
+                        window_id, RiskFinding.model_validate(finding)
+                    ),
+                    "reason": f"{finding['category']}需要核验。",
+                    "suggestion": f"补充{finding['category']}约定。",
+                }
+                for finding in findings
+            ]
+        }, ensure_ascii=False),
+        model="model-a",
+    )
+
+
+def test_five_findings_use_one_batch_enrichment_call(monkeypatch):
+    from app.services.audit.review_pipeline import WindowReviewer
+
+    monkeypatch.setattr(settings, "AUDIT_BATCH_ENRICHMENT_ENABLED", True)
+    findings = [_finding_payload(index) for index in range(1, 6)]
+    adapter = FakeAdapter([
+        LLMResponse(
+            text=json.dumps({"risks": findings, "has_more": False}, ensure_ascii=False),
+            model="model-a",
+        ),
+        _batch_enrichment_response("window-root", findings),
+    ])
+    batch_calls = []
+
+    result = WindowReviewer(adapter).review(
+        _two_stage_batch_request(batch_calls=batch_calls)
+    )
+
+    assert result.complete is True
+    assert len(result.candidates) == 5
+    assert len(adapter.calls) == 2
+    assert len(batch_calls) == 1
+    assert len(batch_calls[0][1]) == 5
+    batch_prompt = json.loads(adapter.calls[1][1])
+    assert batch_prompt["window_text"] == _window().text
+    assert set(batch_prompt) == {"window_text", "items"}
+
+
+def test_six_findings_split_into_five_plus_one_batch_enrichment(monkeypatch):
+    from app.services.audit.review_pipeline import WindowReviewer
+
+    monkeypatch.setattr(settings, "AUDIT_BATCH_ENRICHMENT_ENABLED", True)
+    first_page = [_finding_payload(index) for index in range(1, 6)]
+    second_page = [_finding_payload(6)]
+    adapter = FakeAdapter([
+        LLMResponse(
+            text=json.dumps({"risks": first_page, "has_more": True}, ensure_ascii=False),
+            model="model-a",
+        ),
+        _batch_enrichment_response("window-root", first_page),
+        LLMResponse(
+            text=json.dumps({"risks": second_page, "has_more": False}, ensure_ascii=False),
+            model="model-a",
+        ),
+        _batch_enrichment_response("window-root", second_page),
+    ])
+    batch_calls = []
+
+    result = WindowReviewer(adapter).review(
+        _two_stage_batch_request(batch_calls=batch_calls)
+    )
+
+    assert result.complete is True
+    assert len(result.candidates) == 6
+    assert [len(call[1]) for call in batch_calls] == [5, 1]
+    assert len(adapter.calls) == 4
+
+
+def test_missing_batch_enrichment_item_falls_back_only_for_that_finding(monkeypatch):
+    from app.services.audit.review_pipeline import WindowReviewer
+
+    monkeypatch.setattr(settings, "AUDIT_BATCH_ENRICHMENT_ENABLED", True)
+    findings = [_finding_payload(index) for index in range(1, 6)]
+    adapter = FakeAdapter([
+        LLMResponse(
+            text=json.dumps({"risks": findings, "has_more": False}, ensure_ascii=False),
+            model="model-a",
+        ),
+        _batch_enrichment_response("window-root", findings[:4]),
+        LLMResponse(
+            text=json.dumps({
+                "reason": "第五项需要单独核验。",
+                "suggestion": "补充第五项约定。",
+            }, ensure_ascii=False),
+            model="model-a",
+        ),
+    ])
+    detail_calls = []
+
+    result = WindowReviewer(adapter).review(
+        _two_stage_batch_request(detail_calls=detail_calls)
+    )
+
+    assert result.complete is True
+    assert len(result.candidates) == 5
+    assert len(adapter.calls) == 3
+    assert [call[1].category for call in detail_calls] == ["风险类别5"]
+
+
+def test_batch_deadline_keeps_valid_items_without_starting_missing_fallback(
+    monkeypatch,
+):
+    from app.services.audit.review_pipeline import WindowReviewer
+
+    monkeypatch.setattr(settings, "AUDIT_BATCH_ENRICHMENT_ENABLED", True)
+    now = [0.0]
+    findings = [_finding_payload(1), _finding_payload(2)]
+
+    class DeadlineAdapter(FakeAdapter):
+        def chat(self, *args, **kwargs):
+            response = super().chat(*args, **kwargs)
+            if len(self.calls) == 2:
+                now[0] = 2.0
+            return response
+
+    adapter = DeadlineAdapter([
+        LLMResponse(
+            text=json.dumps({"risks": findings, "has_more": False}, ensure_ascii=False),
+            model="model-a",
+        ),
+        _batch_enrichment_response("window-root", findings[1:]),
+    ])
+
+    result = WindowReviewer(adapter, clock=lambda: now[0]).review(
+        replace(_two_stage_batch_request(), deadline=1.0)
+    )
+
+    assert len(adapter.calls) == 2
+    assert [candidate.category for candidate in result.candidates] == ["风险类别2"]
+    assert result.complete is False
+    assert [issue.code for issue in result.issues] == ["AUDIT_DEADLINE_EXCEEDED"]
+
+
+def test_batch_enrichment_never_merges_findings_from_two_windows(monkeypatch):
+    from app.services.audit.review_pipeline import WindowReviewer
+
+    monkeypatch.setattr(settings, "AUDIT_BATCH_ENRICHMENT_ENABLED", True)
+    first = [_finding_payload(1)]
+    second = [_finding_payload(2)]
+    adapter = FakeAdapter([
+        LLMResponse(
+            text=json.dumps({"risks": first, "has_more": False}, ensure_ascii=False),
+            model="model-a",
+        ),
+        _batch_enrichment_response("window-1", first),
+        LLMResponse(
+            text=json.dumps({"risks": second, "has_more": False}, ensure_ascii=False),
+            model="model-a",
+        ),
+        _batch_enrichment_response("window-2", second),
+    ])
+    batch_calls = []
+    reviewer = WindowReviewer(adapter)
+
+    first_result = reviewer.review(_two_stage_batch_request(
+        _window(window_id="window-1"), batch_calls=batch_calls
+    ))
+    second_result = reviewer.review(_two_stage_batch_request(
+        _window(window_id="window-2"), batch_calls=batch_calls
+    ))
+
+    assert first_result.candidates[0].source_window_id == "window-1"
+    assert second_result.candidates[0].source_window_id == "window-2"
+    assert [(call[0], len(call[1])) for call in batch_calls] == [
+        ("window-1", 1),
+        ("window-2", 1),
+    ]
 
 
 def test_enrichment_candidate_id_is_deterministic_and_opaque():

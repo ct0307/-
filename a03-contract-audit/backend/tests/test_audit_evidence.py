@@ -152,8 +152,9 @@ def test_agent_audit_wires_compact_discovery_and_bounded_enrichment(monkeypatch)
     monkeypatch.setattr(WindowReviewer, "review", capture_request)
     monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
 
+    contract_text = "第一条 付款期限未约定。\n第二条 验收标准未约定。"
     auditor._agent_audit(
-        "legal", {}, "第一条 付款期限未约定。", {"elements": {}},
+        "legal", {}, contract_text, {"elements": {}},
         dimensions=["legal"],
     )
 
@@ -162,6 +163,7 @@ def test_agent_audit_wires_compact_discovery_and_bounded_enrichment(monkeypatch)
     assert request.enrichment_system_prompt is not None
     assert request.build_discovery_prompt is not None
     assert request.build_enrichment_prompt is not None
+    assert request.build_enrichment_batch_prompt is not None
     finding = RiskFinding(
         level="high", category="付款风险", quote="第一条 付款期限未约定。"
     )
@@ -171,6 +173,9 @@ def test_agent_audit_wires_compact_discovery_and_bounded_enrichment(monkeypatch)
     enrichment = request.build_enrichment_prompt(
         request.review_window, finding, True
     )
+    batch_enrichment = request.build_enrichment_batch_prompt(
+        request.review_window, (finding,), True
+    )
 
     assert '"category": "付款风险"' in discovery
     assert '"quote_hash":' in discovery
@@ -178,6 +183,9 @@ def test_agent_audit_wires_compact_discovery_and_bounded_enrichment(monkeypatch)
     assert "每页最多1条" in discovery
     assert "只补全这一条候选" in enrichment
     assert "每个字段不超过160字" in enrichment
+    assert '"candidate_id"' in batch_enrichment
+    assert batch_enrichment.count(contract_text) == 1
+    assert "每个字段不超过160字" in batch_enrichment
 
 
 def test_confidentiality_dimension_runs_legal_agent(monkeypatch):
