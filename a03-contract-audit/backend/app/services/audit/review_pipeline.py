@@ -112,6 +112,67 @@ class NullWindowCheckpoint:
 
 
 @dataclass(frozen=True)
+class WindowCallObservation:
+    request: WindowReviewRequest
+    page: int
+    attempt: int
+    response: LLMResponse | None
+    validation_status: str
+    error_code: str | None
+
+
+@dataclass(frozen=True)
+class BufferedWindowExecution:
+    result: AgentReviewResult
+    observations: tuple[WindowCallObservation, ...]
+    saved_results: tuple[tuple[WindowReviewRequest, AgentReviewResult], ...]
+
+
+class BufferedWindowCheckpoint:
+    """工作线程内只记录内存观测，不打开数据库会话。"""
+
+    def __init__(self) -> None:
+        self._observations: list[WindowCallObservation] = []
+        self._saved_results: list[tuple[WindowReviewRequest, AgentReviewResult]] = []
+
+    def load_valid(self, request: WindowReviewRequest) -> AgentReviewResult | None:
+        return None
+
+    def save_valid(
+        self,
+        request: WindowReviewRequest,
+        result: AgentReviewResult,
+    ) -> None:
+        self._saved_results.append((request, result))
+
+    def record_call(
+        self,
+        request: WindowReviewRequest,
+        *,
+        page: int,
+        attempt: int,
+        response: LLMResponse | None,
+        validation_status: str,
+        error_code: str | None,
+    ) -> None:
+        self._observations.append(WindowCallObservation(
+            request=request,
+            page=page,
+            attempt=attempt,
+            response=response,
+            validation_status=validation_status,
+            error_code=error_code,
+        ))
+
+    def execution(self, result: AgentReviewResult) -> BufferedWindowExecution:
+        return BufferedWindowExecution(
+            result=result,
+            observations=tuple(self._observations),
+            saved_results=tuple(self._saved_results),
+        )
+
+
+@dataclass(frozen=True)
 class _PageOutcome:
     kind: Literal["valid", "truncated", "issue"]
     envelope: RiskEnvelope | None = None

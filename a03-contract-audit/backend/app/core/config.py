@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     AUDIT_DEADLINE_SECONDS: int = Field(default=1500, gt=0, lt=1800)
     AUDIT_BATCH_SECONDARY_ENABLED: bool = False
     AUDIT_BATCH_ENRICHMENT_ENABLED: bool = False
+    AUDIT_MODEL_CONCURRENCY: int = Field(default=2, ge=1, le=3)
 
     # Embedding 配置（RAG 向量化用）
     # EMBED_BACKEND=local（默认）：sentence-transformers 本地模型，合同数据不出企业

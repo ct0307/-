@@ -15,7 +15,7 @@ from app.db.session import SessionLocal
 from app.llm.base import LLMResponse
 from app.models.models import AuditWindowRun, LLMCallLog
 from app.services.audit.protocol import AUDIT_PROTOCOL_VERSION, AgentReviewResult
-from app.services.audit.review_pipeline import WindowReviewRequest
+from app.services.audit.review_pipeline import BufferedWindowExecution, WindowReviewRequest
 
 
 log = get_logger("audit.window_repository")
@@ -222,3 +222,50 @@ class SqlAlchemyWindowCheckpoint:
         except Exception as error:
             # 不带异常文本或 traceback，避免驱动异常泄漏 SQL 参数和合同内容。
             log.warning("audit.window_call_log_failed", exception_type=type(error).__name__)
+
+    def flush_execution(
+        self,
+        request: WindowReviewRequest,
+        execution: BufferedWindowExecution,
+    ) -> None:
+        """由调度线程用一个短事务顺序发布工作线程的观测与检查点。"""
+        try:
+            with self._session_factory() as db, db.begin():
+                for observation in execution.observations:
+                    observed_request = observation.request
+                    if observed_request.audit_job_id is not None:
+                        self._increment_attempt(db, observed_request)
+                    response = observation.response
+                    db.add(LLMCallLog(
+                        contract_id=observed_request.contract_id,
+                        audit_job_id=observed_request.audit_job_id,
+                        agent=observed_request.agent,
+                        window_id=observed_request.review_window.window.window_id,
+                        dimension=_dimension_label(observed_request.dimensions),
+                        attempt=observation.attempt,
+                        provider=self._provider,
+                        model=response.model if response is not None else "",
+                        prompt_tokens=response.prompt_tokens if response is not None else 0,
+                        completion_tokens=response.completion_tokens if response is not None else 0,
+                        finish_reason=response.finish_reason if response is not None else None,
+                        latency_ms=response.latency_ms if response is not None else 0,
+                        mode="llm",
+                        validation_status=observation.validation_status,
+                        error_code=observation.error_code,
+                    ))
+                for saved_request, saved_result in execution.saved_results:
+                    if saved_request.audit_job_id is None:
+                        continue
+                    identity = self._identity(saved_request)
+                    row = db.execute(
+                        select(AuditWindowRun).filter_by(**identity)
+                    ).scalar_one_or_none()
+                    if row is None:
+                        row = AuditWindowRun(
+                            contract_id=saved_request.contract_id, **identity
+                        )
+                        db.add(row)
+                    self._update(row, saved_request, saved_result)
+        except DBAPIError as error:
+            _raise_if_transient(error)
+            raise
