@@ -6,10 +6,11 @@ import pytest
 
 from app.services.imports.classifier import TypeSuggestion
 from app.services.imports.file_validation import FileValidationError, ValidatedUpload
-from app.services.parser.elements import ElementResult
-from app.services.parser.extractor import DocumentParseResult
+from app.services.parser.elements import ElementEvidence, ElementResult
+from app.services.parser.extractor import DocumentBlock, DocumentParseResult, SourceAnchor
 from evaluation.datasets.frozen_contracts_v3.cases import load_cases
 from evaluation.ingestion_reliability import (
+    _evidence_positions,
     evaluate_contract_set,
     evaluate_ingestion,
     sanitize_element_report,
@@ -71,6 +72,53 @@ def test_gate_accepts_terminal_valid_files_and_rejected_invalid_files():
     assert report.failures == ()
 
 
+def test_gate_rejects_pdf_page_coverage_even_if_terminal_status_is_parsed():
+    report = evaluate_ingestion(
+        valid_results=[{
+            "case_id": "F3-044", "status": "parsed", "error_code": None,
+            "total_pages": 5, "missing_pages": [2, 3, 5],
+        }],
+        invalid_results=[{"status": "failed", "contract_id": None}],
+        classification={"auto_ready_enabled": False, "auto_ready_count": 0},
+        element_report=passing_element_report(),
+    )
+
+    assert report.passed is False
+    assert "pdf_page_coverage" in report.failures
+    assert report.metrics["missing_pdf_page_count"] == 3
+
+
+def test_gate_cross_checks_page_anchors_without_relying_on_missing_pages_flag():
+    report = evaluate_ingestion(
+        valid_results=[{
+            "status": "parsed", "error_code": None, "total_pages": 3,
+            "missing_pages": [], "covered_pages": [1, 3],
+        }],
+        invalid_results=[],
+        classification={"auto_ready_enabled": False, "auto_ready_count": 0},
+        element_report=passing_element_report(),
+    )
+
+    assert "pdf_page_coverage" in report.failures
+    assert report.metrics["missing_pdf_page_count"] == 1
+
+
+def test_gate_rejects_pdf_without_page_coverage_metadata():
+    report = evaluate_ingestion(
+        valid_results=[{
+            "status": "parsed", "error_code": None, "document_kind": "pdf",
+            "total_pages": None, "missing_pages": [], "covered_pages": [],
+        }],
+        invalid_results=[],
+        classification={"auto_ready_enabled": False, "auto_ready_count": 0},
+        element_report=passing_element_report(),
+    )
+
+    assert report.passed is False
+    assert "pdf_page_coverage" in report.failures
+    assert report.metrics["missing_pdf_page_count"] == 1
+
+
 def test_gate_rejects_invalid_contract_creation_and_missing_evidence():
     report = evaluate_ingestion(
         valid_results=[{"status": "parsed", "error_code": None}],
@@ -86,6 +134,30 @@ def test_gate_rejects_invalid_contract_creation_and_missing_evidence():
         "supplemental_corrupt_rejection",
         "element_evidence",
     }
+
+
+def test_pdf_evidence_requires_valid_offsets_and_page_anchor():
+    result = ElementResult(
+        values={"party_a": "测试公司"},
+        evidence={
+            "party_a": ElementEvidence(
+                raw_text="测试公司",
+                page=None,
+                start=8,
+                end=3,
+                confidence=0.9,
+                source="rule",
+                validation="valid",
+            ),
+        },
+        review_fields=(),
+        source_text="甲方：测试公司",
+    )
+
+    fields, missing = _evidence_positions(result, require_page=True)
+
+    assert fields["party_a"]["evidence"] == []
+    assert missing == 1
 
 
 def test_public_element_report_omits_contract_values():
@@ -137,10 +209,22 @@ def test_contract_set_runner_evaluates_without_serializing_text(monkeypatch, tmp
 
     def fake_extract(path):
         case_id = path.split("F3-")[1][:3]
-        return DocumentParseResult(text=f"F3-{case_id} 合同原文", source="native")
+        text = f"F3-{case_id} 合同原文"
+        return DocumentParseResult(
+            text=text,
+            source="native",
+            total_pages=1,
+            blocks=(DocumentBlock(
+                "page-1", "page_text", text, SourceAnchor(page_number=1),
+            ),),
+        )
 
     monkeypatch.setattr(module, "validate_upload", fake_validate)
-    monkeypatch.setattr(module, "extract_document", fake_extract)
+    monkeypatch.setattr(
+        module,
+        "extract_uploaded_document",
+        lambda filename, _content: fake_extract(filename),
+    )
     monkeypatch.setattr(
         module,
         "extract_element_result",

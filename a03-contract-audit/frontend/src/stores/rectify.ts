@@ -15,6 +15,7 @@ export const useRectifyStore = defineStore('rectify', () => {
   const loading = ref(false)
   const error = ref('')
   let loaded = false
+  let generation = 0
 
   const total = computed(() => items.value.length)
   const countByStatus = computed(() => ({
@@ -27,20 +28,26 @@ export const useRectifyStore = defineStore('rectify', () => {
   // 拉取整改项列表（首次进入或强制刷新）
   async function load(force = false) {
     if (loaded && !force) return
+    const requestGeneration = generation
     loading.value = true
     error.value = ''
     try {
-      items.value = await getRectifications()
+      const nextItems = await getRectifications()
+      if (requestGeneration !== generation) return
+      items.value = nextItems
       loaded = true
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '整改项加载失败'
+      if (requestGeneration === generation) {
+        error.value = e instanceof Error ? e.message : '整改项加载失败'
+      }
     } finally {
-      loading.value = false
+      if (requestGeneration === generation) loading.value = false
     }
   }
 
   // 从一条确认的风险生成整改项（AuditView 复核闭环调用）
   async function addFromRisk(risk: RiskOut, contract: string, owner: string) {
+    const requestGeneration = generation
     const item = await createRectification({
       contract,
       risk: risk.category,
@@ -50,14 +57,25 @@ export const useRectifyStore = defineStore('rectify', () => {
       note: risk.suggestion,
       risk_id: risk.id,
     })
+    if (requestGeneration !== generation) return
     items.value = [item, ...items.value]
   }
 
   async function setStatus(id: string, status: RectifyStatus) {
+    const requestGeneration = generation
     const updated = await updateRectificationStatus(id, status)
+    if (requestGeneration !== generation) return
     const it = items.value.find((r) => r.id === id)
     if (it) it.status = updated.status
   }
 
-  return { items, loading, error, total, countByStatus, openCount, load, addFromRisk, setStatus }
+  function reset() {
+    generation += 1
+    items.value = []
+    loading.value = false
+    error.value = ''
+    loaded = false
+  }
+
+  return { items, loading, error, total, countByStatus, openCount, load, addFromRisk, setStatus, reset }
 })

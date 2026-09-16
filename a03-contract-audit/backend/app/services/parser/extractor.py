@@ -4,7 +4,7 @@
   1. pdfplumber 优先（速度快，适合标准文本层 PDF）
   2. 乱码检测：CJK 字符占比 < 10% 且文本不为空 → 判定为字体编码问题
   3. PyMuPDF 降级（fitz）：对自定义字体无 ToUnicode 映射的 PDF 有更好兜底
-  4. 仍为空/乱码 → 扫描件，需 OCR（路线图 P2，当前记 warning）
+  4. 仍为空/乱码 → 逐页 OCR，保留缺页和复核原因
 
 加密存储支持：启用 FILE_ENCRYPT_KEY 后，extract_text 自动解密再解析，调用方无感知。
 """
@@ -16,7 +16,7 @@ from typing import Literal
 
 from app.core.logging import get_logger
 from app.core.config import settings
-from app.services.parser.ocr import OCRResult, ocr_pdf_bytes
+from app.services.parser.ocr import OCRError, OCRResult, ocr_pdf_bytes
 
 log = get_logger("parser")
 
@@ -52,6 +52,8 @@ class DocumentParseResult:
     requires_review: bool = False
     review_reason: str | None = None
     blocks: tuple[DocumentBlock, ...] = ()
+    total_pages: int | None = None
+    missing_pages: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,14 +73,19 @@ def _read_decrypted(file_path: str) -> bytes:
 def extract_document(file_path: str) -> DocumentParseResult:
     """按扩展名抽取合同文本及解析质量。"""
     data = _read_decrypted(file_path)
-    lower = file_path.lower()
+    return extract_uploaded_document(file_path, data)
+
+
+def extract_uploaded_document(filename: str, data: bytes) -> DocumentParseResult:
+    """解析上传前的明文字节，不经过加密存储读取。"""
+    lower = filename.lower()
     if lower.endswith(".pdf"):
         return _extract_pdf_result(data)
     if lower.endswith(".docx"):
         return _extract_docx_result(data)
     if lower.endswith(".txt"):
         return DocumentParseResult(data.decode("utf-8", errors="ignore"), "native")
-    raise ValueError(f"不支持的文件类型: {file_path}")
+    raise ValueError(f"不支持的文件类型: {filename}")
 
 
 def extract_text(file_path: str) -> str:
@@ -87,11 +94,20 @@ def extract_text(file_path: str) -> str:
 
 
 def _is_garbled(text: str) -> bool:
-    """检测文本是否乱码：CJK 字符占比低于 10% 且文本非空视为字体编码异常。"""
+    """识别疑似字体映射乱码，同时允许正常的英文合同页面。"""
     if not text or len(text) < 20:
         return False  # 空文本交给 empty 逻辑处理，不走此判断
     cjk = sum(1 for c in text if '一' <= c <= '鿿')
-    return cjk / len(text) < 0.10
+    if cjk / len(text) >= 0.10:
+        return False
+    printable_ascii = sum(1 for char in text if char.isascii() and char.isprintable())
+    distinct_letters = {char.lower() for char in text if char.isascii() and char.isalpha()}
+    looks_like_english = (
+        printable_ascii / len(text) >= 0.90
+        and any(char.isspace() for char in text)
+        and len(distinct_letters) >= 8
+    )
+    return not looks_like_english
 
 
 def _compatibility_radical_count(text: str) -> int:
@@ -163,6 +179,35 @@ def _candidate_preserves_nonempty_pages(
     )
 
 
+def _format_page_ranges(pages: tuple[int, ...], *, max_chars: int = 220) -> str:
+    """把页码压缩为有界摘要；完整页码仍由结构化字段持久化。"""
+    ordered = sorted(set(pages))
+    if not ordered:
+        return ""
+    ranges: list[str] = []
+    start = previous = ordered[0]
+    for page in ordered[1:]:
+        if page == previous + 1:
+            previous = page
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = page
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    joined = "、".join(ranges)
+    if len(joined) <= max_chars:
+        return joined
+
+    suffix = f"……（共 {len(ordered)} 页）"
+    budget = max(1, max_chars - len(suffix))
+    included: list[str] = []
+    for value in ranges:
+        candidate = "、".join((*included, value))
+        if len(candidate) > budget:
+            break
+        included.append(value)
+    return "、".join(included) + suffix
+
+
 def _extract_pdf_result(data: bytes) -> DocumentParseResult:
     """PDF 文本提取：pdfplumber 优先，乱码时降级到 PyMuPDF。"""
     import pdfplumber
@@ -172,22 +217,27 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
     native_blocks: list[DocumentBlock] = []
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
+            parts = [""] * len(pdf.pages)
             for page_number, page in enumerate(pdf.pages, start=1):
-                page_text = page.extract_text() or ""
-                parts.append(page_text)
+                try:
+                    page_text = page.extract_text() or ""
+                except Exception as exc:
+                    log.warning("parser.pdf_page_error", page_number=page_number,
+                                exception_type=type(exc).__name__)
+                    continue
+                parts[page_number - 1] = page_text
                 native_blocks.extend(
                     _extract_native_pdf_page_blocks(page, page_number, page_text)
                 )
-    except Exception as e:
-        log.warning("parser.pdfplumber_error", error=str(e))
+    except Exception as exc:
+        log.warning("parser.pdfplumber_error", exception_type=type(exc).__name__)
     text = "\n".join(parts).strip()
     empty_pages = tuple(index for index, part in enumerate(parts) if not part.strip())
-    radical_path_handled = False
+    radical_pages = {index for index, part in enumerate(parts) if _has_suspicious_radicals(part)}
 
     # pdfplumber 可能把中文映射为 CJK/Kangxi 部首。此时仅在 PyMuPDF
     # 给出完整且质量更高的候选时替换，否则保留原文并局部规范化。
     if text and _has_suspicious_radicals(text):
-        radical_path_handled = True
         if not empty_pages:
             expected_pages = len(parts) or None
             alternate = _extract_pdf_pymupdf_candidate(data, expected_pages=expected_pages)
@@ -199,6 +249,7 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
                     alternate.text,
                     "native",
                     blocks=_page_text_blocks(alternate.page_texts),
+                    total_pages=len(alternate.page_texts),
                 )
         parts = [_normalize_compatibility_radicals(part) for part in parts]
         native_blocks = [
@@ -216,35 +267,63 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
         ]
         text = "\n".join(parts).strip()
 
-    # 第二步：乱码检测 → PyMuPDF 降级
-    if _is_garbled(text) and not radical_path_handled:
-        log.info("parser.pdf_garbled", hint="检测到字体编码异常，切换 PyMuPDF 重新提取")
-        text = _extract_pdf_pymupdf(data)
-        if text and not _is_garbled(text):
-            return DocumentParseResult(text, "native", blocks=tuple(native_blocks))
-        parts = []
+    # 仅对页级缺失或乱码调用第二提取器，不能用其整份非空文本掩盖空页。
+    garbled_pages = {
+        index for index, part in enumerate(parts)
+        if _is_garbled(part) and index not in radical_pages
+    }
+    if garbled_pages:
+        log.info("parser.pdf_garbled", hint="字体编码异常，逐页尝试 PyMuPDF")
+    if not garbled_pages and parts and not empty_pages:
+        return DocumentParseResult(text, "native", blocks=tuple(native_blocks), total_pages=len(parts))
 
-    if text and not empty_pages:
-        return DocumentParseResult(text, "native", blocks=tuple(native_blocks))
-
-    if not text:
-        pymupdf_text = _extract_pdf_pymupdf(data)
-        if pymupdf_text and not _is_garbled(pymupdf_text):
-            return DocumentParseResult(
-                pymupdf_text,
-                "native",
-                blocks=(
-                    DocumentBlock(
-                        block_id="pdf-page-1",
-                        block_type="page_text",
-                        text=pymupdf_text,
-                        anchor=SourceAnchor(page_number=1),
-                    ),
-                ),
+    alternate = _extract_pdf_pymupdf_candidate(data, expected_pages=len(parts) or None)
+    if (
+        alternate.page_texts
+        and (not parts or len(parts) == len(alternate.page_texts))
+    ):
+        if not parts:
+            parts = [""] * len(alternate.page_texts)
+        for index, candidate in enumerate(alternate.page_texts):
+            # 长度阈值仅约束被替换的乱码页，不让无关原生页阻止空页补全。
+            valid_candidate = (
+                bool(candidate.strip())
+                and not _is_garbled(candidate)
+                and not _has_suspicious_radicals(candidate)
             )
-        log.warning("parser.pdf_empty", hint="文本层为空，进入离线 OCR")
+            can_replace = index in garbled_pages and (
+                _non_whitespace_length(candidate) >= _non_whitespace_length(parts[index]) * 0.70
+                and _readable_cjk_ratio(candidate) > _readable_cjk_ratio(parts[index])
+            )
+            if valid_candidate and (not parts[index].strip() or can_replace):
+                parts[index] = candidate
+                garbled_pages.discard(index)
+                native_blocks = [
+                    block for block in native_blocks if block.anchor.page_number != index + 1
+                ]
+                native_blocks.append(DocumentBlock(
+                    block_id=f"pdf-page-{index + 1}",
+                    block_type="page_text",
+                    text=candidate,
+                    anchor=SourceAnchor(page_number=index + 1),
+                ))
+    for index in garbled_pages:
+        parts[index] = ""
+    native_blocks = [
+        block for block in native_blocks
+        if (block.anchor.page_number or 0) - 1 not in garbled_pages
+    ]
+    empty_pages = tuple(index for index, part in enumerate(parts) if not part.strip())
+    text = "\n".join(parts).strip()
+    if parts and not empty_pages:
+        return DocumentParseResult(
+            text, "native", blocks=tuple(sorted(native_blocks, key=lambda b: b.anchor.page_number or 0)),
+            total_pages=len(parts),
+        )
+    if not text:
+        log.warning("parser.pdf_empty", hint="页文本层为空，进入离线 OCR")
 
-    page_indices = empty_pages or None
+    page_indices = empty_pages if parts else None
     result = ocr_pdf_bytes(
         data,
         page_indices=page_indices,
@@ -254,10 +333,8 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
         timeout_seconds=settings.OCR_TIMEOUT_SECONDS,
         min_confidence=settings.OCR_MIN_CONFIDENCE,
     )
-    if isinstance(result, str):
-        merged_text = "\n".join(part for part in (text, result.strip()) if part).strip()
-        source = "mixed" if text or any(part.strip() for part in parts) else "ocr"
-        return DocumentParseResult(merged_text, source)
+    if not isinstance(result, OCRResult) or result.page_count <= 0:
+        raise OCRError("OCR 返回结果缺少有效页信息")
 
     if result.requires_review:
         log.warning(
@@ -265,57 +342,82 @@ def _extract_pdf_result(data: bytes) -> DocumentParseResult:
             confidence=result.mean_confidence,
             pages=result.page_count,
         )
-    if parts and empty_pages and len(result.page_texts) == len(empty_pages):
-        merged = list(parts)
-        for index, page_text in zip(empty_pages, result.page_texts):
-            merged[index] = page_text
-        merged_text = "\n".join(part for part in merged if part).strip()
-    else:
-        merged_text = "\n".join(part for part in (text, result.text) if part).strip()
+    page_count = len(parts) or result.page_count
+    selected = empty_pages if parts else tuple(range(result.page_count))
+    if result.page_count != len(result.page_texts) or len(result.page_texts) != len(selected):
+        raise OCRError("OCR 返回页数与请求页数不一致")
+    page_confidences = result.page_confidences or (
+        (result.mean_confidence,) * len(result.page_texts)
+    )
+    if len(page_confidences) != len(result.page_texts):
+        raise OCRError("OCR 返回置信度页数与文本页数不一致")
+    merged = list(parts) if parts else [""] * result.page_count
+    for index, page_text in zip(selected, result.page_texts):
+        merged[index] = page_text
+    merged_text = "\n".join(part for part in merged if part).strip()
+    missing_pages = tuple(
+        index + 1 for index, part in enumerate(merged) if not part.strip()
+    )
 
     source = "mixed" if text or any(part.strip() for part in parts) else "ocr"
     review_reason = None
+    low_confidence_pages: tuple[int, ...] = ()
     if result.requires_review:
         threshold = int(settings.OCR_MIN_CONFIDENCE * 100)
-        review_reason = (
-            f"OCR 平均置信度低于 {threshold}%"
-            if result.text
-            else "OCR 未识别出有效文本"
+        low_confidence_pages = tuple(
+            selected[position] + 1
+            for position, confidence in enumerate(page_confidences)
+            if confidence < settings.OCR_MIN_CONFIDENCE
         )
-    if parts and empty_pages and len(result.page_texts) == len(empty_pages):
-        ocr_page_set = set(empty_pages)
-        blocks_list: list[DocumentBlock] = []
-        for index, page_text in enumerate(merged):
-            page_number = index + 1
-            if index in ocr_page_set:
-                if page_text.strip():
-                    blocks_list.append(DocumentBlock(
-                        block_id=f"pdf-page-{page_number}",
-                        block_type="page_text",
-                        text=page_text,
-                        anchor=SourceAnchor(page_number=page_number),
-                        confidence=result.mean_confidence,
-                        parse_source="ocr",
-                    ))
-            else:
-                blocks_list.extend(
-                    block for block in native_blocks
-                    if block.anchor.page_number == page_number
+        if not result.text:
+            review_reason = "OCR 未识别出有效文本"
+        elif low_confidence_pages:
+            review_reason = (
+                f"OCR 第 {_format_page_ranges(low_confidence_pages)} 页置信度低于 {threshold}%"
+            )
+        else:
+            review_reason = "OCR 结果需人工复核"
+    if missing_pages:
+        page_reason = f"第 {_format_page_ranges(missing_pages)} 页未提取到有效文本"
+        if review_reason and len(f"{review_reason}；{page_reason}") > 255:
+            if low_confidence_pages:
+                review_reason = (
+                    f"OCR 第 {_format_page_ranges(low_confidence_pages, max_chars=90)} "
+                    f"页置信度低于 {threshold}%"
                 )
-        blocks = tuple(blocks_list)
-    else:
-        blocks = _page_text_blocks(
-            result.page_texts or ((result.text,) if result.text else ()),
-            parse_source="ocr",
-            confidence=result.mean_confidence,
-        )
+            page_reason = (
+                f"第 {_format_page_ranges(missing_pages, max_chars=90)} 页未提取到有效文本"
+            )
+        review_reason = "；".join(part for part in (review_reason, page_reason) if part)
+    ocr_page_set = set(selected)
+    confidence_by_page = dict(zip(selected, page_confidences))
+    blocks_list: list[DocumentBlock] = []
+    for index, page_text in enumerate(merged):
+        page_number = index + 1
+        if index in ocr_page_set:
+            if page_text.strip():
+                blocks_list.append(DocumentBlock(
+                    block_id=f"pdf-page-{page_number}",
+                    block_type="page_text",
+                    text=page_text,
+                    anchor=SourceAnchor(page_number=page_number),
+                    confidence=confidence_by_page[index],
+                    parse_source="ocr",
+                ))
+        else:
+            blocks_list.extend(
+                block for block in native_blocks
+                if block.anchor.page_number == page_number
+            )
     return DocumentParseResult(
         text=merged_text,
         source=source,
         ocr_confidence=result.mean_confidence,
-        requires_review=result.requires_review,
+        requires_review=result.requires_review or bool(missing_pages),
         review_reason=review_reason,
-        blocks=blocks,
+        blocks=tuple(blocks_list),
+        total_pages=page_count,
+        missing_pages=missing_pages,
     )
 
 

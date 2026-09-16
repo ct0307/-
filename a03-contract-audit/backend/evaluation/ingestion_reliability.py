@@ -20,7 +20,7 @@ from app.services.parser.elements import (
     ElementResult,
     extract_element_result,
 )
-from app.services.parser.extractor import extract_document
+from app.services.parser.extractor import extract_uploaded_document
 from evaluation.datasets.frozen_contracts_v3.cases import load_cases
 from evaluation.elements import evaluate_dataset
 
@@ -129,6 +129,21 @@ def evaluate_ingestion(
         failures.append("element_zero_field")
     if missing_evidence_count > 0:
         failures.append("element_evidence")
+    missing_pdf_page_count = 0
+    for item in valid_results:
+        missing_pages = set(item.get("missing_pages") or ())
+        total_pages = item.get("total_pages")
+        covered_pages = item.get("covered_pages")
+        if item.get("document_kind") == "pdf" and (
+            not isinstance(total_pages, int) or total_pages <= 0 or covered_pages is None
+        ):
+            missing_pdf_page_count += 1
+            continue
+        if isinstance(total_pages, int) and total_pages > 0 and covered_pages is not None:
+            missing_pages.update(set(range(1, total_pages + 1)) - set(covered_pages))
+        missing_pdf_page_count += len(missing_pages)
+    if missing_pdf_page_count:
+        failures.append("pdf_page_coverage")
 
     safe_elements = sanitize_element_report(element_report)
     metrics = {
@@ -139,6 +154,7 @@ def evaluate_ingestion(
             item.get("error_code") == "OCR_UNAVAILABLE" for item in valid_results
         ),
         "missing_evidence_count": missing_evidence_count,
+        "missing_pdf_page_count": missing_pdf_page_count,
         "element_macro_f1": overall_f1,
     }
     return IngestionReport(
@@ -216,7 +232,11 @@ def _expected_type(case: Any) -> str:
     return ""
 
 
-def _evidence_positions(result: ElementResult) -> tuple[dict[str, Any], int]:
+def _evidence_positions(
+    result: ElementResult,
+    *,
+    require_page: bool = False,
+) -> tuple[dict[str, Any], int]:
     fields: dict[str, Any] = {}
     missing = 0
     for field in ELEMENT_FIELDS:
@@ -224,6 +244,12 @@ def _evidence_positions(result: ElementResult) -> tuple[dict[str, Any], int]:
         present = bool(value) if not isinstance(value, list) else any(value)
         raw_evidence = result.evidence.get(field)
         evidence = raw_evidence if isinstance(raw_evidence, list) else [raw_evidence] if raw_evidence else []
+        valid_evidence = [
+            item for item in evidence
+            if isinstance(item, ElementEvidence)
+            and 0 <= item.start < item.end <= len(result.source_text)
+            and (not require_page or isinstance(item.page, int) and item.page > 0)
+        ]
         positions = [
             {
                 "page": item.page,
@@ -233,8 +259,7 @@ def _evidence_positions(result: ElementResult) -> tuple[dict[str, Any], int]:
                 "source": item.source,
                 "validation": item.validation,
             }
-            for item in evidence
-            if isinstance(item, ElementEvidence)
+            for item in valid_evidence
         ]
         if present and not positions:
             missing += 1
@@ -314,10 +339,13 @@ def evaluate_contract_set(
         gold_records.append(_gold_record(case, path))
         try:
             validate_upload(path.name, path.read_bytes())
-            parsed = extract_document(str(path))
+            parsed = extract_uploaded_document(path.name, path.read_bytes())
             elements = extract_element_result(parsed)
             predictions[case_id] = elements.values
-            evidence, missing = _evidence_positions(elements)
+            evidence, missing = _evidence_positions(
+                elements,
+                require_page=path.suffix.lower() == ".pdf",
+            )
             missing_evidence_count += missing
             suggestion: TypeSuggestion = classify_contract_type(
                 filename=path.name,
@@ -345,8 +373,15 @@ def evaluate_contract_set(
                 "case_id": case_id,
                 "status": "review_required" if requires_review else "parsed",
                 "error_code": None,
+                "document_kind": path.suffix.lower().lstrip("."),
                 "parse_source": parsed.source,
                 "ocr_confidence": parsed.ocr_confidence,
+                "total_pages": parsed.total_pages,
+                "missing_pages": list(parsed.missing_pages),
+                "covered_pages": sorted({
+                    block.anchor.page_number for block in parsed.blocks
+                    if block.anchor.page_number is not None
+                }),
                 "requires_review": requires_review,
                 "classification": {
                     "expected": expected,
@@ -363,8 +398,12 @@ def evaluate_contract_set(
                 "case_id": case_id,
                 "status": "failed",
                 "error_code": error_code,
+                "document_kind": path.suffix.lower().lstrip("."),
                 "parse_source": None,
                 "ocr_confidence": None,
+                "total_pages": None,
+                "missing_pages": [],
+                "covered_pages": [],
                 "requires_review": False,
                 "classification": {},
                 "elements": {},

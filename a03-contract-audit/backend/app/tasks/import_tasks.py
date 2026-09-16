@@ -47,7 +47,7 @@ def parse_import_item(item_id: int) -> dict:
             apply_parse_quality(item.contract, parsed)
             element_result = extract_element_result(parsed)
             elements = legacy_element_values(element_result.values, text=parsed.text)
-            evidence_payload = element_evidence_payload(element_result)
+            evidence_payload = element_evidence_payload(element_result, parsed=parsed)
             requires_review, review_reason = merge_element_review(parsed, element_result)
             item.contract.requires_review = requires_review
             item.contract.review_reason = review_reason
@@ -87,9 +87,20 @@ def parse_import_item(item_id: int) -> dict:
             item.error_message = None
         except Exception as exc:
             failure = parse_failure(exc)
+            db.rollback()
+            item = db.get(ImportBatchItem, item_id)
+            if item is None:
+                raise RuntimeError("导入项在失败处理期间不存在") from exc
             item.status = "failed"
             item.error_code = failure.code
             item.error_message = failure.message
+            if item.contract is not None:
+                item.contract.status = "failed"
+                item.contract.requires_review = False
+                item.contract.ocr_confidence = None
+                item.contract.review_reason = failure.message[:255]
+                item.contract.elements_json = "{}"
+                item.contract.element_evidence_json = "{}"
             log.error(
                 "import.parse_failed",
                 item_id=item.id,

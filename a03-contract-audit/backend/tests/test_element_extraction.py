@@ -95,6 +95,16 @@ def test_each_scalar_field_has_a_positive_rule_and_evidence(text, field, expecte
     _assert_evidence(result, field, page=1)
 
 
+def test_full_transaction_basis_outranks_subject_heading_fragment():
+    result = extract_element_result(_parsed(
+        "合同标的与范围\n"
+        "本合同“合同标的与范围”以约1200名员工补充医疗保障、理赔协助和健康咨询为交易基础。"
+    ))
+
+    assert result.values["subject"] == "约1200名员工补充医疗保障、理赔协助和健康咨询"
+    _assert_evidence(result, "subject", page=1)
+
+
 def test_party_role_does_not_capture_a_cross_line_legal_representative_label():
     result = extract_element_result(_parsed("甲方：\n法定代表人：张三\n乙方：乙公司"))
 
@@ -214,6 +224,53 @@ def test_does_not_treat_delivery_or_warranty_period_as_contract_duration():
 
     assert result.values["duration"] is None
     assert "duration" not in result.evidence
+
+
+def test_delivery_quality_list_expiry_does_not_override_contract_term():
+    result = extract_element_result(_parsed(
+        "验收应核对批号、有效期、储运温度和合格证明。\n"
+        "“期限与解除”适用期间为2026年10月1日至2027年9月30日。"
+    ))
+
+    assert result.values["duration"] == "2026年10月1日至2027年9月30日"
+    _assert_evidence(result, "duration", page=1)
+
+
+def test_table_expiry_header_does_not_treat_following_product_code_as_duration():
+    result = extract_element_result(_parsed(
+        "产品编码\n型号\n经销价\n建议零售价\n有效期\n"
+        "F3-049-PRO-01\nSL-A100型\n人民币68,000元\n2026年10月1日至12月31日"
+    ))
+
+    assert result.values["duration"] is None
+    assert "duration" not in result.evidence
+
+
+def test_payment_schedule_excludes_commercial_conditions_after_reconciliation_heading():
+    result = extract_element_result(_parsed(
+        "付款按“课程大纲确认30%；完成全部授课50%；总结报告确认20%”执行。\n"
+        "结算方式\n"
+        "“结算方式”适用以下商业条件：按班次固定服务费，场地由委托单位提供；"
+        "合同金额或结算口径为人民币360,000元。"
+    ))
+
+    assert result.values["payment_terms"] == [
+        "课程大纲确认30%", "完成全部授课50%", "总结报告确认20%"
+    ]
+
+
+def test_ocr_linebreak_between_schedule_and_payment_application_keeps_nodes():
+    result = extract_element_result(_parsed(
+        "结算与付款\n"
+        "“结算与付款”依次按以下节点办理：预付款10%；月度进度款至已完产值80%；"
+        "竣工验收后付至95%；质保金5%。\n"
+        "付款申请应列明对应批次。"
+    ))
+
+    assert result.values["payment_terms"] == [
+        "预付款10%", "月度进度款至已完产值80%", "竣工验收后付至95%", "质保金5%"
+    ]
+    _assert_evidence(result, "payment_terms", page=1)
 
 
 def test_mixed_contract_duration_formats_are_collected_as_ambiguous_candidates():
@@ -476,6 +533,16 @@ def test_no_fixed_total_suppresses_lower_priority_fee_candidates():
     assert result.values["amount"] is None
     assert "amount" not in result.evidence
     assert "amount" not in result.review_fields
+
+
+def test_order_quantity_pricing_basis_without_fixed_total_is_not_amount():
+    result = extract_element_result(_parsed(
+        "合同金额或结算口径为据有效订单和验收数量\n结算。"
+        "付款按“收到发票后支付”执行。"
+    ))
+
+    assert result.values["amount"] is None
+    assert "amount" not in result.evidence
 
 
 def test_no_fixed_total_does_not_suppress_later_explicit_contract_amount():

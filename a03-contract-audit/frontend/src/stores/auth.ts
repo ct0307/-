@@ -4,18 +4,25 @@ import { login as loginApi } from '@/api/contract'
 import { useAuditSessionStore } from '@/stores/audit-session'
 import { useBatchStore } from '@/stores/batch'
 import { useImportInboxStore } from '@/stores/import-inbox'
+import { useNotifyStore } from '@/stores/notify'
+import { useRectifyStore } from '@/stores/rectify'
+import { clearSessionStorage, SESSION_KEYS } from '@/utils/session'
 
 export const useAuthStore = defineStore('auth', () => {
-  const token = ref<string>(localStorage.getItem('token') || '')
-  const role = ref<string>(localStorage.getItem('role') || '')
-  const username = ref<string>(localStorage.getItem('username') || '')
-  const department = ref<string>(localStorage.getItem('department') || '')
-  const authorizedDepartments = ref<string[]>(JSON.parse(localStorage.getItem('authorized_departments') || '[]'))
+  const token = ref<string>(localStorage.getItem(SESSION_KEYS.token) || '')
+  const role = ref<string>(localStorage.getItem(SESSION_KEYS.role) || '')
+  const username = ref<string>(localStorage.getItem(SESSION_KEYS.username) || '')
+  const department = ref<string>(localStorage.getItem(SESSION_KEYS.department) || '')
+  const authorizedDepartments = ref<string[]>(
+    JSON.parse(localStorage.getItem(SESSION_KEYS.authorizedDepartments) || '[]'),
+  )
 
   function resetUserWork() {
     useAuditSessionStore().reset()
     useImportInboxStore().reset()
     useBatchStore().reset()
+    useRectifyStore().reset()
+    useNotifyStore().reset()
   }
 
   async function login(user: string, password: string) {
@@ -26,11 +33,11 @@ export const useAuthStore = defineStore('auth', () => {
     username.value = res.username
     department.value = res.department || ''
     authorizedDepartments.value = res.authorized_departments || [res.department].filter(Boolean)
-    localStorage.setItem('token', res.access_token)
-    localStorage.setItem('role', res.role)
-    localStorage.setItem('username', res.username)
-    localStorage.setItem('department', res.department || '')
-    localStorage.setItem('authorized_departments', JSON.stringify(authorizedDepartments.value))
+    localStorage.setItem(SESSION_KEYS.token, res.access_token)
+    localStorage.setItem(SESSION_KEYS.role, res.role)
+    localStorage.setItem(SESSION_KEYS.username, res.username)
+    localStorage.setItem(SESSION_KEYS.department, res.department || '')
+    localStorage.setItem(SESSION_KEYS.authorizedDepartments, JSON.stringify(authorizedDepartments.value))
   }
 
   function logout() {
@@ -40,11 +47,7 @@ export const useAuthStore = defineStore('auth', () => {
     username.value = ''
     department.value = ''
     authorizedDepartments.value = []
-    localStorage.removeItem('token')
-    localStorage.removeItem('role')
-    localStorage.removeItem('username')
-    localStorage.removeItem('department')
-    localStorage.removeItem('authorized_departments')
+    clearSessionStorage()
   }
 
   function isAuthenticated() {

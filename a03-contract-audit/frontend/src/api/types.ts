@@ -31,6 +31,7 @@ export type AuditStatus = Exclude<AuditItemStatus, 'failed'> | 'audit_failed'
 
 export type ContractStatus =
   | 'uploaded'
+  | 'failed'
   | 'parsed'
   | 'reviewing'
   | 'validating'
@@ -67,6 +68,8 @@ export interface ParseResult extends ContractQualityFields {
   contract_id: number
   elements: Record<string, unknown>
   text_length: number
+  total_pages?: number | null
+  missing_pages?: number[]
 }
 
 // 交叉验证 / 冲突消解项（后端审查态动态结果，不落库，随 audit 响应返回）

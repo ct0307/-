@@ -54,6 +54,7 @@ const statusType: Record<string, 'success' | 'warning' | 'info' | 'danger'> = {
   待整改: 'warning',
   已整改: 'info',
   待人工复核: 'danger',
+  解析失败: 'danger',
 }
 
 // ── 点击行查看风险详情 ──
@@ -107,6 +108,7 @@ function goAudit() { router.push('/audit') }
         <el-select v-model="statusFilter" style="width: 140px" @change="page = 1">
           <el-option label="全部合规状态" value="全部" />
           <el-option label="待人工复核" value="待人工复核" />
+          <el-option label="解析失败" value="解析失败" />
           <el-option label="待整改" value="待整改" />
           <el-option label="已整改" value="已整改" />
           <el-option label="合规" value="合规" />

@@ -36,6 +36,7 @@ class OCRResult:
     mean_confidence: float
     page_texts: tuple[str, ...] = ()
     requires_review: bool = False
+    page_confidences: tuple[float, ...] = ()
 
 
 _WORKER_RESULT_PREFIX = b"A03_OCR_RESULT_V1="
@@ -216,6 +217,9 @@ def _parse_worker_result(stdout: bytes) -> OCRResult:
             mean_confidence=float(result["mean_confidence"]),
             page_texts=tuple(str(value) for value in result.get("page_texts", [])),
             requires_review=bool(result["requires_review"]),
+            page_confidences=tuple(
+                float(value) for value in result.get("page_confidences", [])
+            ),
         )
     except OCRError:
         raise
@@ -286,6 +290,7 @@ def _ocr_pdf_bytes_in_process(
             not combined
             or any(confidence < min_confidence for confidence in confidences)
         ),
+        page_confidences=tuple(confidences),
     )
 
 
