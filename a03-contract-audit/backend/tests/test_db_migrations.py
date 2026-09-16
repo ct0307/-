@@ -56,6 +56,21 @@ def _load_profile_migration():
     return module
 
 
+def _load_performance_cache_migration():
+    path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "20260916_02_audit_performance_caches.py"
+    )
+    assert path.is_file(), "缺少审查性能缓存迁移"
+    spec = importlib.util.spec_from_file_location("performance_cache_migration", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _lookup_table(metadata: MetaData) -> Table:
     return Table(
         "lookup_items",
@@ -147,3 +162,43 @@ def test_sqlite_dev_seed_is_idempotent(monkeypatch):
         profiles = db.query(ContractTypeProfile).all()
         assert {item.value for item in lookups} == set(CURRENT_CONTRACT_TYPES)
         assert len(profiles) == len(CURRENT_CONTRACT_TYPES)
+
+
+def test_performance_cache_migration_round_trip():
+    engine = create_engine("sqlite:///:memory:")
+    metadata = MetaData()
+    Table("contracts", metadata, Column("id", Integer, primary_key=True))
+    metadata.create_all(engine)
+    migration = _load_performance_cache_migration()
+
+    assert migration.revision == "20260916_02"
+    assert migration.down_revision == "20260916_01"
+    with engine.begin() as connection:
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        inspector = inspect(connection)
+        assert inspector.has_table("contract_parse_caches")
+        columns = {column["name"] for column in inspector.get_columns(
+            "contract_parse_caches"
+        )}
+        assert columns == {
+            "id",
+            "contract_id",
+            "content_sha256",
+            "parser_signature",
+            "payload",
+            "created_at",
+            "updated_at",
+        }
+        unique_constraints = inspector.get_unique_constraints(
+            "contract_parse_caches"
+        )
+        indexes = inspector.get_indexes("contract_parse_caches")
+        assert any(
+            constraint["column_names"] == ["contract_id"]
+            for constraint in unique_constraints
+        )
+        assert any(index["column_names"] == ["contract_id"] for index in indexes)
+
+        migration.downgrade()
+        assert not inspect(connection).has_table("contract_parse_caches")

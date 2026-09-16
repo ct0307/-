@@ -11,6 +11,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -78,6 +79,31 @@ class Contract(Base):
     clauses: Mapped[list["ContractClause"]] = relationship(
         back_populates="contract", cascade="all, delete-orphan"
     )
+    parse_cache: Mapped["ContractParseCache | None"] = relationship(
+        back_populates="contract", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class ContractParseCache(Base):
+    """按合同、内容哈希和解析器签名隔离的加密解析结果。"""
+
+    __tablename__ = "contract_parse_caches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("contracts.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    parser_signature: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    contract: Mapped["Contract"] = relationship(back_populates="parse_cache")
 
 
 class ContractClause(Base):
