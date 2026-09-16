@@ -118,6 +118,8 @@ def test_production_startup_never_seeds_demo_accounts(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(init_db_module.settings, "STORAGE_DIR", tmp_path.as_posix())
     monkeypatch.setattr(init_db_module.Base.metadata, "create_all", lambda **_kwargs: None)
     monkeypatch.setattr(init_db_module, "_migrate_dev_columns", lambda: None)
+    monkeypatch.setattr(init_db_module, "_seed_knowledge_index_state", lambda: None)
+    monkeypatch.setattr(init_db_module, "_seed_contract_type_profiles", lambda: None)
     monkeypatch.setattr(
         init_db_module,
         "_seed_users",
