@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.config import settings
 from app.services.parser.extractor import extract_document
 from app.services.parser.text_decoder import TextDecodeError, decode_text_bytes
 
@@ -40,7 +41,8 @@ def test_invalid_or_empty_text_uses_stable_error_codes(content: bytes, error_cod
     assert raised.value.code == error_code
 
 
-def test_txt_extraction_uses_the_shared_strict_decoder(tmp_path):
+def test_txt_extraction_uses_the_shared_strict_decoder(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "FILE_ENCRYPT_KEY", "")
     source = "合同类型：采购合同\n甲方向乙方采购设备。"
     file_path = tmp_path / "contract.txt"
     file_path.write_bytes(source.encode("gb18030"))
