@@ -20,6 +20,21 @@ export interface LookupItem {
   sort_order: number
 }
 
+export interface ContractTypeProfile {
+  lookup_item_id: number
+  value: string
+  aliases: string[]
+  positive_signals: string[]
+  negative_signals: string[]
+  enabled: boolean
+  version: number
+}
+
+export type ContractTypeProfileUpdate = Omit<
+  ContractTypeProfile,
+  'lookup_item_id' | 'value'
+>
+
 export interface DepartmentScopeUser {
   id: number
   username: string
@@ -85,4 +100,15 @@ export function createLookup(category: string, value: string): Promise<LookupIte
 
 export function deleteLookup(id: number): Promise<void> {
   return client.delete(`/admin/lookups/${id}`)
+}
+
+export function getContractTypeProfiles(): Promise<ContractTypeProfile[]> {
+  return client.get('/admin/lookups/contract_type/profiles')
+}
+
+export function updateContractTypeProfile(
+  id: number,
+  body: ContractTypeProfileUpdate,
+): Promise<ContractTypeProfile> {
+  return client.put(`/admin/lookups/${id}/profile`, body)
 }
