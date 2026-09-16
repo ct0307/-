@@ -61,6 +61,12 @@ class _PDFTextCandidate:
     page_texts: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _DocxImageMetrics:
+    image_count: int
+    meaningful_image_count: int
+
+
 def _read_decrypted(file_path: str) -> bytes:
     """读取文件内容并按需解密。密钥未设置则返回原始字节（明文模式，向后兼容）。"""
     with open(file_path, "rb") as f:
@@ -495,7 +501,42 @@ def _extract_docx_result(data: bytes) -> DocumentParseResult:
                     anchor=SourceAnchor(table_index=current_table, row_index=row_index),
                     cells=cells,
                 ))
-    return DocumentParseResult("\n".join(parts).strip(), "native", blocks=tuple(blocks))
+    text = "\n".join(parts).strip()
+    image_metrics = _docx_image_metrics(doc)
+    text_length = _non_whitespace_length(text)
+    requires_review = False
+    review_reason = None
+    if text_length < 200 and image_metrics.meaningful_image_count > 0:
+        requires_review = True
+        review_reason = "DOCX 疑似图片型文档，未提取到足够正文"
+    elif text_length == 0:
+        requires_review = True
+        review_reason = "DOCX 正文为空"
+
+    return DocumentParseResult(
+        text,
+        "native",
+        requires_review=requires_review,
+        review_reason=review_reason,
+        blocks=tuple(blocks),
+    )
+
+
+def _docx_image_metrics(document) -> _DocxImageMetrics:
+    from docx.image.image import Image
+
+    image_parts = tuple(document.part.package.image_parts)
+    meaningful_image_count = 0
+    for part in image_parts:
+        image = Image.from_blob(part.blob)
+        width = int(image.px_width or 0)
+        height = int(image.px_height or 0)
+        if width * height >= 1_500_000 and min(width, height) >= 900:
+            meaningful_image_count += 1
+    return _DocxImageMetrics(
+        image_count=len(image_parts),
+        meaningful_image_count=meaningful_image_count,
+    )
 
 
 def _extract_docx_bytes(data: bytes) -> str:

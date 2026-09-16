@@ -1,5 +1,7 @@
 """导入解析任务测试。"""
 
+from io import BytesIO
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,21 @@ def _db():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     return engine
+
+
+def _image_only_docx_bytes() -> bytes:
+    from docx import Document
+    from docx.shared import Inches
+    from PIL import Image
+
+    image_stream = BytesIO()
+    Image.new("RGB", (1600, 2200), "white").save(image_stream, format="PNG")
+    image_stream.seek(0)
+    document = Document()
+    document.add_picture(image_stream, width=Inches(6))
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
 
 
 def test_parse_import_item_persists_type_suggestion(monkeypatch, tmp_path):
@@ -93,6 +110,63 @@ def test_parse_import_item_passes_classification_and_parse_review_gates(monkeypa
     assert result["status"] == "awaiting_confirmation"
     assert captured["auto_ready_eligible"] is True
     assert captured["requires_review"] is True
+
+
+def test_parse_import_item_keeps_image_only_docx_awaiting_confirmation(
+    monkeypatch,
+    tmp_path,
+):
+    engine = _db()
+    with Session(engine) as db:
+        user = User(
+            username="image-review-legal",
+            password_hash="x",
+            role="legal",
+            department="法务部",
+        )
+        db.add(user)
+        db.flush()
+        path = tmp_path / "image-only.docx"
+        path.write_bytes(encrypt_bytes(_image_only_docx_bytes()))
+        contract = Contract(
+            filename="采购合同.docx",
+            storage_path=str(path),
+            uploaded_by=user.id,
+            department=user.department,
+        )
+        batch = ImportBatch(
+            owner_id=user.id,
+            idempotency_key="task-image-docx-review",
+            total=1,
+        )
+        batch.items.append(
+            ImportBatchItem(filename=contract.filename, contract=contract, status="queued")
+        )
+        db.add(batch)
+        db.add(LookupItem(category="contract_type", value="采购合同"))
+        db.commit()
+        item_id = batch.items[0].id
+
+    monkeypatch.setattr(import_tasks, "SessionLocal", lambda: Session(engine))
+    monkeypatch.setattr(
+        import_tasks,
+        "classify_contract_type",
+        lambda **_: TypeSuggestion(
+            "采购合同",
+            0.99,
+            ["filename:采购合同"],
+            auto_ready_eligible=True,
+        ),
+    )
+
+    result = import_tasks.parse_import_item.run(item_id)
+
+    with Session(engine) as db:
+        item = db.get(ImportBatchItem, item_id)
+        assert result["status"] == "awaiting_confirmation"
+        assert item.status == "awaiting_confirmation"
+        assert item.contract.requires_review is True
+        assert item.contract.review_reason == "DOCX 疑似图片型文档，未提取到足够正文"
 
 
 def test_parse_import_item_hides_parser_failure_details(monkeypatch, tmp_path):
