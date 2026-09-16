@@ -235,6 +235,40 @@ def test_five_findings_use_one_batch_enrichment_call(monkeypatch):
     assert set(batch_prompt) == {"window_text", "items"}
 
 
+def test_batch_enrichment_matches_serial_candidates_with_fewer_calls(monkeypatch):
+    from app.services.audit.review_pipeline import WindowReviewer
+
+    findings = [_finding_payload(index) for index in range(1, 6)]
+    discovery = LLMResponse(
+        text=json.dumps({"risks": findings, "has_more": False}, ensure_ascii=False),
+        model="model-a",
+    )
+    details = [
+        LLMResponse(
+            text=json.dumps({
+                "reason": f"{finding['category']}需要核验。",
+                "suggestion": f"补充{finding['category']}约定。",
+            }, ensure_ascii=False),
+            model="model-a",
+        )
+        for finding in findings
+    ]
+    serial_adapter = FakeAdapter([discovery, *details])
+    batch_adapter = FakeAdapter([
+        discovery,
+        _batch_enrichment_response("window-root", findings),
+    ])
+
+    monkeypatch.setattr(settings, "AUDIT_BATCH_ENRICHMENT_ENABLED", False)
+    serial = WindowReviewer(serial_adapter).review(_two_stage_batch_request())
+    monkeypatch.setattr(settings, "AUDIT_BATCH_ENRICHMENT_ENABLED", True)
+    batch = WindowReviewer(batch_adapter).review(_two_stage_batch_request())
+
+    assert batch.candidates == serial.candidates
+    assert len(serial_adapter.calls) == 6
+    assert len(batch_adapter.calls) == 2
+
+
 def test_six_findings_split_into_five_plus_one_batch_enrichment(monkeypatch):
     from app.services.audit.review_pipeline import WindowReviewer
 

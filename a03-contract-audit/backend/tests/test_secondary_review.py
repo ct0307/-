@@ -101,6 +101,32 @@ def test_five_secondary_candidates_use_one_batch_model_call(monkeypatch):
     assert [item["candidate"]["claim_id"] for item in prompt["items"]] == claim_ids
 
 
+def test_batch_secondary_matches_serial_claims_and_evidence_with_fewer_calls(
+    monkeypatch,
+):
+    claim_ids = [f"C-AB-TEST-{index:02d}" for index in range(5)]
+    risks = [_risk(claim_id, level="high") for claim_id in claim_ids]
+    serial_adapter = QueueAdapter([_decision(claim_id) for claim_id in claim_ids])
+    batch_adapter = QueueAdapter([
+        _batch_decisions(*((claim_id, "confirm", {}) for claim_id in claim_ids))
+    ])
+
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", False)
+    serial = SecondaryReviewer(serial_adapter).review(
+        risks=risks,
+        conflict_claim_ids=set(),
+    )
+    monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
+    batch = SecondaryReviewer(batch_adapter).review(
+        risks=risks,
+        conflict_claim_ids=set(),
+    )
+
+    assert batch.by_claim == serial.by_claim
+    assert len(serial_adapter.calls) == 5
+    assert len(batch_adapter.calls) == 1
+
+
 def test_six_secondary_candidates_are_chunked_five_plus_one(monkeypatch):
     monkeypatch.setattr(settings, "AUDIT_BATCH_SECONDARY_ENABLED", True)
     claim_ids = [f"C-CHUNK-{index:02d}" for index in range(6)]
