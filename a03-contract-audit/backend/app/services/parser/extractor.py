@@ -17,6 +17,7 @@ from typing import Literal
 from app.core.logging import get_logger
 from app.core.config import settings
 from app.services.parser.ocr import OCRResult, ocr_pdf_bytes
+from app.services.parser.text_decoder import decode_text_bytes
 
 log = get_logger("parser")
 
@@ -77,7 +78,7 @@ def extract_document(file_path: str) -> DocumentParseResult:
     if lower.endswith(".docx"):
         return _extract_docx_result(data)
     if lower.endswith(".txt"):
-        return DocumentParseResult(data.decode("utf-8", errors="ignore"), "native")
+        return DocumentParseResult(decode_text_bytes(data).text, "native")
     raise ValueError(f"不支持的文件类型: {file_path}")
 
 
