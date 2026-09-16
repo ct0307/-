@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     LLM_MAX_OUTPUT_TOKENS: int = 3200
     # 整体审查软时限必须短于任务 30 分钟租约，防止恢复任务与旧 worker 重叠。
     AUDIT_DEADLINE_SECONDS: int = Field(default=1500, gt=0, lt=1800)
+    AUDIT_BATCH_SECONDARY_ENABLED: bool = False
 
     # Embedding 配置（RAG 向量化用）
     # EMBED_BACKEND=local（默认）：sentence-transformers 本地模型，合同数据不出企业
