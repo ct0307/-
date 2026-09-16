@@ -1,10 +1,15 @@
 """合同类型分类器的确定性行为。"""
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
+from app.db.session import Base
+from app.models.models import ContractTypeProfile, LookupItem
 from app.services.imports import service as import_service
-from app.services.imports.classifier import classify_contract_type
+from app.services.imports.classifier import classify_contract_type as _classify_contract_type
 from app.services.imports.service import target_status
+from app.services.imports.type_profiles import TypeProfile, load_type_profiles
 
 
 TYPES = ["采购合同", "软件开发外包合同", "劳动合同", "租赁合同", "保密协议"]
@@ -13,6 +18,131 @@ ALL_TYPES = [
     "租赁合同", "保密协议", "合作协议", "服务协议", "框架协议",
     "技术开发合同", "合作合同", "服务合同", "劳务合同",
 ]
+
+DEFAULT_PROFILES = {
+    "软件开发外包合同": TypeProfile(
+        aliases=("软件开发", "软件外包", "系统开发"),
+        positive_signals=("软件开发", "系统开发", "源代码", "软件外包"),
+    ),
+    "技术服务合同": TypeProfile(
+        aliases=("技术服务", "技术支持", "技术维护"),
+        positive_signals=("技术服务", "技术支持", "技术维护"),
+    ),
+    "采购合同": TypeProfile(
+        aliases=("采购", "购置"),
+        positive_signals=("采购", "购置", "供货", "设备"),
+    ),
+    "销售合同": TypeProfile(
+        aliases=("销售", "出售"),
+        positive_signals=("销售", "出售", "售卖"),
+    ),
+    "劳动合同": TypeProfile(
+        aliases=("劳动",),
+        positive_signals=("劳动关系", "试用期", "工资"),
+    ),
+    "租赁合同": TypeProfile(
+        aliases=("租赁", "承租", "出租"),
+        positive_signals=("租赁", "承租", "出租"),
+    ),
+    "保密协议": TypeProfile(
+        aliases=("保密协议", "保密", "商业秘密"),
+        positive_signals=("专项保密协议",),
+    ),
+    "合作协议": TypeProfile(
+        aliases=("合作协议",),
+        positive_signals=("合作项目",),
+    ),
+    "服务协议": TypeProfile(
+        aliases=("服务协议",),
+        positive_signals=("提供服务",),
+    ),
+    "框架协议": TypeProfile(
+        aliases=("框架",),
+        positive_signals=("框架合作", "框架采购"),
+    ),
+    "技术开发合同": TypeProfile(
+        aliases=("技术开发", "研发"),
+        positive_signals=("技术开发", "研发", "技术成果", "软件开发", "系统开发", "源代码"),
+    ),
+    "合作合同": TypeProfile(
+        aliases=("合作合同",),
+        positive_signals=("合作项目",),
+    ),
+    "服务合同": TypeProfile(
+        aliases=("服务合同",),
+        positive_signals=("提供服务",),
+    ),
+    "劳务合同": TypeProfile(
+        aliases=("劳务",),
+        positive_signals=("劳务", "劳务报酬", "劳务人员"),
+    ),
+}
+
+
+def classify_contract_type(*, profiles=None, **kwargs):
+    return _classify_contract_type(
+        **kwargs,
+        profiles=DEFAULT_PROFILES if profiles is None else profiles,
+    )
+
+
+def test_new_type_is_reachable_from_database_profile():
+    profiles = {
+        "居间合同": TypeProfile(
+            aliases=("居间协议",),
+            positive_signals=("居间服务", "委托方"),
+        )
+    }
+
+    result = classify_contract_type(
+        filename="文件.docx",
+        text="受托方提供居间服务",
+        available_types=["居间合同"],
+        profiles=profiles,
+    )
+
+    assert result.suggested_type == "居间合同"
+
+
+def test_type_without_profile_does_not_gain_semantic_candidate():
+    result = classify_contract_type(
+        filename="文件.docx",
+        text="普通描述",
+        available_types=["新类型"],
+        profiles={},
+    )
+
+    assert result.suggested_type == ""
+
+
+def test_load_type_profiles_only_returns_enabled_available_contract_types():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        enabled = LookupItem(category="contract_type", value="采购合同", sort_order=0)
+        enabled.contract_type_profile = ContractTypeProfile(
+            aliases_json='[" 采购 ", "采购", ""]',
+            positive_signals_json='["供货"]',
+            negative_signals_json="[]",
+        )
+        disabled = LookupItem(category="contract_type", value="销售合同", sort_order=1)
+        disabled.contract_type_profile = ContractTypeProfile(
+            positive_signals_json='["销售"]',
+            enabled=False,
+        )
+        department = LookupItem(category="department", value="采购合同", sort_order=0)
+        department.contract_type_profile = ContractTypeProfile(
+            positive_signals_json='["不应加载"]',
+        )
+        db.add_all((enabled, disabled, department))
+        db.commit()
+
+        profiles = load_type_profiles(db, ["采购合同", "销售合同"])
+
+        assert tuple(profiles) == ("采购合同",)
+        assert profiles["采购合同"].aliases == ("采购",)
+        with pytest.raises(TypeError):
+            profiles["采购合同"] = TypeProfile()
 
 
 def test_classifies_purchase_contract_with_high_confidence():
@@ -144,6 +274,12 @@ def test_custom_purchase_type_is_reached_by_controlled_trade_alias():
     result = classify_contract_type(
         filename="scan.pdf", text="双方采购设备并约定交付。",
         available_types=["设备采购合同"],
+        profiles={
+            "设备采购合同": TypeProfile(
+                aliases=("采购", "购置"),
+                positive_signals=("采购", "设备"),
+            )
+        },
     )
 
     assert result.suggested_type == "设备采购合同"

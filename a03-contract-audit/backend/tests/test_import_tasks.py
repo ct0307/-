@@ -7,7 +7,14 @@ from sqlalchemy.orm import Session
 
 from app.core.crypto import encrypt_bytes
 from app.db.session import Base
-from app.models.models import Contract, ImportBatch, ImportBatchItem, LookupItem, User
+from app.models.models import (
+    Contract,
+    ContractTypeProfile,
+    ImportBatch,
+    ImportBatchItem,
+    LookupItem,
+    User,
+)
 from app.services.parser.ocr import OCRUnavailable
 from app.services.imports.classifier import TypeSuggestion
 from app.services.parser.elements import ElementResult
@@ -143,7 +150,13 @@ def test_parse_import_item_keeps_image_only_docx_awaiting_confirmation(
             ImportBatchItem(filename=contract.filename, contract=contract, status="queued")
         )
         db.add(batch)
-        db.add(LookupItem(category="contract_type", value="采购合同"))
+        lookup = LookupItem(category="contract_type", value="采购合同")
+        lookup.contract_type_profile = ContractTypeProfile(
+            aliases_json='["采购", "购置"]',
+            positive_signals_json='["采购", "供货", "设备"]',
+            negative_signals_json="[]",
+        )
+        db.add(lookup)
         db.commit()
         item_id = batch.items[0].id
 

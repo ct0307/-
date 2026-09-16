@@ -11,6 +11,7 @@ from app.services.audit.runner import apply_parse_quality
 from app.services.imports.classifier import classify_contract_type
 from app.services.imports.errors import parse_failure
 from app.services.imports.service import summarize_import, target_status
+from app.services.imports.type_profiles import load_type_profiles
 from app.services.parser.elements import (
     element_evidence_payload,
     extract_element_result,
@@ -62,6 +63,7 @@ def parse_import_item(item_id: int) -> dict:
                 filename=item.filename,
                 text=parsed.text,
                 available_types=available,
+                profiles=load_type_profiles(db, available),
             )
             item.contract.elements_json = json.dumps(elements, ensure_ascii=False)
             item.contract.element_evidence_json = json.dumps(

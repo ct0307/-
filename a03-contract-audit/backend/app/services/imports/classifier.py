@@ -1,8 +1,11 @@
 """基于本地规则的合同类型初筛。"""
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from app.services.imports.type_profiles import TypeProfile
 
 
 @dataclass(frozen=True)
@@ -20,41 +23,6 @@ class TypeSuggestion:
     candidates: tuple[TypeCandidate, ...] = ()
     auto_ready_eligible: bool = False
 
-
-# 仅列主交易行为；保密、违约和争议条款不能作为其他合同的主交易证据。
-_TRADE_SIGNALS: dict[str, tuple[str, ...]] = {
-    "软件开发外包合同": ("软件开发", "系统开发", "源代码", "软件外包"),
-    "技术服务合同": ("技术服务", "技术支持", "技术维护"),
-    "采购合同": ("采购", "购置", "供货", "设备"),
-    "销售合同": ("销售", "出售", "售卖"),
-    "劳动合同": ("劳动关系", "试用期", "工资"),
-    "租赁合同": ("租赁", "承租", "出租"),
-    "保密协议": ("专项保密协议",),
-    "合作协议": ("合作项目",),
-    "服务协议": ("提供服务",),
-    "框架协议": ("框架合作", "框架采购"),
-    "技术开发合同": ("技术开发", "研发", "技术成果"),
-    "合作合同": ("合作项目",),
-    "服务合同": ("提供服务",),
-    "劳务合同": ("劳务", "劳务报酬", "劳务人员"),
-}
-
-_TYPE_FAMILY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("软件开发外包合同", ("软件开发", "软件外包", "系统开发")),
-    ("技术服务合同", ("技术服务", "技术支持", "技术维护")),
-    ("技术开发合同", ("技术开发", "研发")),
-    ("采购合同", ("采购", "购置")),
-    ("销售合同", ("销售", "出售")),
-    ("劳动合同", ("劳动",)),
-    ("劳务合同", ("劳务",)),
-    ("租赁合同", ("租赁", "承租", "出租")),
-    ("框架协议", ("框架",)),
-    ("合作协议", ("合作协议",)),
-    ("合作合同", ("合作合同",)),
-    ("服务协议", ("服务协议",)),
-    ("服务合同", ("服务合同",)),
-    ("保密协议", ("保密协议",)),
-)
 
 _MATERIAL_SEMANTICS = re.compile(
     r"审核|审查|评审|说明|报告|模板|范本|复核|选用|记录|意见|参考|样本|材料|清单"
@@ -81,19 +49,6 @@ def _is_trusted_title_prefix(prefix: str) -> bool:
     ))
 
 
-def _family_for_type(contract_type: str) -> str | None:
-    if contract_type in _TRADE_SIGNALS:
-        return contract_type
-    return next(
-        (
-            family
-            for family, aliases in _TYPE_FAMILY_ALIASES
-            if any(alias in contract_type for alias in aliases)
-        ),
-        None,
-    )
-
-
 def _is_contract_title(line: str, available_types: list[str]) -> bool:
     normalized = "".join(line.lower().split())
     if (
@@ -117,6 +72,7 @@ def classify_contract_type(
     filename: str,
     text: str,
     available_types: list[str],
+    profiles: Mapping[str, TypeProfile],
 ) -> TypeSuggestion:
     """在可用类型中排序候选，并仅把主交易证据标为自动就绪资格。"""
 
@@ -139,6 +95,10 @@ def classify_contract_type(
     material_name = bool(_MATERIAL_SEMANTICS.search(name))
     material_title = bool(_MATERIAL_SEMANTICS.search(first_line))
     trusted_title = title if title_is_contract_type else ""
+    material_name = material_name or any(marker in name for marker in title_markers)
+    material_title = material_title or any(
+        marker in first_line for marker in title_markers
+    )
     for source in (trusted_name, trusted_title):
         matches = [value for value in types if value.lower() in source]
         # 同一标题中较长的类型优先，避免“技术服务合同”同时命中“服务合同”。
@@ -157,10 +117,10 @@ def classify_contract_type(
 
     # 文件名中的受控交易别名可以产生建议，但不足以单独自动放行。
     for value in types:
-        family = _family_for_type(value)
-        if family and scores[value] == 0:
+        profile = profiles.get(value)
+        if profile and scores[value] == 0 and not trusted_name:
             name_hits = [
-                keyword for keyword in _TRADE_SIGNALS[family]
+                keyword for keyword in profile.aliases
                 if keyword.lower() in name
             ]
             if name_hits and not material_name:
@@ -168,24 +128,54 @@ def classify_contract_type(
                 evidence[value].extend(name_hits)
                 headline_scored.add(value)
 
+    semantic_heading = heading
+    if trusted_title:
+        semantic_heading = semantic_heading.replace(first_line, "", 1)
+
     for value in types:
-        family = _family_for_type(value)
-        keywords = _TRADE_SIGNALS.get(family, ())
-        hits = [keyword for keyword in keywords if keyword.lower() in heading or keyword.lower() in body]
-        if not hits and value == "技术开发合同" and "软件开发外包合同" not in types:
-            hits = [
-                keyword for keyword in _TRADE_SIGNALS["软件开发外包合同"]
-                if keyword in heading or keyword in body
-            ]
+        profile = profiles.get(value, TypeProfile())
+        hits = [
+            keyword
+            for keyword in profile.positive_signals
+            if keyword.lower() in semantic_heading or keyword.lower() in body
+        ]
         if hits:
             if value not in headline_scored:
-                scores[value] += 3 if any(keyword.lower() in heading for keyword in hits) else 1
+                scores[value] += (
+                    3
+                    if any(keyword.lower() in semantic_heading for keyword in hits)
+                    else 1
+                )
             evidence[value].extend(hits)
             primary.add(value)
-        elif value == "保密协议" and any(word in heading or word in body for word in ("保密", "商业秘密")):
-            if value not in headline_scored:
+        else:
+            alias_hits = [
+                alias
+                for alias in profile.aliases
+                if alias.lower() in semantic_heading or alias.lower() in body
+            ]
+            if alias_hits and value not in headline_scored:
                 scores[value] += 0.25
-            evidence[value].append("保密")
+                evidence[value].extend(alias_hits)
+
+        negative_hits = [
+            signal
+            for signal in profile.negative_signals
+            if signal.lower() in semantic_heading or signal.lower() in body
+        ]
+        if negative_hits:
+            if value not in headline_scored:
+                scores[value] -= (
+                    3
+                    if any(
+                        signal.lower() in semantic_heading
+                        for signal in negative_hits
+                    )
+                    else 1
+                )
+            evidence[value].extend(
+                f"negative:{signal}" for signal in negative_hits
+            )
 
     ranked = tuple(
         TypeCandidate(value, scores[value], tuple(dict.fromkeys(evidence[value])))
