@@ -134,6 +134,42 @@ test('restores authoritative batch and item progress after reload without a succ
   expect(batchGetCalls).toBeGreaterThanOrEqual(2)
 })
 
+test('keeps import and audit progress when navigating away and back', async ({ page }) => {
+  let importGetCalls = 0
+  let batchGetCalls = 0
+
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/runtime/status')) {
+      return fulfillJson(route, { status: 'online', checked_at: '2026-09-16T08:00:00Z' })
+    }
+    if (isLookup(path)) return fulfillJson(route, [])
+    if (path.endsWith('/imports/42')) {
+      importGetCalls += 1
+      return fulfillJson(route, importBatch('parsing'))
+    }
+    if (path.endsWith('/batches/77')) {
+      batchGetCalls += 1
+      return fulfillJson(route, auditBatch())
+    }
+    return fulfillJson(route, [])
+  })
+
+  await openAudit(page, '/audit?import=42&batch=77')
+  await expect(page.getByText('批次 #77', { exact: true })).toBeVisible()
+  await expect(page.getByText('可靠性测试合同.pdf', { exact: true })).toBeVisible()
+
+  await page.getByRole('menuitem', { name: '工作台' }).click()
+  await expect(page).toHaveURL(/\/dashboard$/)
+  await page.getByRole('menuitem', { name: '合同审查' }).click()
+  await expect(page).toHaveURL(/\/audit$/)
+
+  await expect(page.getByText('批次 #77', { exact: true })).toBeVisible()
+  await expect(page.getByText('可靠性测试合同.pdf', { exact: true })).toBeVisible()
+  expect(importGetCalls).toBeGreaterThanOrEqual(2)
+  expect(batchGetCalls).toBeGreaterThanOrEqual(2)
+})
+
 test('renders an active batch progress in the neutral state without failed items', async ({ page }) => {
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname
