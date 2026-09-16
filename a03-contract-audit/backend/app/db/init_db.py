@@ -293,6 +293,9 @@ def _seed_contract_type_profiles() -> None:
                     ),
                     negative_signals_json="[]",
                 )
+        for lookup in lookups.values():
+            if lookup.contract_type_profile is None:
+                lookup.contract_type_profile = ContractTypeProfile()
         db.commit()
     finally:
         db.close()

@@ -7,6 +7,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import fitz
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from starlette.requests import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -14,8 +15,15 @@ from sqlalchemy.orm import Session
 from app.api.v1.endpoints import auth, contracts, lookup
 from app.core.security import hash_password
 from app.db.session import Base
-from app.models.models import AuditLog, Contract, LookupItem, Risk, User
-from app.schemas.contract import LookupItemCreate
+from app.models.models import (
+    AuditLog,
+    Contract,
+    ContractTypeProfile,
+    LookupItem,
+    Risk,
+    User,
+)
+from app.schemas.contract import ContractTypeProfileUpdate, LookupItemCreate
 from app.schemas.contract import AuditRequest
 from app.schemas.contract import ParseErrorResponse
 from app.services.parser.extractor import DocumentParseResult
@@ -526,6 +534,198 @@ def test_lookup_write_rolls_back_when_audit_log_fails(monkeypatch):
 
     with Session(engine) as db:
         assert db.query(LookupItem).count() == 0
+    engine.dispose()
+
+
+def test_admin_can_list_and_update_contract_type_profile_with_redacted_audit():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        admin = User(
+            username="profile-admin",
+            password_hash="hash",
+            role="admin",
+            department="管理",
+        )
+        item = LookupItem(category="contract_type", value="采购合同", sort_order=0)
+        item.contract_type_profile = ContractTypeProfile(
+            aliases_json='["采购"]',
+            positive_signals_json='["供货"]',
+            negative_signals_json="[]",
+            version=3,
+        )
+        db.add_all((admin, item))
+        db.commit()
+
+        listed = lookup.list_contract_type_profiles(db=db, current_user=admin)
+        assert len(listed) == 1
+        assert listed[0].value == "采购合同"
+        assert listed[0].version == 3
+
+        updated = lookup.update_contract_type_profile(
+            item.id,
+            ContractTypeProfileUpdate(
+                aliases=[" 采购 ", "采购", ""],
+                positive_signals=["供货", "敏感合同正文片段"],
+                negative_signals=["采购清单"],
+                enabled=True,
+                version=3,
+            ),
+            db=db,
+            current_user=admin,
+        )
+
+        assert updated.aliases == ["采购"]
+        assert updated.version == 4
+        entry = db.query(AuditLog).filter_by(
+            action="contract_type_profile_update"
+        ).one()
+        assert entry.target == f"lookup:{item.id}"
+        assert "敏感合同正文片段" not in entry.detail
+        assert '"positive_signals_count":2' in entry.detail
+    engine.dispose()
+
+
+def test_non_admin_cannot_read_or_write_contract_type_profiles():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        legal = User(
+            username="profile-legal",
+            password_hash="hash",
+            role="legal",
+            department="法务部",
+        )
+        db.add(legal)
+        db.commit()
+
+        with pytest.raises(HTTPException) as list_error:
+            lookup.list_contract_type_profiles(db=db, current_user=legal)
+        assert list_error.value.status_code == 403
+
+        with pytest.raises(HTTPException) as update_error:
+            lookup.update_contract_type_profile(
+                1,
+                ContractTypeProfileUpdate(enabled=True, version=1),
+                db=db,
+                current_user=legal,
+            )
+        assert update_error.value.status_code == 403
+    engine.dispose()
+
+
+def test_type_profile_update_rejects_department_lookup_and_stale_version():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        admin = User(
+            username="profile-owner",
+            password_hash="hash",
+            role="admin",
+            department="管理",
+        )
+        department = LookupItem(category="department", value="采购中心", sort_order=0)
+        contract_type = LookupItem(
+            category="contract_type",
+            value="采购合同",
+            sort_order=0,
+        )
+        contract_type.contract_type_profile = ContractTypeProfile(version=2)
+        db.add_all((admin, department, contract_type))
+        db.commit()
+
+        with pytest.raises(HTTPException) as wrong_category:
+            lookup.update_contract_type_profile(
+                department.id,
+                ContractTypeProfileUpdate(enabled=True, version=1),
+                db=db,
+                current_user=admin,
+            )
+        assert wrong_category.value.status_code == 404
+
+        with pytest.raises(HTTPException) as conflict:
+            lookup.update_contract_type_profile(
+                contract_type.id,
+                ContractTypeProfileUpdate(enabled=True, version=1),
+                db=db,
+                current_user=admin,
+            )
+        assert conflict.value.status_code == 409
+        assert contract_type.contract_type_profile.version == 2
+    engine.dispose()
+
+
+def test_type_profile_update_schema_rejects_extra_and_oversized_arrays():
+    with pytest.raises(ValidationError):
+        ContractTypeProfileUpdate(
+            aliases=[str(index) for index in range(33)],
+            enabled=True,
+            version=1,
+        )
+    with pytest.raises(ValidationError):
+        ContractTypeProfileUpdate.model_validate(
+            {"enabled": True, "version": 1, "unexpected": "value"}
+        )
+
+
+def test_type_profile_update_rejects_oversized_term_with_422():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        admin = User(
+            username="profile-length-admin",
+            password_hash="hash",
+            role="admin",
+            department="管理",
+        )
+        item = LookupItem(category="contract_type", value="采购合同", sort_order=0)
+        item.contract_type_profile = ContractTypeProfile()
+        db.add_all((admin, item))
+        db.commit()
+
+        with pytest.raises(HTTPException) as error:
+            lookup.update_contract_type_profile(
+                item.id,
+                ContractTypeProfileUpdate(
+                    aliases=["超" * 65],
+                    enabled=True,
+                    version=1,
+                ),
+                db=db,
+                current_user=admin,
+            )
+        assert error.value.status_code == 422
+    engine.dispose()
+
+
+def test_contract_type_lookup_create_initializes_empty_profile():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        admin = User(
+            username="profile-create-admin",
+            password_hash="hash",
+            role="admin",
+            department="管理",
+        )
+        db.add(admin)
+        db.commit()
+
+        created = lookup.create_lookup(
+            LookupItemCreate(
+                category="contract_type",
+                value="居间合同",
+                sort_order=20,
+            ),
+            db=db,
+            current_user=admin,
+        )
+
+        profile = db.query(ContractTypeProfile).filter_by(
+            lookup_item_id=created.id
+        ).one()
+        assert profile.aliases_json == "[]"
+        assert profile.version == 1
     engine.dispose()
 
 

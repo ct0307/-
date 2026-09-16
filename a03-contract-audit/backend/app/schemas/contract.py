@@ -3,7 +3,14 @@ import json
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class RiskOut(BaseModel):
@@ -381,6 +388,21 @@ class LookupItemCreate(BaseModel):
     category: str   # department / contract_type
     value: str
     sort_order: int = 0
+
+
+class ContractTypeProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    aliases: list[str] = Field(default_factory=list, max_length=32)
+    positive_signals: list[str] = Field(default_factory=list, max_length=32)
+    negative_signals: list[str] = Field(default_factory=list, max_length=32)
+    enabled: bool
+    version: int = Field(ge=1)
+
+
+class ContractTypeProfileOut(ContractTypeProfileUpdate):
+    lookup_item_id: int
+    value: str
 
 
 class DepartmentScopeUserOut(BaseModel):

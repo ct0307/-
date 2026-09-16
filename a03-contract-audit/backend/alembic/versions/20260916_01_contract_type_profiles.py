@@ -142,6 +142,21 @@ def _seed_profiles() -> None:
                     negative_signals_json="[]",
                 )
             )
+    contract_type_ids = connection.scalars(
+        sa.select(lookup_items.c.id).where(
+            lookup_items.c.category == "contract_type"
+        )
+    ).all()
+    for lookup_id in contract_type_ids:
+        profile_exists = connection.scalar(
+            sa.select(sa.func.count()).select_from(profiles).where(
+                profiles.c.lookup_item_id == lookup_id
+            )
+        )
+        if not profile_exists:
+            connection.execute(
+                profiles.insert().values(lookup_item_id=lookup_id)
+            )
 
 
 def downgrade() -> None:

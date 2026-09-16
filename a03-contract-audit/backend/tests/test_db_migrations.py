@@ -82,6 +82,13 @@ def test_profile_migration_seeds_current_types_and_cascades():
             [
                 {"category": "contract_type", "value": value, "sort_order": index}
                 for index, value in enumerate(CURRENT_CONTRACT_TYPES)
+            ]
+            + [
+                {
+                    "category": "contract_type",
+                    "value": "居间合同",
+                    "sort_order": len(CURRENT_CONTRACT_TYPES),
+                }
             ],
         )
         migration.op = Operations(MigrationContext.configure(connection))
@@ -93,8 +100,23 @@ def test_profile_migration_seeds_current_types_and_cascades():
             .join(profiles, profiles.c.lookup_item_id == lookup_items.c.id)
             .order_by(lookup_items.c.sort_order)
         ).all()
-        assert [row.value for row in rows] == list(CURRENT_CONTRACT_TYPES)
-        assert all(row.positive_signals_json != "[]" for row in rows)
+        assert [row.value for row in rows[:14]] == list(CURRENT_CONTRACT_TYPES)
+        assert all(row.positive_signals_json != "[]" for row in rows[:14])
+        custom_profile = connection.execute(
+            select(
+                profiles.c.aliases_json,
+                profiles.c.positive_signals_json,
+                profiles.c.version,
+            )
+            .join(
+                lookup_items,
+                lookup_items.c.id == profiles.c.lookup_item_id,
+            )
+            .where(lookup_items.c.value == "居间合同")
+        ).one()
+        assert custom_profile.aliases_json == "[]"
+        assert custom_profile.positive_signals_json == "[]"
+        assert custom_profile.version == 1
 
         deleted_lookup_id = connection.scalar(
             select(lookup_items.c.id).where(lookup_items.c.value == "采购合同")
