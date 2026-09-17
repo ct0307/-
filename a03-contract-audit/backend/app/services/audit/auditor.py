@@ -72,6 +72,8 @@ from app.services.audit.secondary_review import (
 )
 from app.services.audit.window_repository import SqlAlchemyWindowCheckpoint
 from app.services.rag.contract_structure import build_contract_windows
+from app.services.rag.query_executor import execute_query_plan
+from app.services.rag.query_planner import plan_claim, rewrite_evidence_query
 from app.services.rag.retriever import retrieve
 
 if TYPE_CHECKING:
@@ -799,43 +801,31 @@ def _ground_risks(
 ) -> list[dict]:
     """为每条候选风险独立检索，只保留作用域可信的候选依据。"""
     for risk in risks:
-        query = " ".join(filter(None, [
-            str(risk.get("category", "")).strip(),
-            str(risk.get("original_text", ""))[:500].strip(),
-            str(risk.get("risk_reason", ""))[:300].strip(),
-        ]))
-        attempts: list[dict] = []
-        selected_sources: list[dict] = []
-        selected_validation = validate_support_relation(risk, [])
-        queries = [query, _rewrite_evidence_query(risk)] if query else []
-        best_rank = -1
-        for attempt_number, attempt_query in enumerate(queries, start=1):
-            sources = retrieve(
-                attempt_query,
+        claim = _claim_for_grounding(risk, dimensions or [])
+        plan = plan_claim(claim, contract_type=contract_type)
+
+        def search(query):
+            return retrieve(
+                query.text,
                 top_k=3,
-                contract_type=contract_type,
-                dimensions=dimensions or [],
+                contract_type=query.contract_type,
+                dimensions=dimensions or list(query.dimensions),
                 as_of=legal_as_of,
-                # grounding 查询拼接了合同原文，其中的“第X条”是合同自身条款编号，
-                # 不是法条引用；必须关闭条号精确短路，走完整混合检索。
-                allow_exact=False,
+                allow_exact=query.kind == "exact_reference",
             )
-            validation = validate_support_relation(risk, sources)
-            reliable = [source for source in sources if source.get("reliable", False)]
-            attempts.append({
-                "attempt": attempt_number,
-                "query": attempt_query,
-                "support_status": validation.status,
-                "source_ids": [_evidence_id(source) for source in sources],
-            })
-            rank = 2 if reliable and validation.status == "supported" else 1 if reliable else 0
-            if rank > best_rank:
-                best_rank = rank
-                selected_sources = sources
-                selected_validation = validation
-            if rank == 2:
-                break
-        risk["retrieval_attempts"] = attempts
+
+        execution = execute_query_plan(
+            plan,
+            search=search,
+            validate=lambda sources: validate_support_relation(risk, sources),
+            rewrite=rewrite_evidence_query,
+        )
+        selected_sources = list(execution.sources)
+        selected_validation = execution.validation
+        risk["retrieval_attempts"] = [
+            attempt.as_dict(attempt=index)
+            for index, attempt in enumerate(execution.attempts, start=1)
+        ]
         reliable_sources = [
             source for source in selected_sources if source.get("reliable", False)
         ]
@@ -902,13 +892,45 @@ def _verify_original_text(original_text: object, contract_text: str | None) -> b
     return candidate in source
 
 
-def _rewrite_evidence_query(risk: dict) -> str:
-    """Critic 首轮未找到支持证据时使用的有限、可重放查询改写。"""
-    return " ".join(filter(None, [
-        str(risk.get("category", "")).strip(),
-        "认定标准 适用条件 法律后果",
-        str(risk.get("risk_reason", ""))[:300].strip(),
-    ]))
+def _claim_for_grounding(risk: dict, dimensions: list[str]) -> AuditClaim:
+    """从兼容风险字典恢复内部 Claim，不向外部 API 暴露内部 Schema。"""
+    agent = str(risk.get("agent") or "system")
+    if agent not in {"legal", "finance", "system"}:
+        agent = "system"
+    level = str(risk.get("level") or "medium").lower()
+    if level not in _VALID_LEVELS:
+        level = "medium"
+    category = str(risk.get("category") or "合规风险").strip()[:64]
+    if len(category) < 2:
+        category = "合规风险"
+    quote = str(risk.get("original_text") or "全文未检出相关条款").strip()[:500]
+    if len(quote) < 2:
+        quote = "全文未检出相关条款"
+    explicit_dimension = str(risk.get("dimension") or "").strip()
+    if explicit_dimension:
+        dimension = explicit_dimension[:32]
+    elif agent in _ROLE_DIMENSIONS:
+        dimension = _primary_claim_dimension(risk, agent, dimensions)
+    else:
+        dimension = "general"
+    missing_information = risk.get("missing_information")
+    return AuditClaim(
+        agent=agent,
+        level=level,
+        category=category,
+        dimension=dimension,
+        subject=str(risk.get("subject") or "")[:128],
+        action=str(risk.get("action") or "")[:256],
+        condition=str(risk.get("condition") or "")[:256],
+        consequence=str(risk.get("consequence") or "")[:256],
+        quote=quote,
+        source_window_id=risk.get("source_window_id"),
+        clause_ids=list(risk.get("source_clause_ids") or ()),
+        missing_information=(
+            [str(value) for value in missing_information]
+            if isinstance(missing_information, list) else []
+        ),
+    )
 
 
 def _evidence_id(source: dict) -> str:

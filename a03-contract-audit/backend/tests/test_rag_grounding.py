@@ -67,10 +67,10 @@ class RagGroundingTests(unittest.TestCase):
                 risks, contract_type="采购合同", dimensions=["breach", "dispute"]
             )
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 6)
         self.assertNotEqual(grounded[0]["rag_sources"], grounded[1]["rag_sources"])
-        self.assertEqual(grounded[0]["basis"], "法规1 第1条")
-        self.assertEqual(grounded[1]["basis"], "法规2 第2条")
+        self.assertTrue(grounded[0]["basis"].startswith("法规1 第1条"))
+        self.assertTrue(grounded[1]["basis"].startswith("法规4 第4条"))
         self.assertEqual(calls[0][1]["contract_type"], "采购合同")
         self.assertEqual(calls[0][1]["dimensions"], ["breach", "dispute"])
 
@@ -184,7 +184,7 @@ class RagGroundingTests(unittest.TestCase):
 
         def fake_retrieve(query, **_kwargs):
             queries.append(query)
-            if len(queries) == 1:
+            if len(queries) <= 3:
                 return [{
                     "chunk_id": 1,
                     "content": "合同应当采用书面形式。",
@@ -207,11 +207,25 @@ class RagGroundingTests(unittest.TestCase):
                 contract_text="合同约定每日按合同金额的1%支付违约金。",
             )
 
-        self.assertEqual(len(queries), 2)
-        self.assertNotEqual(queries[0], queries[1])
+        self.assertEqual(len(queries), 6)
+        self.assertNotEqual(queries[0], queries[3])
         self.assertEqual(grounded[0]["evidence_status"], "supported")
-        self.assertEqual(grounded[0]["rag_sources"][0]["chunk_id"], 2)
-        self.assertEqual(len(grounded[0]["retrieval_attempts"]), 2)
+        self.assertEqual(
+            [source["chunk_id"] for source in grounded[0]["rag_sources"]],
+            [1, 2],
+        )
+        self.assertEqual(len(grounded[0]["retrieval_attempts"]), 6)
+        self.assertEqual(
+            {attempt["rewrite"] for attempt in grounded[0]["retrieval_attempts"]},
+            {0, 1},
+        )
+        self.assertTrue(all(
+            "query_kind" in attempt
+            and "routes" in attempt
+            and "rerank_mode" in attempt
+            and "applicability_status" in attempt
+            for attempt in grounded[0]["retrieval_attempts"]
+        ))
 
     def test_evidence_critic_stops_after_one_rewrite(self):
         risks = [_risk("未知风险", "未知条款")]
@@ -224,9 +238,11 @@ class RagGroundingTests(unittest.TestCase):
         with patch.object(auditor, "retrieve", side_effect=fake_retrieve):
             grounded = auditor._ground_risks(risks)
 
-        self.assertEqual(len(queries), 2)
-        self.assertEqual(len(grounded[0]["retrieval_attempts"]), 2)
+        self.assertEqual(len(queries), 6)
+        self.assertEqual(len(grounded[0]["retrieval_attempts"]), 6)
         self.assertEqual(grounded[0]["evidence_status"], "unsupported")
+        self.assertEqual(grounded[0]["claim_status"], "manual_review")
+        self.assertTrue(grounded[0]["requires_manual_review"])
 
 
 if __name__ == "__main__":

@@ -19,9 +19,21 @@ QueryKind = Literal[
 ]
 
 _ARTICLE_REFERENCE_RE = re.compile(
-    r"(?:《[^》]{2,80}》)?第[一二三四五六七八九十百千万零〇两\d]+条"
+    r"《[^》]{2,80}》第[一二三四五六七八九十百千万零〇两\d]+条"
     r"(?:之[一二三四五六七八九十\d]+)?"
 )
+
+_CONTROLLED_REWRITE_SUFFIXES: dict[QueryKind, str] = {
+    "legal_issue": "构成要件 裁判标准",
+    "fact_pattern": "认定标准 法律后果",
+    "applicability": "生效 废止 适用时点",
+    "absence_requirement": "必备条款 缺失后果",
+}
+_REWRITE_REASON_CODES = {
+    "INSUFFICIENT_SUPPORT",
+    "NO_RELIABLE_EVIDENCE",
+    "EVIDENCE_UNCLEAR",
+}
 
 @dataclass(frozen=True)
 class EvidenceQuery:
@@ -105,6 +117,27 @@ def plan_claim(
             dimensions=dimensions,
         ))
     return EvidenceQueryPlan(claim_id=claim.claim_id, queries=tuple(queries))
+
+
+def rewrite_evidence_query(
+    query: EvidenceQuery,
+    reason_code: str,
+) -> EvidenceQuery | None:
+    """仅根据白名单失败码执行一次确定性扩展。"""
+    if reason_code not in _REWRITE_REASON_CODES:
+        return None
+    suffix = _CONTROLLED_REWRITE_SUFFIXES.get(query.kind)
+    if suffix is None:
+        return None
+    text = _join_nonempty(query.text, suffix)
+    if text == query.text:
+        return None
+    return EvidenceQuery(
+        kind=query.kind,
+        text=text,
+        contract_type=query.contract_type,
+        dimensions=query.dimensions,
+    )
 
 
 def _join_nonempty(*values: object) -> str:
