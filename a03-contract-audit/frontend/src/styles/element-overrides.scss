@@ -17,6 +17,11 @@
   --el-button-active-bg-color: var(--el-color-primary-dark-2);
   font-weight: 600;
 }
+.el-button {
+  font-family: var(--font-body);
+  font-size: var(--type-label);
+  font-weight: 500;
+}
 
 // —— 卡片：只承担内容分区，不作为漂浮装饰 ——
 .el-card {
@@ -63,8 +68,10 @@
 // —— 标签：风险等级软底 ——
 .el-tag {
   border-color: transparent;
-  font-family: var(--mono);
+  font-family: var(--font-body);
+  font-size: var(--type-caption);
   font-weight: 600;
+  line-height: 1.35;
   &.el-tag--danger {
     background: var(--seal-soft);
     color: var(--seal);
@@ -86,6 +93,8 @@
   --el-table-header-text-color: var(--ivory);
   --el-table-row-hover-bg-color: var(--brass-hover-soft);
   background: transparent;
+  font-size: var(--type-label);
+  line-height: 1.55;
   th.el-table__cell {
     font-family: var(--sans);
     font-weight: 600;
@@ -111,6 +120,9 @@
 .el-input__wrapper,
 .el-textarea__inner,
 .el-select__wrapper {
+  font-family: var(--font-body);
+  font-size: var(--type-label);
+  line-height: 1.6;
   background-color: var(--ink-3);
   box-shadow: 0 0 0 1px var(--line) inset;
 }

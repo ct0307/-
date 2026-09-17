@@ -20,10 +20,15 @@ body,
 
 body {
   font-family: var(--sans);
+  font-size: var(--type-body);
+  font-weight: 400;
+  line-height: var(--leading-body);
   color: var(--ivory);
   background: var(--ink);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  font-variant-numeric: proportional-nums;
 }
 
 // 全局横线信笺纹理已移除，保持页面底色干净
@@ -38,6 +43,7 @@ h2 {
   font-family: var(--serif);
   color: var(--ivory);
   font-weight: 600;
+  line-height: var(--leading-tight);
 }
 h1,
 h2,
@@ -49,6 +55,7 @@ h3 {
   font-family: var(--sans);
   color: var(--ivory);
   font-weight: 600;
+  line-height: 1.45;
 }
 .serif {
   font-family: var(--serif);
@@ -56,6 +63,10 @@ h3 {
 .mono {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
+}
+.data {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums lining-nums;
 }
 
 // —— 复用工具类 ——

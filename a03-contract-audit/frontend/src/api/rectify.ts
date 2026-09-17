@@ -6,6 +6,7 @@ import {
   RECTIFY_ROWS,
   type Rectification,
   type RectificationCreate,
+  type RectificationUpdate,
   type RectifyStatus,
 } from '@/mock/rectify'
 
@@ -38,6 +39,11 @@ export async function createRectification(payload: RectificationCreate): Promise
       created: payload.created ?? today,
       due: payload.due ?? due,
       note: payload.note ?? '',
+      risk_id: payload.risk_id ?? null,
+      resolution: '',
+      review_comment: '',
+      submitted_at: null,
+      closed_at: null,
     }
     mockItems = [item, ...mockItems]
     return mockRespond(item)
@@ -47,12 +53,18 @@ export async function createRectification(payload: RectificationCreate): Promise
 
 export async function updateRectificationStatus(
   id: string,
-  status: RectifyStatus,
+  payload: RectificationUpdate,
 ): Promise<Rectification> {
   if (MOCK_ENABLED.rectify) {
     const it = mockItems.find((r) => r.id === id)
-    if (it) it.status = status
+    if (!it) throw new Error('整改项不存在')
+    it.status = payload.status
+    if (payload.resolution !== undefined) it.resolution = payload.resolution
+    if (payload.review_comment !== undefined) it.review_comment = payload.review_comment
+    if (payload.status === '待复核') it.submitted_at = new Date().toISOString()
+    if (payload.status === '已闭环') it.closed_at = new Date().toISOString()
+    if (payload.status === '处理中') it.closed_at = null
     return mockRespond({ ...(it as Rectification) })
   }
-  return client.patch(`/rectifications/${id}`, { status })
+  return client.patch(`/rectifications/${id}`, payload)
 }

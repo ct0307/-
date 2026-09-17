@@ -89,6 +89,12 @@ _DEV_COLUMNS = {
         ("secondary_review_reason", "TEXT DEFAULT '' NOT NULL"),
     ],
     "audit_logs": [("ip", "VARCHAR(64) DEFAULT ''")],
+    "rectifications": [
+        ("resolution", "TEXT DEFAULT '' NOT NULL"),
+        ("review_comment", "TEXT DEFAULT '' NOT NULL"),
+        ("submitted_at", "DATETIME"),
+        ("closed_at", "DATETIME"),
+    ],
     "contracts": [
         ("elements_json", "TEXT DEFAULT '{}'"),
         ("element_evidence_json", "TEXT DEFAULT '{}' NOT NULL"),

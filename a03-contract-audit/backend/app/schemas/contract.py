@@ -284,6 +284,11 @@ class RectificationOut(BaseModel):
     created: str        # YYYY-MM-DD
     due: str            # YYYY-MM-DD
     note: str
+    risk_id: int | None = None
+    resolution: str = ""
+    review_comment: str = ""
+    submitted_at: datetime | None = None
+    closed_at: datetime | None = None
 
     @classmethod
     def from_orm_row(cls, row) -> "RectificationOut":
@@ -297,6 +302,11 @@ class RectificationOut(BaseModel):
             created=row.created,
             due=row.due,
             note=row.note or "",
+            risk_id=row.risk_id,
+            resolution=row.resolution or "",
+            review_comment=row.review_comment or "",
+            submitted_at=row.submitted_at,
+            closed_at=row.closed_at,
         )
 
 
@@ -361,7 +371,9 @@ class AuditLogRowOut(BaseModel):
 
 
 class RectificationStatusUpdate(BaseModel):
-    status: str  # 待处理/处理中/已闭环
+    status: str  # 待处理/处理中/待复核/已闭环
+    resolution: str | None = None
+    review_comment: str | None = None
 
 
 class HistoryRow(BaseModel):

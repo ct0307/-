@@ -1,6 +1,2 @@
-// ============================================================
-// 字体引入 · 开发期用公网 CDN（jsDelivr / fontsource）
-// 卷宗风依赖：Noto Serif SC（标题衬线）+ JetBrains Mono（数据等宽）
-// 【P3 私有化交付前必须换本地 woff2 subset —— 内网无外网 CDN 会失效】
-// ============================================================
-@import url("https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+// 字体使用系统字库，保证私有化环境不依赖公网 CDN。
+// 字体角色由 tokens.scss 统一定义。

@@ -47,16 +47,17 @@ const title = computed(() => (route.meta.title as string) || '')
 }
 .eyebrow {
   margin: 0;
-  font-size: 10px;
+  font-size: var(--type-caption);
+  line-height: 1.35;
   letter-spacing: 0;
   color: var(--muted);
-  font-family: var(--mono);
+  font-family: var(--font-body);
   font-weight: 500;
 }
 .topbar-title h1 {
   margin: 2px 0 0;
-  font-size: 21px;
-  line-height: 1.25;
+  font-size: var(--type-title);
+  line-height: var(--leading-tight);
 }
 .topbar-actions {
   display: flex;

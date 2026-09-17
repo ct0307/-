@@ -594,9 +594,13 @@ class Rectification(Base):
     risk: Mapped[str] = mapped_column(String(255))       # 风险描述（风险 category）
     level: Mapped[str] = mapped_column(String(8))        # high/medium/low
     owner: Mapped[str] = mapped_column(String(64), default="")   # 责任人
-    status: Mapped[str] = mapped_column(String(16), default="待处理")  # 待处理/处理中/已闭环
+    status: Mapped[str] = mapped_column(String(16), default="待处理")  # 待处理/处理中/待复核/已闭环
     created: Mapped[str] = mapped_column(String(16))     # YYYY-MM-DD
     due: Mapped[str] = mapped_column(String(16))         # YYYY-MM-DD（默认创建日 +7 天）
     note: Mapped[str] = mapped_column(Text, default="")  # 备注（整改建议）
+    resolution: Mapped[str] = mapped_column(Text, default="")  # 责任人提交的整改结果
+    review_comment: Mapped[str] = mapped_column(Text, default="")  # 复核意见/退回原因
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     risk_id: Mapped[int | None] = mapped_column(ForeignKey("risks.id"), nullable=True)  # 溯源风险，可空
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

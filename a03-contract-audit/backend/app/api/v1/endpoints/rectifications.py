@@ -4,9 +4,9 @@
 - GET  /rectifications        → RectificationOut[]（裸数组，最新在前）
 - POST /rectifications        → 新建，返回带 id 的 RectificationOut
 - PATCH /rectifications/{id}  → 改 status，{id} 为 RC001 形态字符串
-level 英文（high/medium/low）、status 中文（待处理/处理中/已闭环），逐字段按前端现值返回。
+level 英文（high/medium/low），status 按待处理→处理中→待复核→已闭环流转。
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -23,8 +23,14 @@ from app.services import audit_log
 
 router = APIRouter()
 
-_VALID_STATUS = {"待处理", "处理中", "已闭环"}
+_VALID_STATUS = {"待处理", "处理中", "待复核", "已闭环"}
 _VALID_LEVEL = {"high", "medium", "low"}
+_ALLOWED_TRANSITIONS = {
+    "待处理": {"处理中"},
+    "处理中": {"待复核"},
+    "待复核": {"处理中", "已闭环"},
+    "已闭环": {"待处理"},
+}
 
 
 def _parse_id(rc_id: str) -> int:
@@ -53,8 +59,8 @@ def create_rectification(
 ) -> RectificationOut:
     if payload.level not in _VALID_LEVEL:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"非法风险等级: {payload.level}")
-    if payload.status not in _VALID_STATUS:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"非法状态: {payload.status}")
+    if payload.status != "待处理":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "新整改项必须从“待处理”开始")
     created = payload.created or date.today().isoformat()
     due = payload.due or (date.today() + timedelta(days=7)).isoformat()
     row = Rectification(
@@ -93,7 +99,29 @@ def update_rectification_status(
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "整改项不存在")
     old = row.status
+    if payload.status not in _ALLOWED_TRANSITIONS.get(old, set()):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"不允许从“{old}”直接流转到“{payload.status}”",
+        )
+    resolution = (payload.resolution if payload.resolution is not None else row.resolution).strip()
+    review_comment = (
+        payload.review_comment if payload.review_comment is not None else row.review_comment
+    ).strip()
+    if payload.status == "待复核" and not resolution:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请先填写整改结果再提交复核")
+    if old == "待复核" and not review_comment:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "复核通过或退回时必须填写复核意见")
+    now = datetime.now(timezone.utc)
     row.status = payload.status
+    row.resolution = resolution
+    row.review_comment = review_comment
+    if payload.status == "待复核":
+        row.submitted_at = now
+    elif payload.status == "已闭环":
+        row.closed_at = now
+    elif payload.status in {"待处理", "处理中"}:
+        row.closed_at = None
     audit_log.record(
         db, user_id=user.id, action="update_rectification",
         target=f"rectification:{row.id}", detail=f"{old} -> {payload.status}",

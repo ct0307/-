@@ -6,7 +6,7 @@ import {
   createRectification,
   updateRectificationStatus,
 } from '@/api/rectify'
-import type { Rectification, RectifyStatus } from '@/mock/rectify'
+import type { Rectification, RectificationUpdate, RectifyStatus } from '@/mock/rectify'
 
 export type { Rectification, RectifyStatus } from '@/mock/rectify'
 
@@ -21,6 +21,7 @@ export const useRectifyStore = defineStore('rectify', () => {
   const countByStatus = computed(() => ({
     待处理: items.value.filter((r) => r.status === '待处理').length,
     处理中: items.value.filter((r) => r.status === '处理中').length,
+    待复核: items.value.filter((r) => r.status === '待复核').length,
     已闭环: items.value.filter((r) => r.status === '已闭环').length,
   }))
   const openCount = computed(() => items.value.filter((r) => r.status !== '已闭环').length)
@@ -61,12 +62,16 @@ export const useRectifyStore = defineStore('rectify', () => {
     items.value = [item, ...items.value]
   }
 
-  async function setStatus(id: string, status: RectifyStatus) {
+  async function update(id: string, payload: RectificationUpdate) {
     const requestGeneration = generation
-    const updated = await updateRectificationStatus(id, status)
+    const updated = await updateRectificationStatus(id, payload)
     if (requestGeneration !== generation) return
-    const it = items.value.find((r) => r.id === id)
-    if (it) it.status = updated.status
+    const index = items.value.findIndex((r) => r.id === id)
+    if (index >= 0) items.value[index] = updated
+  }
+
+  async function setStatus(id: string, status: RectifyStatus) {
+    return update(id, { status })
   }
 
   function reset() {
@@ -77,5 +82,5 @@ export const useRectifyStore = defineStore('rectify', () => {
     loaded = false
   }
 
-  return { items, loading, error, total, countByStatus, openCount, load, addFromRisk, setStatus, reset }
+  return { items, loading, error, total, countByStatus, openCount, load, addFromRisk, update, setStatus, reset }
 })

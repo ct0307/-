@@ -4,9 +4,22 @@
 // ============================================================
 :root {
   // —— 共享结构令牌 ——
-  --serif: "Noto Serif SC", "Songti SC", "SimSun", serif;
-  --sans: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-  --mono: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+  // 标题用宋体系建立“契约/卷宗”感；业务内容用 UI 黑体保证屏幕可读性。
+  --font-display: "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "STZhongsong", "SimSun", serif;
+  --font-body: "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", "Segoe UI", system-ui, sans-serif;
+  --font-data: "Bahnschrift", "Segoe UI Variable", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  --font-code: "Cascadia Code", "JetBrains Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
+  // 兼容既有组件命名。
+  --serif: var(--font-display);
+  --sans: var(--font-body);
+  --mono: var(--font-code);
+  --type-caption: 12px;
+  --type-label: 13px;
+  --type-body: 14px;
+  --type-subtitle: 16px;
+  --type-title: 21px;
+  --leading-tight: 1.3;
+  --leading-body: 1.65;
   --r-lg: 8px;
   --r-md: 6px;
   --r-sm: 4px;
