@@ -20,7 +20,6 @@
 """
 import hashlib
 import json
-import re
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -46,6 +45,7 @@ from app.services.audit.agent_profiles import (
     ROLE_DIMENSIONS as _ROLE_DIMENSIONS,
     agent_profile,
 )
+from app.services.audit.claims import AuditClaim, normalize_finding
 from app.services.audit.prompts.review import (
     build_discovery_system_prompt,
     build_enrichment_system_prompt,
@@ -616,13 +616,31 @@ def _agent_audit(
         completed += result.completed_windows
         issues.extend(result.issues)
         for candidate in result.candidates:
-            risk = _normalize({
+            candidate_payload = {
                 "level": candidate.level,
                 "category": candidate.category,
                 "original_text": candidate.quote,
                 "risk_reason": candidate.reason,
                 "suggestion": candidate.suggestion,
-            }, role)
+            }
+            claim = normalize_finding(
+                RiskFinding(
+                    level=candidate.level,
+                    category=candidate.category,
+                    quote=candidate.quote,
+                ),
+                agent=role,
+                dimension=_primary_claim_dimension(
+                    candidate_payload, role, selected_dimensions
+                ),
+                window_id=candidate.source_window_id,
+                clause_ids=candidate.source_clause_ids,
+            )
+            risk = _risk_from_claim(
+                claim,
+                risk_reason=candidate.reason,
+                suggestion=candidate.suggestion,
+            )
             if not _candidate_matches_dimensions(risk, role, selected_dimensions):
                 issues.append(ReviewIssue(
                     code="DIMENSION_MISMATCH",
@@ -631,8 +649,6 @@ def _agent_audit(
                     detail="候选风险不属于本次选择的审查维度",
                 ))
                 continue
-            risk["source_window_id"] = candidate.source_window_id
-            risk["source_clause_ids"] = list(candidate.source_clause_ids)
             normalized.append(risk)
     if timings is not None:
         timings[f"{role}_agent_ms"] = round(
@@ -871,33 +887,72 @@ def _format_source(source: dict) -> str:
 
 
 def _normalize(r: dict, agent: str) -> dict:
-    """规范化单条风险：字段缺省填默认，取值越界裁剪，打 agent 标签，附免责声明。"""
+    """兼容旧调用：先建立 Claim，再适配为既有风险字典。"""
     level = str(r.get("level", "medium")).lower()
     if level not in _VALID_LEVELS:
         level = "medium"
-    # 置信度不再由模型自报；旧字段保留为兼容字段，正式可信度由证据状态表达。
-    confidence = 0
     category = str(r.get("category", "合规风险"))[:64]
     original_text = str(r.get("original_text", ""))
-    claim_payload = re.sub(r"\s+", "", f"{agent}\0{category}\0{original_text}")
-    claim_id = "C-" + hashlib.sha256(claim_payload.encode("utf-8")).hexdigest()[:16].upper()
+    claim = AuditClaim(
+        agent=agent,
+        level=level,
+        category=category,
+        dimension=_primary_claim_dimension(r, agent, []),
+        quote=original_text,
+        source_window_id=r.get("source_window_id"),
+        clause_ids=list(r.get("source_clause_ids") or ()),
+    )
+    return _risk_from_claim(
+        claim,
+        risk_reason=str(r.get("risk_reason", ""))[:500],
+        suggestion=str(r.get("suggestion", "")),
+    )
+
+
+def _primary_claim_dimension(
+    risk: dict,
+    agent: str,
+    selected_dimensions: list[str],
+) -> str:
+    """按稳定的产品维度顺序选择 Claim 主维度。"""
+    detected = candidate_dimensions(risk)
+    ordered = selected_dimensions or [
+        dimension
+        for dimension in _DIM_TOPICS
+        if dimension in _ROLE_DIMENSIONS[agent]
+    ]
+    return next(
+        (dimension for dimension in ordered if dimension in detected),
+        ordered[0],
+    )
+
+
+def _risk_from_claim(
+    claim: AuditClaim,
+    *,
+    risk_reason: str,
+    suggestion: str,
+) -> dict:
+    """将内部 Claim 单向适配为当前 API 风险字段。"""
     return {
-        "claim_id": claim_id,
+        "claim_id": claim.claim_id,
         "claim_status": "pending_evidence",
-        "agent": agent,
-        "level": level,
-        "category": category,
-        "original_text": original_text,
-        "risk_reason": str(r.get("risk_reason", ""))[:500],
+        "agent": claim.agent,
+        "level": claim.level,
+        "category": claim.category,
+        "original_text": claim.quote,
+        "risk_reason": risk_reason[:500],
         "basis": NO_RELIABLE_BASIS,
-        "suggestion": str(r.get("suggestion", "")),
-        "confidence": confidence,
+        "suggestion": suggestion,
+        "confidence": 0,
         "evidence_status": "unsupported",
         "original_text_verified": None,
         "requires_manual_review": True,
         "support_relation_status": "unclear",
         "support_validation_reason": "尚未执行依据支持关系校验",
         "support_validator_version": SUPPORT_VALIDATOR_VERSION,
+        "source_window_id": claim.source_window_id,
+        "source_clause_ids": list(claim.clause_ids),
         "disclaimer": DISCLAIMER,
     }
 

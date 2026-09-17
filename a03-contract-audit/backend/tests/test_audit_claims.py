@@ -3,11 +3,14 @@ import hashlib
 import pytest
 from pydantic import ValidationError
 
+from app.services.audit import auditor
 from app.services.audit.claims import (
     CLAIM_SCHEMA_VERSION,
     AuditClaim,
     claim_id_for,
+    normalize_finding,
 )
+from app.services.audit.protocol import RiskFinding
 
 
 def test_claim_id_is_stable_and_keeps_existing_risk_identity():
@@ -81,3 +84,59 @@ def test_claim_rejects_empty_quote_and_unknown_fields():
             quote="主体信息缺失",
             confidence=99,
         )
+
+
+def test_normalize_finding_preserves_agent_window_and_clause_ids():
+    finding = RiskFinding(
+        level="medium",
+        category="付款期限",
+        quote="验收后付款",
+    )
+
+    claim = normalize_finding(
+        finding,
+        agent="finance",
+        dimension="payment",
+        window_id="window-1",
+        clause_ids=("第三条",),
+    )
+
+    assert claim.agent == "finance"
+    assert claim.level == finding.level
+    assert claim.category == finding.category
+    assert claim.quote == finding.quote
+    assert claim.dimension == "payment"
+    assert claim.source_window_id == "window-1"
+    assert claim.clause_ids == ["第三条"]
+    assert (claim.subject, claim.action, claim.condition, claim.consequence) == (
+        "",
+        "",
+        "",
+        "",
+    )
+
+
+def test_claim_adapter_keeps_existing_risk_api_fields():
+    claim = AuditClaim(
+        agent="finance",
+        level="medium",
+        category="付款期限",
+        dimension="payment",
+        quote="验收后付款",
+        source_window_id="window-1",
+        clause_ids=["第三条"],
+    )
+
+    risk = auditor._risk_from_claim(
+        claim,
+        risk_reason="付款期限不明确",
+        suggestion="补充付款期限",
+    )
+
+    assert risk["claim_id"] == claim.claim_id
+    assert risk["agent"] == "finance"
+    assert risk["original_text"] == claim.quote
+    assert risk["source_window_id"] == "window-1"
+    assert risk["source_clause_ids"] == ["第三条"]
+    assert risk["risk_reason"] == "付款期限不明确"
+    assert risk["suggestion"] == "补充付款期限"
