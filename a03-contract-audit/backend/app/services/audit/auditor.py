@@ -1,9 +1,8 @@
-"""合规审查：核心业务，多智能体主从协同编排。
+"""合规审查：核心业务，多智能体独立首审与交叉复核编排。
 
-对应前端"双 Agent 协作"页：法务 Agent 先行、财务 Agent 二次加工、交叉验证冲突消解、分级风险。
-与"各跑各的"不同，这里是主从串行 + 共享上下文：
+对应前端"双 Agent 协作"页：法务、财务独立首审，随后结构化交接、交叉验证和风险分级。
 
-  法务先行 → 结论写入共享上下文（shared_context） → 财务读取法务输出再审
+  法务独立首审 → 财务独立首审 → 白名单 Claim 交接
   → 交叉验证产出冲突项 → 每条风险分级归档（green/yellow/red）
 
 每条风险包含（企业责任边界要求）：
@@ -43,9 +42,11 @@ from app.services.audit.agent_profiles import (
     AGENT_ORDER as _AGENT_ORDER,
     DIMENSION_TOPICS as _DIM_TOPICS,
     ROLE_DIMENSIONS as _ROLE_DIMENSIONS,
+    AgentRole,
     agent_profile,
 )
 from app.services.audit.claims import AuditClaim, normalize_finding
+from app.services.audit.collaboration import build_review_handoff, first_pass
 from app.services.audit.prompts.review import (
     build_discovery_system_prompt,
     build_enrichment_system_prompt,
@@ -154,8 +155,9 @@ def audit_contract(
     for role in _AGENT_ORDER:
         if role not in active_roles:
             log.info("audit.agent_skipped", agent=role, dimensions=canonical_dimensions)
-            continue
-        result = _agent_audit(
+
+    def run_first_pass(role: AgentRole) -> AgentAuditResult:
+        return _agent_audit(
             role, elements, contract_text, shared_context,
             db=db, contract_id=contract_id,
             dimensions=canonical_dimensions,
@@ -167,12 +169,27 @@ def audit_contract(
             clock=clock,
             window_completed_callback=report_window_complete,
         )
+
+    first_pass_bundle = first_pass(run_first_pass, roles=active_roles)
+    first_pass_results = dict(first_pass_bundle.items())
+    for role, result in first_pass_bundle.items():
         log.info("audit.agent_done", agent=role, mode="llm", risk_count=len(result.risks))
         all_risks.extend(result.risks)
         all_issues.extend(result.issues)
         planned += result.planned
         completed += result.completed
         shared_context[role] = _summarize_for_context(role, result.risks, elements)
+
+    shared_context["handoffs"] = [
+        build_review_handoff(
+            from_agent=from_agent,
+            to_agent=to_agent,
+            risks=first_pass_results[from_agent].risks,
+            payment_schedule=shared_context["payment_schedule"],
+        ).to_payload()
+        for from_agent, to_agent in (("legal", "finance"), ("finance", "legal"))
+        if from_agent in first_pass_results and to_agent in first_pass_results
+    ]
 
     deterministic_risks, deterministic_issues = _deterministic_audit(
         contract_text,
@@ -306,11 +323,9 @@ def _summarize_for_context(role: str, risks: list[dict], elements: dict) -> dict
             {
                 "claim_id": risk.get("claim_id"),
                 "category": risk.get("category"),
-                "level": risk.get("level"),
-                "original_text": risk.get("original_text"),
-                "risk_reason": risk.get("risk_reason"),
-                "evidence_ids": list(risk.get("evidence_ids") or ()),
-                "evidence_status": risk.get("evidence_status", "unsupported"),
+                "source_clause_ids": list(
+                    risk.get("source_clause_ids") or ()
+                ),
             }
             for risk in risks[:50]
             if risk.get("claim_id")
@@ -460,28 +475,18 @@ def _agent_audit(
     )
     enrichment_system_prompt = build_enrichment_system_prompt(profile)
 
-    # 财务 Agent 读取法务的共享上下文（主从协同的关键）：不重复解析，聚焦二次加工。
-    upstream_block = ""
-    if role == "finance" and "legal" in shared_context:
-        legal_ctx = shared_context["legal"]
-        legal_claims = json.dumps(
-            legal_ctx.get("claims", []), ensure_ascii=False
-        )
-        upstream_block = (
-            f"\n【法务 Agent 已完成的前置审查（共享上下文，请勿重复解析法律条款）】\n"
-            f"- 法务已检出风险类别：{('、'.join(legal_ctx['categories']) or '无')}\n"
-            f"- 是否识别为关联交易：{'是（请重点复查交易价格公允性）' if legal_ctx['related_party'] else '否'}\n"
-            f"- 待财务验证的结构化 Claims：{legal_claims}\n"
-            f"- 确定性付款比例核算：{json.dumps(shared_context.get('payment_schedule', {}), ensure_ascii=False)}\n"
-            f"请在此基础上，专注金额、付款、现金流与价格公允性维度做二次加工审查。\n"
-        )
+    deterministic_facts = json.dumps(
+        {"payment_schedule": shared_context.get("payment_schedule", {})},
+        ensure_ascii=False,
+    )
 
     def build_user_prompt(
         review_window: ReviewWindow, page: int, page_dimensions: tuple[str, ...],
     ) -> str:
         window = review_window.window
         return (
-            f"<knowledge>\n{basis_block}\n</knowledge>\n{upstream_block}\n"
+            f"<knowledge>\n{basis_block}\n</knowledge>\n"
+            f"【确定性合同事实】\n{deterministic_facts}\n"
             f"【合同基本信息】\n合同类型：{contract_type or '未指定'}\n"
             f"【已抽取的合同要素】\n{json.dumps({k: v for k, v in elements.items() if not k.startswith('has_')}, ensure_ascii=False)}\n\n"
             f"【审查窗口 {window.window_id}】\n"
@@ -514,7 +519,8 @@ def _agent_audit(
             for finding in accepted
         ]
         return (
-            f"<knowledge>\n{basis_block}\n</knowledge>\n{upstream_block}\n"
+            f"<knowledge>\n{basis_block}\n</knowledge>\n"
+            f"【确定性合同事实】\n{deterministic_facts}\n"
             f"【合同基本信息】\n合同类型：{contract_type or '未指定'}\n"
             f"【已抽取的合同要素】\n"
             f"{json.dumps({k: v for k, v in elements.items() if not k.startswith('has_')}, ensure_ascii=False)}\n\n"

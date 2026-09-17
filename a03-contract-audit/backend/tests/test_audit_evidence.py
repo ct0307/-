@@ -49,8 +49,16 @@ def test_candidate_quote_is_exactly_located_and_unresolved_quotes_have_issue(mon
     assert result["coverage"] == {"planned": 1, "completed": 1}
 
 
-def test_agent_failure_preserves_other_agents_verified_risk_and_shared_context(monkeypatch):
+def test_agent_failure_preserves_other_agents_verified_risk_and_handoff(monkeypatch):
     calls = []
+    handoffs = []
+    build_handoff = auditor.build_review_handoff
+
+    def capture_handoff(**kwargs):
+        handoff = build_handoff(**kwargs)
+        handoffs.append(handoff.to_payload())
+        return handoff
+
     class Adapter:
         def chat(self, system, user, **kwargs):
             calls.append((system, user, kwargs))
@@ -66,6 +74,7 @@ def test_agent_failure_preserves_other_agents_verified_risk_and_shared_context(m
             }], "has_more": False}, ensure_ascii=False), model="test")
     monkeypatch.setattr(auditor, "get_llm_adapter", lambda: Adapter())
     monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(auditor, "build_review_handoff", capture_handoff)
     result = auditor.audit_contract({}, "第一条 关联方提供服务。")
     assert len(result["risks"]) == 1
     assert result["risks"][0]["original_text_verified"] is True
@@ -73,7 +82,14 @@ def test_agent_failure_preserves_other_agents_verified_risk_and_shared_context(m
     assert result["coverage"] == {"planned": 2, "completed": 1}
     assert any(issue["code"] == "INVALID_MODEL_OUTPUT" for issue in result["issues"])
     finance_discovery = next(user for system, user, _kwargs in calls if "你是财务" in system)
-    assert "结构化 Claims" in finance_discovery and "关联交易" in finance_discovery
+    assert "结构化 Claims" not in finance_discovery
+    assert "C-" not in finance_discovery
+    legal_handoff = next(
+        item for item in handoffs
+        if item["from_agent"] == "legal" and item["to_agent"] == "finance"
+    )
+    assert legal_handoff["claim_ids"] == [result["risks"][0]["claim_id"]]
+    assert legal_handoff["reason_codes"] == ["RELATED_PARTY_REVIEW"]
     assert "严格 JSON 对象" in calls[0][0]
     assert "has_more" in calls[0][0]
     assert "第1页" in calls[0][1]
@@ -278,7 +294,7 @@ def test_long_contract_is_audited_in_clause_windows_without_tail_truncation(monk
     assert all("审查窗口" in prompt for prompt in prompts)
 
 
-def test_finance_agent_receives_structured_legal_claims(monkeypatch):
+def test_finance_first_pass_ignores_preloaded_legal_claims(monkeypatch):
     prompts: list[str] = []
 
     class Adapter:
@@ -304,8 +320,8 @@ def test_finance_agent_receives_structured_legal_claims(monkeypatch):
 
     auditor._agent_audit("finance", {}, "第一条 验收后付款。", shared_context)
 
-    assert '"claim_id": "C-LEGAL-001"' in prompts[0]
-    assert '"evidence_ids": ["LAW-585", "DOC-8.2"]' in prompts[0]
+    assert '"claim_id": "C-LEGAL-001"' not in prompts[0]
+    assert '"evidence_ids": ["LAW-585", "DOC-8.2"]' not in prompts[0]
 
 
 def test_audit_contract_runs_secondary_after_grounding_and_conflict_detection(monkeypatch):
@@ -475,5 +491,5 @@ def test_whitespace_variants_keep_verified_quote_and_shared_claim(monkeypatch, a
     expected_claim = auditor._normalize({"category": "付款期限", "original_text": "paynow"}, "legal")["claim_id"]
     shared = auditor._summarize_for_context("legal", result.risks, {})
     assert shared["claims"][0]["claim_id"] == expected_claim
-    assert shared["claims"][0]["original_text"] == "paynow"
+    assert shared["claims"][0]["source_clause_ids"] == ["第一条"]
     assert result.planned == result.completed == 1
