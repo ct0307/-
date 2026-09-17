@@ -41,6 +41,7 @@ from app.llm.factory import get_embedding_adapter
 from app.models.models import KnowledgeChunk, LegalArticle
 from app.services.rag.revision import bump_knowledge_revision, current_knowledge_revision
 from app.services.rag.legal_sources import chinese_number_to_int, int_to_chinese_number
+from app.services.rag.reranker import get_reranker
 from app.services.rag.snapshot import RetrievalSnapshot, SnapshotStore
 from app.services.rag.applicability import assess_applicability
 
@@ -310,11 +311,10 @@ def retrieve(
         }
         for doc_id, _score in fused
     }
-    reranked = rerank_results(
+    reranked = _rerank_candidates(
         query,
         apply_contract_domain_boost(ranked_results, query),
         route_ranks=route_ranks,
-        top_k=len(ranked_results),
         expanded_query=plan.expanded_query,
     )
     results = collapse_by_article(reranked)[:top_k]
@@ -404,6 +404,85 @@ def rerank_results(
             reverse=True,
         )
     return ranked[:top_k]
+
+
+def _rerank_candidates(
+    query: str,
+    candidates: list[dict],
+    *,
+    route_ranks: dict[int, dict[str, int | None]],
+    expanded_query: str,
+) -> list[dict]:
+    """可选精排候选前缀；任意异常都保留完整 RRF 顺序。"""
+    try:
+        configured = get_reranker()
+    except Exception as exc:
+        log.warning("rag.reranker_unavailable", error_type=type(exc).__name__)
+        return _fallback_rerank(
+            query,
+            candidates,
+            route_ranks=route_ranks,
+            expanded_query=expanded_query,
+            error_code="RERANK_LOAD_FAILED",
+        )
+    if configured is None:
+        return rerank_results(
+            query,
+            candidates,
+            route_ranks=route_ranks,
+            top_k=len(candidates),
+            expanded_query=expanded_query,
+        )
+
+    candidate_k = min(settings.RERANK_CANDIDATE_K, len(candidates))
+    head = candidates[:candidate_k]
+    tail = candidates[candidate_k:]
+    try:
+        ranked_head = rerank_results(
+            query,
+            head,
+            route_ranks=route_ranks,
+            top_k=len(head),
+            scorer=configured.score,
+            expanded_query=expanded_query,
+        )
+    except Exception as exc:
+        log.warning("rag.reranker_scoring_failed", error_type=type(exc).__name__)
+        return _fallback_rerank(
+            query,
+            candidates,
+            route_ranks=route_ranks,
+            expanded_query=expanded_query,
+            error_code="RERANK_SCORING_FAILED",
+        )
+    ranked_tail = rerank_results(
+        query,
+        tail,
+        route_ranks=route_ranks,
+        top_k=len(tail),
+        expanded_query=expanded_query,
+    )
+    return [*ranked_head, *ranked_tail]
+
+
+def _fallback_rerank(
+    query: str,
+    candidates: list[dict],
+    *,
+    route_ranks: dict[int, dict[str, int | None]],
+    expanded_query: str,
+    error_code: str,
+) -> list[dict]:
+    ranked = rerank_results(
+        query,
+        candidates,
+        route_ranks=route_ranks,
+        top_k=len(candidates),
+        expanded_query=expanded_query,
+    )
+    for item in ranked:
+        item["retrieval_trace"]["rerank_error_code"] = error_code
+    return ranked
 
 
 def _result_from_doc(
