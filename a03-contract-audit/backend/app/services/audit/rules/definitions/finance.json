@@ -1,0 +1,26 @@
+[
+  {
+    "rule_id": "FIN-PAYMENT-TERMS-MISSING-001",
+    "version": "1.0.0",
+    "name": "付款日期及方式缺失",
+    "category": "completeness",
+    "agent": "finance",
+    "dimensions": ["payment"],
+    "contract_types": [],
+    "severity": "medium",
+    "handler": "payment_terms_missing",
+    "manual_review_on_unclear": true
+  },
+  {
+    "rule_id": "FIN-PAYMENT-TOTAL-001",
+    "version": "1.0.0",
+    "name": "付款比例合计检查",
+    "category": "numeric",
+    "agent": "finance",
+    "dimensions": ["payment"],
+    "contract_types": [],
+    "severity": "high",
+    "handler": "payment_total",
+    "manual_review_on_unclear": true
+  }
+]

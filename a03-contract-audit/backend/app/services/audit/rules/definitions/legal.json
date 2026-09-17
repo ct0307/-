@@ -1,0 +1,38 @@
+[
+  {
+    "rule_id": "LEGAL-PARTY-MISSING-001",
+    "version": "1.0.0",
+    "name": "合同主体信息缺失",
+    "category": "completeness",
+    "agent": "legal",
+    "dimensions": ["legal"],
+    "contract_types": [],
+    "severity": "high",
+    "handler": "party_missing",
+    "manual_review_on_unclear": true
+  },
+  {
+    "rule_id": "LEGAL-SCOPE-MISSING-001",
+    "version": "1.0.0",
+    "name": "工作范围约定缺失",
+    "category": "completeness",
+    "agent": "legal",
+    "dimensions": ["legal"],
+    "contract_types": [],
+    "severity": "medium",
+    "handler": "work_scope_missing",
+    "manual_review_on_unclear": true
+  },
+  {
+    "rule_id": "LEGAL-INJURY-WAIVER-001",
+    "version": "1.0.0",
+    "name": "人身损害绝对免责",
+    "category": "format",
+    "agent": "legal",
+    "dimensions": ["breach", "risk"],
+    "contract_types": [],
+    "severity": "high",
+    "handler": "absolute_injury_waiver",
+    "manual_review_on_unclear": true
+  }
+]
