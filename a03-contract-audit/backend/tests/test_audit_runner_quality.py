@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from functools import partial
 
 import pytest
@@ -136,6 +137,70 @@ def test_native_high_quality_contract_finishes_without_quality_risk(
     assert result["status"] == "done"
     assert result["coverage"] == {"planned": 1, "completed": 1}
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
+
+
+def test_runner_passes_only_confirmed_contract_date_as_legal_as_of(
+    monkeypatch, db: Session
+):
+    contract = _contract(db, "confirmed-date.txt")
+    contract.elements_json = json.dumps({
+        "sign_date": "2026-01-15",
+        "sign_date_confirmed": True,
+    })
+    db.commit()
+    parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    captured = {}
+
+    def fake_audit(*_args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "risks": [],
+            "cross_checks": [],
+            "issues": [],
+            "coverage": {"planned": 1, "completed": 1},
+        }
+
+    monkeypatch.setattr(runner, "audit_contract", fake_audit)
+
+    result = run_audit(db, contract)
+
+    assert captured["legal_as_of"] == date(2026, 1, 15)
+    assert result["legal_as_of"] == "2026-01-15"
+    assert result["legal_as_of_source"] == "confirmed_sign_date"
+
+
+def test_runner_treats_non_object_elements_as_unknown_legal_as_of(
+    monkeypatch, db: Session
+):
+    contract = _contract(db, "legacy-elements.txt")
+    contract.elements_json = "[]"
+    db.commit()
+    monkeypatch.setattr(
+        runner,
+        "extract_document",
+        lambda _path: DocumentParseResult(
+            text="有效合同正文" * 60,
+            source="native",
+        ),
+    )
+    captured = {}
+
+    def fake_audit(*_args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "risks": [],
+            "cross_checks": [],
+            "issues": [],
+            "coverage": {"planned": 1, "completed": 1},
+        }
+
+    monkeypatch.setattr(runner, "audit_contract", fake_audit)
+
+    result = run_audit(db, contract)
+
+    assert captured["legal_as_of"] is None
+    assert result["legal_as_of_source"] == "unknown"
 
 
 def test_run_audit_reports_parse_and_persists_terminal_progress(

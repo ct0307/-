@@ -21,6 +21,7 @@ from app.services.audit.evidence_persistence import (
 from app.services.audit.protocol import ReviewIssue
 from app.services.audit.progress import ProgressCallback
 from app.services.audit.result_quality import AuditCoverage, decide_audit_status
+from app.services.rag.applicability import resolve_legal_as_of
 from app.services.parser.extractor import (
     DocumentParseResult,
     extract_document,
@@ -362,6 +363,8 @@ def _compute_audit(
         "finance_agent_ms": 0,
         "grounding_ms": 0,
     }
+    legal_as_of: str | None = None
+    legal_as_of_source = "unknown"
 
     if len(text) < 200:
         log.warning("audit_runner.text_too_short", contract_id=contract_id,
@@ -374,12 +377,15 @@ def _compute_audit(
     else:
         # 避免审查时重复调 LLM，同时保留 has_*/text_length 等正则信号。
         elements = extract_elements(text)  # 先跑正则（信号字段）
+        saved: dict = {}
         try:
-            saved = json.loads(elements_json)
+            decoded = json.loads(elements_json)
+            saved = decoded if isinstance(decoded, dict) else {}
             if any(saved.get(k) for k in ("party_a", "subject", "payment_terms")):
                 elements.update({k: v for k, v in saved.items() if v and isinstance(v, str)})
         except (ValueError, AttributeError):
             pass  # elements_json 损坏时静默降级
+        legal_as_of_context = resolve_legal_as_of(saved)
         result = audit_contract(
             elements, text,
             db=db, contract_id=contract_id,
@@ -390,7 +396,16 @@ def _compute_audit(
             deadline=deadline,
             clock=clock,
             progress_callback=progress_callback,
+            legal_as_of=legal_as_of_context.as_of,
         )
+        result["legal_as_of"] = (
+            legal_as_of_context.as_of.isoformat()
+            if legal_as_of_context.as_of is not None
+            else None
+        )
+        result["legal_as_of_source"] = legal_as_of_context.source
+        legal_as_of = result["legal_as_of"]
+        legal_as_of_source = legal_as_of_context.source
         risk_payloads.extend(result["risks"])
         cross_checks = result["cross_checks"]
         issues.extend(_review_issues(result.get("issues", [])))
@@ -415,6 +430,8 @@ def _compute_audit(
         "risk_count": risk_count,
         "cross_checks": cross_checks,
         "ocr_confidence": parsed.ocr_confidence,
+        "legal_as_of": legal_as_of,
+        "legal_as_of_source": legal_as_of_source,
         "_parsed": parsed,
         "_risks": risk_payloads,
         "_issues": issues,

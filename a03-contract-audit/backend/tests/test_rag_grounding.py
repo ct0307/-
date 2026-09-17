@@ -1,4 +1,5 @@
 import unittest
+from datetime import date
 from unittest.mock import patch
 
 from app.services.audit import auditor
@@ -73,6 +74,21 @@ class RagGroundingTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["contract_type"], "采购合同")
         self.assertEqual(calls[0][1]["dimensions"], ["breach", "dispute"])
 
+    def test_grounding_passes_explicit_legal_as_of_to_retriever(self):
+        calls = []
+
+        def fake_retrieve(_query, **kwargs):
+            calls.append(kwargs)
+            return []
+
+        with patch.object(auditor, "retrieve", side_effect=fake_retrieve):
+            auditor._ground_risks(
+                [_risk("违约责任", "违约金为50%")],
+                legal_as_of=date(2026, 1, 15),
+            )
+
+        self.assertEqual(calls[0]["as_of"], date(2026, 1, 15))
+
     def test_verified_original_with_retrieved_source_still_requires_support_review(self):
         risks = [_risk("违约责任", "违约金为50%")]
 
@@ -92,6 +108,27 @@ class RagGroundingTests(unittest.TestCase):
         self.assertEqual(grounded[0]["support_relation_status"], "supported")
         self.assertEqual(grounded[0]["evidence_status"], "supported")
         self.assertFalse(grounded[0]["requires_manual_review"])
+
+    def test_unknown_source_applicability_cannot_be_automatically_accepted(self):
+        risks = [_risk("违约责任", "违约金为50%")]
+
+        with patch.object(auditor, "retrieve", return_value=[{
+            "content": "约定违约金过高时可以适当减少。",
+            "source": "民法典",
+            "article_number": "第五百八十五条",
+            "score": 0.9,
+            "reliable": True,
+            "applicability_status": "unknown_as_of",
+            "applicability_reason_code": "AS_OF_DATE_UNKNOWN",
+        }]):
+            grounded = auditor._ground_risks(
+                risks,
+                contract_text="合同约定：违约金为50%。",
+            )
+
+        self.assertEqual(grounded[0]["evidence_status"], "partially_supported")
+        self.assertEqual(grounded[0]["claim_status"], "manual_review")
+        self.assertTrue(grounded[0]["requires_manual_review"])
 
     def test_unverified_original_is_partial_and_requires_review(self):
         risks = [_risk("违约责任", "合同没有出现的原文")]

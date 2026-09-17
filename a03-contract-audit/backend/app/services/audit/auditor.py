@@ -22,6 +22,7 @@ import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING, Callable
 
 from app.core.config import settings
@@ -107,6 +108,7 @@ def audit_contract(
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
     progress_callback: ProgressCallback | None = None,
+    legal_as_of: date | None = None,
 ) -> dict:
     """多智能体主从协同审查。dimensions 为空/None 时全量审查。"""
     all_risks: list[dict] = []
@@ -168,6 +170,7 @@ def audit_contract(
             deadline=deadline,
             clock=clock,
             window_completed_callback=report_window_complete,
+            legal_as_of=legal_as_of,
         )
 
     first_pass_bundle = first_pass(run_first_pass, roles=active_roles)
@@ -195,6 +198,7 @@ def audit_contract(
         contract_text,
         dimensions=canonical_dimensions,
         contract_type=contract_type,
+        legal_as_of=legal_as_of,
     )
     all_risks.extend(deterministic_risks)
     all_issues.extend(deterministic_issues)
@@ -437,6 +441,7 @@ def _agent_audit(
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
     window_completed_callback: Callable[[], None] | None = None,
+    legal_as_of: date | None = None,
 ) -> AgentAuditResult:
     """单个 Agent 的窗口审查、原文核验和逐项 RAG 依据校验。"""
     agent_started = time.perf_counter()
@@ -457,6 +462,7 @@ def _agent_audit(
             top_k=2,
             contract_type=contract_type,
             dimensions=selected_dimensions,
+            as_of=legal_as_of,
         ):
             key = item["source"] + item["content"][:20]
             if key not in seen:
@@ -666,6 +672,7 @@ def _agent_audit(
         contract_text=contract_text,
         contract_type=contract_type,
         dimensions=selected_dimensions,
+        legal_as_of=legal_as_of,
     )
     grounded = _deduplicate_grounded_risks(grounded)
     if timings is not None:
@@ -738,6 +745,7 @@ def _deterministic_audit(
     *,
     dimensions: list[str],
     contract_type: str,
+    legal_as_of: date | None = None,
 ) -> tuple[list[dict], list[ReviewIssue]]:
     windows = build_contract_windows(contract_text, max_chars=8000)
     risks: list[dict] = []
@@ -764,6 +772,7 @@ def _deterministic_audit(
         contract_text=contract_text,
         contract_type=contract_type,
         dimensions=dimensions,
+        legal_as_of=legal_as_of,
     )
     issues: list[ReviewIssue] = []
     for risk in grounded:
@@ -786,6 +795,7 @@ def _ground_risks(
     contract_text: str | None = None,
     contract_type: str = "",
     dimensions: list[str] | None = None,
+    legal_as_of: date | None = None,
 ) -> list[dict]:
     """为每条候选风险独立检索，只保留作用域可信的候选依据。"""
     for risk in risks:
@@ -805,6 +815,7 @@ def _ground_risks(
                 top_k=3,
                 contract_type=contract_type,
                 dimensions=dimensions or [],
+                as_of=legal_as_of,
                 # grounding 查询拼接了合同原文，其中的“第X条”是合同自身条款编号，
                 # 不是法条引用；必须关闭条号精确短路，走完整混合检索。
                 allow_exact=False,
@@ -828,8 +839,25 @@ def _ground_risks(
         reliable_sources = [
             source for source in selected_sources if source.get("reliable", False)
         ]
+        applicability_statuses = {
+            str(source.get("applicability_status", "applicable"))
+            for source in reliable_sources
+        }
+        applicability_status = (
+            "unknown_as_of"
+            if "unknown_as_of" in applicability_statuses
+            else "applicable"
+            if reliable_sources and applicability_statuses == {"applicable"}
+            else "unresolved"
+        )
         risk["rag_sources"] = reliable_sources
         risk["evidence_ids"] = [_evidence_id(source) for source in reliable_sources]
+        risk["applicability_status"] = applicability_status
+        risk["applicability_reason_codes"] = sorted({
+            str(source.get("applicability_reason_code"))
+            for source in reliable_sources
+            if source.get("applicability_reason_code")
+        })
         original_verified = _verify_original_text(
             risk.get("original_text", ""), contract_text
         )
@@ -838,7 +866,12 @@ def _ground_risks(
         risk["support_relation_status"] = validation.status
         risk["support_validation_reason"] = validation.reason
         risk["support_validator_version"] = validation.version
-        if reliable_sources and original_verified is True and validation.status == "supported":
+        if (
+            reliable_sources
+            and applicability_status == "applicable"
+            and original_verified is True
+            and validation.status == "supported"
+        ):
             risk["basis"] = "；".join(_format_source(source) for source in reliable_sources)
             risk["evidence_status"] = "supported"
             risk["claim_status"] = "accepted"

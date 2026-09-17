@@ -42,6 +42,7 @@ from app.models.models import KnowledgeChunk, LegalArticle
 from app.services.rag.revision import bump_knowledge_revision, current_knowledge_revision
 from app.services.rag.legal_sources import chinese_number_to_int, int_to_chinese_number
 from app.services.rag.snapshot import RetrievalSnapshot, SnapshotStore
+from app.services.rag.applicability import assess_applicability
 
 log = get_logger("rag")
 
@@ -232,7 +233,7 @@ def retrieve(
         contract_type=contract_type,
         dimensions=dimensions or [],
         categories=categories or [],
-        as_of=as_of or date.today(),
+        as_of=as_of,
     )
     if not docs:
         log.info("rag.retrieve", mode="filtered_empty", matched=0)
@@ -255,7 +256,12 @@ def retrieve(
             _doc_value(doc, 15, 0) or 0,
             doc[0],
         ))
-        result = _result_from_doc(exact_docs[0], score=1.0, retrieval_mode="exact")
+        result = _result_from_doc(
+            exact_docs[0],
+            score=1.0,
+            retrieval_mode="exact",
+            as_of=as_of,
+        )
         log.info("rag.retrieve", mode="exact", matched=1)
         return [result]
 
@@ -289,7 +295,12 @@ def retrieve(
 
     mode = "hybrid" if vec_ok else "bm25"
     ranked_results = [
-        _result_from_doc(id_to_doc[doc_id], score=score, retrieval_mode=mode)
+        _result_from_doc(
+            id_to_doc[doc_id],
+            score=score,
+            retrieval_mode=mode,
+            as_of=as_of,
+        )
         for doc_id, score in fused
     ]
     route_ranks = {
@@ -395,8 +406,21 @@ def rerank_results(
     return ranked[:top_k]
 
 
-def _result_from_doc(doc: tuple, *, score: float, retrieval_mode: str) -> dict:
+def _result_from_doc(
+    doc: tuple,
+    *,
+    score: float,
+    retrieval_mode: str,
+    as_of: date | None = None,
+) -> dict:
     matched_content = doc[1]
+    effective_date = _doc_value(doc, 7)
+    expiry_date = _doc_value(doc, 8)
+    applicability = assess_applicability(
+        effective_date,
+        expiry_date,
+        as_of,
+    )
     return {
         "chunk_id": doc[0],
         "matched_content": matched_content,
@@ -405,6 +429,10 @@ def _result_from_doc(doc: tuple, *, score: float, retrieval_mode: str) -> dict:
         "score": round(score, 4),
         "article_number": _doc_value(doc, 5) or _extract_article_number(matched_content),
         "version": _doc_value(doc, 6),
+        "effective_date": effective_date.isoformat() if effective_date else None,
+        "expiry_date": expiry_date.isoformat() if expiry_date else None,
+        "applicability_status": applicability.status,
+        "applicability_reason_code": applicability.reason_code,
         "retrieval_mode": retrieval_mode,
         "reliable": _doc_value(doc, 13) in {"global", "scoped"},
         "legal_article_id": _doc_value(doc, 14),
@@ -487,7 +515,6 @@ def _filter_docs(
     wanted_type = contract_type.strip().casefold()
     wanted_dimensions = {value.strip().casefold() for value in (dimensions or []) if value.strip()}
     wanted_categories = {value.strip().casefold() for value in (categories or []) if value.strip()}
-    effective_on = as_of or date.today()
     filtered: list[tuple] = []
     for doc in docs:
         scope_mode = str(_doc_value(doc, 13, "unclassified") or "unclassified").casefold()
@@ -498,9 +525,9 @@ def _filter_docs(
             continue
         effective_date = _doc_value(doc, 7)
         expiry_date = _doc_value(doc, 8)
-        if effective_date and effective_date > effective_on:
+        if as_of is not None and effective_date and effective_date > as_of:
             continue
-        if expiry_date and expiry_date < effective_on:
+        if as_of is not None and expiry_date and expiry_date < as_of:
             continue
         contract_types = {value.casefold() for value in _json_string_list(_doc_value(doc, 9, "[]"))}
         doc_dimensions = {value.casefold() for value in _json_string_list(_doc_value(doc, 10, "[]"))}
@@ -855,6 +882,10 @@ def _keyword_search(query: str, top_k: int) -> list[dict]:
                 "legal_article_id": None,
                 "chunk_index": None,
                 "chunk_count": None,
+                "effective_date": None,
+                "expiry_date": None,
+                "applicability_status": "unknown_as_of",
+                "applicability_reason_code": "AS_OF_DATE_UNKNOWN",
             })
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:top_k]
