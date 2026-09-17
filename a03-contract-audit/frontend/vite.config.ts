@@ -6,6 +6,15 @@ const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://localhost:80
 
 export default defineConfig({
   plugins: [vue()],
+  optimizeDeps: {
+    // 一次性预构建共享依赖图，避免 ECharts 子入口在开发期落入不同模块实例。
+    include: [
+      'echarts/core',
+      'echarts/charts',
+      'echarts/components',
+      'echarts/renderers',
+    ],
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

@@ -1,5 +1,5 @@
 // 双 Agent 协作页 mock：Agent 元数据（对齐后端 auditor._AGENTS）+ 一套预设协作演示数据。
-// 真实会话（audit-session 有风险数据）时页面用真实数据；无会话时降级到此处 DEMO_* 展示。
+// 正式页面仅复用职责和分档元数据，不再自动使用此处 DEMO_*。
 
 export type AgentKey = 'legal' | 'finance'
 
@@ -149,9 +149,9 @@ export const RISK_TIERS: Record<TierKey, TierMeta> = {
     label: '绿档 · 低风险',
     accent: 'var(--sage)',
     criteria: '低风险、原文与依据支持关系均已核验',
-    intervention: 'AI 自动审查通过，推送至「自动归档待签批」池',
-    approvers: '审批人一键签批',
-    actionLabel: '一键签批',
+    intervention: '低风险且证据已核验，仍可查看原文并人工复核',
+    approvers: '经办人或审批人复核',
+    actionLabel: '查看复核',
   },
   yellow: {
     key: 'yellow',
@@ -167,7 +167,7 @@ export const RISK_TIERS: Record<TierKey, TierMeta> = {
     label: '红档 · 高风险',
     accent: 'var(--seal)',
     criteria: '高风险，或涉及关联交易 / 重大赔偿 / 税法争议 / 跨 Agent 冲突',
-    intervention: '系统强制三员会审，人工参与方可解锁下一步',
+    intervention: '建议法务、财务与合规共同复核；可发起会审并记录日志',
     approvers: '法务专家 + 财务专家 + 合规总监',
     actionLabel: '发起三员会审',
   },

@@ -1,20 +1,16 @@
 <script setup lang="ts">
 // 双 Agent 协作全景：展示法务/财务两个 Agent 的职责、协作流程与结果分析。
-// 数据源：有真实审查会话（audit-session 有风险）→ 用真实数据；否则降级到 collaboration mock 演示数据。
-import { computed, ref } from 'vue'
+// 只展示持久化的真实审查会话；未选择结果时展示空状态。
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { useAuditSessionStore } from '@/stores/audit-session'
 import client from '@/api/client'
 import {
   AGENTS,
-  CROSS_CHECKS,
-  DEMO_CONTRACT,
-  DEMO_RISKS,
   RISK_TIERS,
   type AgentKey,
   type CrossCheck,
-  type DemoRisk,
   type TierKey,
 } from '@/mock/collaboration'
 import type { RiskOut } from '@/api/types'
@@ -23,14 +19,19 @@ import { evidenceMeta } from '@/utils/risk-evidence'
 const router = useRouter()
 const session = useAuditSessionStore()
 
-// 是否有真实审查会话（已审查且有风险）
-const isLive = computed(() => session.step >= 2 && session.risks.length > 0)
+// 零风险也是有效的真实审查结果。
+const isLive = computed(() => session.step >= 2 && session.contractId !== null)
+const restoreError = ref('')
+async function restore() {
+  restoreError.value = ''
+  try { await session.restoreCompletedAudit() }
+  catch (error) { restoreError.value = error instanceof Error ? error.message : '审查结果恢复失败' }
+}
+onMounted(restore)
 
-// 统一风险数据：真实会话优先，否则演示数据
-const risks = computed<(RiskOut | DemoRisk)[]>(() =>
-  isLive.value ? session.risks : DEMO_RISKS,
-)
-const contractName = computed(() => (isLive.value ? session.filename : DEMO_CONTRACT))
+// 未选择合同不注入演示风险。
+const risks = computed<RiskOut[]>(() => isLive.value ? session.risks : [])
+const contractName = computed(() => isLive.value ? session.filename : '')
 
 // 按 Agent 分组
 function risksOf(agent: AgentKey) {
@@ -61,6 +62,10 @@ const overview = computed(() => {
 })
 
 const agentList = [AGENTS.legal, AGENTS.finance]
+const sourceMeta = {
+  ...AGENTS,
+  system: { name: '规则校验', icon: 'Operation', accent: 'var(--muted)' },
+}
 
 const levelMeta: Record<string, { label: string; type: 'danger' | 'warning' | 'info' }> = {
   high: { label: '高', type: 'danger' },
@@ -76,13 +81,12 @@ const statusLabel: Record<string, string> = {
 
 // 冲突消解裁定的视觉映射
 const verdictMeta: Record<CrossCheck['verdict'], { label: string; type: 'danger' | 'warning' | 'success' }> = {
-  conflict: { label: '冲突·高风险', type: 'danger' },
+  conflict: { label: '候选冲突·待核对', type: 'danger' },
   watch: { label: '待观察', type: 'warning' },
   confirmed: { label: '已确认', type: 'success' },
 }
 
-// 冲突项：真实会话用后端返回（store.crossChecks），无会话降级到 mock 剧本。
-// 后端字段 from_agent/to_agent 映射到 mock 的 from/to，模板统一消费。
+// 后端记录是唯一来源，明确区分模型与规则校验。
 const crossChecks = computed(() =>
   isLive.value && session.crossChecks.length
     ? session.crossChecks.map((c) => ({
@@ -94,14 +98,14 @@ const crossChecks = computed(() =>
         verdict: c.verdict,
         note: c.note,
       }))
-    : CROSS_CHECKS,
+    : [],
 )
 const conflictCount = computed(() => crossChecks.value.filter((c) => c.verdict === 'conflict').length)
 
 // —— 分级风险人工干预：把每条风险归入绿/黄/红档 ——
-// 真实会话优先用后端权威分档（RiskOut.tier）；mock 演示数据无 tier，前端按同一口径推导。
+// 优先用后端分档，旧记录按相同口径推导。
 const RED_KEYWORDS = ['关联交易', '关联方', '重大赔偿', '税法争议', '舞弊', '主体缺失']
-function tierOf(r: RiskOut | DemoRisk): TierKey {
+function tierOf(r: RiskOut): TierKey {
   if ('tier' in r && r.tier) return r.tier
   const sensitive = RED_KEYWORDS.some((k) => r.category.includes(k) || r.basis.includes(k))
   if (r.level === 'high' || sensitive) return 'red'
@@ -131,7 +135,7 @@ async function onTierAction(key: TierKey) {
     return
   }
   if (key === 'green') {
-    ElMessage.success('绿档已自动过审，无需人工介入')
+    router.push('/audit')
     return
   }
   if (key === 'red') {
@@ -159,12 +163,15 @@ function goAudit() {
 </script>
 
 <template>
-  <div class="collab-page">
+  <div v-loading="session.busy" class="collab-page">
+    <el-alert v-if="restoreError" :title="restoreError" type="error" :closable="false">
+      <el-button @click="restore">重新加载</el-button>
+    </el-alert>
     <!-- 顶部：数据源状态 + 当前合同 -->
     <div class="page-head">
       <div class="src-badge" :class="{ live: isLive }">
         <span class="dot" />
-        {{ isLive ? '真实审查会话' : '演示数据 · 未开始审查' }}
+        {{ isLive ? '真实审查会话' : '尚未选择审查结果' }}
       </div>
       <div class="head-right">
         <span class="mono contract-name">{{ contractName }}</span>
@@ -214,7 +221,8 @@ function goAudit() {
     <!-- 无真实会话：引导用户先完成合同审查 -->
     <div v-if="!isLive" class="no-data-guide">
       <el-icon :size="36"><DocumentChecked /></el-icon>
-      <p>完成合同审查后，此处将显示冲突消解结果与分级风险策略</p>
+      <p>在合同审查中打开已完成的结果，即可查看真实协作分析；刷新后自动恢复。</p>
+      <el-button size="small" @click="router.push('/reports')">从报表选择合同</el-button>
       <el-button type="primary" size="small" @click="goAudit">去上传合同并审查</el-button>
     </div>
 
@@ -230,6 +238,7 @@ function goAudit() {
         </div>
       </template>
       <div class="cross-list">
+        <el-empty v-if="!crossChecks.length" description="暂无跨智能体冲突记录" />
         <article
           v-for="c in crossChecks"
           :key="c.id"
@@ -237,12 +246,12 @@ function goAudit() {
           :class="`v-${c.verdict}`"
         >
           <div class="cross-flow">
-            <span class="cross-agent" :style="{ '--accent': AGENTS[c.from].accent }">
-              <el-icon><component :is="AGENTS[c.from].icon" /></el-icon>{{ AGENTS[c.from].name }}
+            <span class="cross-agent" :style="{ '--accent': (sourceMeta[c.from] || sourceMeta.system).accent }">
+              <el-icon><component :is="(sourceMeta[c.from] || sourceMeta.system).icon" /></el-icon>{{ (sourceMeta[c.from] || sourceMeta.system).name }}
             </span>
             <span class="cross-dir mono">触发 →</span>
-            <span class="cross-agent" :style="{ '--accent': AGENTS[c.to].accent }">
-              <el-icon><component :is="AGENTS[c.to].icon" /></el-icon>{{ AGENTS[c.to].name }}
+            <span class="cross-agent" :style="{ '--accent': (sourceMeta[c.to] || sourceMeta.system).accent }">
+              <el-icon><component :is="(sourceMeta[c.to] || sourceMeta.system).icon" /></el-icon>{{ (sourceMeta[c.to] || sourceMeta.system).name }}
             </span>
             <el-tag :type="verdictMeta[c.verdict].type" size="small" class="cross-verdict">
               {{ verdictMeta[c.verdict].label }}
@@ -250,8 +259,8 @@ function goAudit() {
           </div>
           <div class="cross-body">
             <p><b>触发条件</b>{{ c.trigger }}</p>
-            <p><b>协同动作</b>{{ c.action }}</p>
-            <p class="cross-note"><b>联合推理</b>{{ c.note }}</p>
+            <p><b>核对建议</b>{{ c.action }}</p>
+            <p class="cross-note"><b>检查说明</b><span>{{ c.note }}</span></p>
           </div>
         </article>
       </div>
@@ -317,7 +326,7 @@ function goAudit() {
         </section>
       </div>
       <p class="disclaimer">
-        系统按证据状态和风险等级安排人工介入：依据支持关系已核验的低风险进入绿档，黄档逐条核实，红档强制三员会审。
+        系统按证据状态和风险等级安排人工介入：原文与依据已核验的低风险进入绿档，黄档逐条核实，红档建议三方共同复核。
         分档结果仅供辅助，最终以人工复核为准。
       </p>
     </el-card>

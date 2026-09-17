@@ -1,16 +1,223 @@
 """报表导出：Excel 风险台账 + 看板聚合数据。"""
 import io
+import hashlib
 import json
+import re
+from datetime import datetime, timezone
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from app.models.models import Contract, Risk
+from app.models.models import AuditBatchItem, Contract, ContractClause, Rectification, Risk
+from app.services.report.renderers import export_report_docx, export_report_xlsx
+from app.services.report.payment_insights import analyze_payments
+from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
 
 DepartmentScope = str | set[str] | None
+
+_TERMINAL_SUCCESS = {"done", "review_required"}
+_FAILED = {"failed"}
+_XML_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _json_value(value, fallback):
+    try:
+        parsed = json.loads(value or "")
+        return parsed if isinstance(parsed, type(fallback)) else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _clean_text(value) -> str:
+    return _XML_CONTROL_RE.sub("", str(value or ""))
+
+
+def _excel_value(value):
+    value = _clean_text(value)
+    return f"'{value}" if value.startswith(("=", "+", "-", "@")) else value
+
+
+def _normalize_contract_ids(contract_ids: list[int] | None) -> list[int] | None:
+    if contract_ids is None:
+        return None
+    if not contract_ids or len(contract_ids) > 200:
+        raise ValueError("contract_ids 必须包含 1 到 200 个合同 ID")
+    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in contract_ids):
+        raise ValueError("合同 ID 必须为正整数")
+    return list(dict.fromkeys(contract_ids))
+
+
+def build_report_snapshot(
+    db: Session,
+    contract_ids: list[int] | None = None,
+    department_scope: DepartmentScope = None,
+) -> dict:
+    """在当前数据库事务内构建可序列化、可复现的统一报告快照。"""
+    connection = db.connection()
+    if connection.dialect.name == "sqlite" and not connection.connection.driver_connection.in_transaction:
+        connection.execute(text("BEGIN"))
+    selected_ids = _normalize_contract_ids(contract_ids)
+    query = db.query(Contract).filter(Contract.deleted_at.is_(None))
+    if selected_ids is not None:
+        existing = {row[0] for row in db.query(Contract.id).filter(Contract.id.in_(selected_ids), Contract.deleted_at.is_(None)).all()}
+        missing = set(selected_ids) - existing
+        if missing:
+            raise LookupError(f"合同不存在或已删除：{sorted(missing)}")
+        query = query.filter(Contract.id.in_(selected_ids))
+    query = _scope_contracts(query, department_scope)
+    contracts = query.order_by(Contract.id).all()
+    if selected_ids is not None:
+        accessible = {row.id for row in contracts}
+        if accessible != set(selected_ids):
+            raise PermissionError("所选合同包含无权访问的数据")
+
+    ids = [row.id for row in contracts]
+    jobs = [] if not ids else db.query(AuditBatchItem).filter(
+        AuditBatchItem.contract_id.in_(ids)
+    ).order_by(AuditBatchItem.contract_id, AuditBatchItem.audit_generation.desc(), AuditBatchItem.id.desc()).all()
+    latest_jobs: dict[int, AuditBatchItem] = {}
+    for job in jobs:
+        latest_jobs.setdefault(job.contract_id, job)
+
+    risk_query = db.query(Risk).filter(Risk.contract_id.in_(ids)) if ids else None
+    all_risks = risk_query.order_by(Risk.contract_id, Risk.id).all() if risk_query is not None else []
+    visible_risks = []
+    notes: list[str] = []
+    for risk in all_risks:
+        job = latest_jobs.get(risk.contract_id)
+        if job is None:
+            if risk.audit_job_id is None:
+                visible_risks.append(risk)
+            continue
+        if job.status in _TERMINAL_SUCCESS and risk.audit_job_id == job.id:
+            visible_risks.append(risk)
+
+    contract_rows = []
+    clauses_by_contract = {}
+    if ids:
+        for clause in db.query(ContractClause).filter(ContractClause.contract_id.in_(ids)).order_by(ContractClause.char_start, ContractClause.id).all():
+            job = latest_jobs.get(clause.contract_id)
+            if job and clause.audit_generation == job.audit_generation and job.status in _TERMINAL_SUCCESS:
+                clauses_by_contract.setdefault(clause.contract_id, []).append(clause.content)
+    for contract in contracts:
+        job = latest_jobs.get(contract.id)
+        elements = _json_value(contract.elements_json, {})
+        job_payload = _json_value(job.result_json, {}) if job else {}
+        quality = quality_snapshot(job, contract) if job else None
+        contract_risks = [r for r in visible_risks if r.contract_id == contract.id]
+        contract_rows.append({
+            "id": contract.id,
+            "filename": _clean_text(contract.filename),
+            "contract_type": contract.contract_type or "",
+            "suggested_type": contract.suggested_type or "",
+            "type_confidence": contract.type_confidence,
+            "type_evidence": _json_value(contract.type_evidence_json, []),
+            "department": contract.department or "",
+            "status": contract.status,
+            "content_sha256": contract.content_sha256,
+            "audit_generation": job.audit_generation if job else contract.audit_generation,
+            "elements": elements,
+            "party_a": str(elements.get("party_a") or "—"),
+            "subject": str(elements.get("subject") or "—"),
+            "payment_terms": str(elements.get("payment_terms") or "—"),
+            "amount": str(elements.get("amount") or "—"),
+            "risk_high": sum(r.level == "high" for r in contract_risks),
+            "risk_medium": sum(r.level == "medium" for r in contract_risks),
+            "risk_low": sum(r.level == "low" for r in contract_risks),
+            "risk_total": len(contract_risks),
+            "element_evidence": _json_value(contract.element_evidence_json, {}),
+            "parse_source": contract.parse_source,
+            "ocr_confidence": quality.ocr_confidence if quality else contract.ocr_confidence,
+            "requires_review": quality.requires_review if quality else bool(contract.requires_review),
+            "review_reason": (job.error or quality.review_reason) if job else contract.review_reason,
+            "job_id": job.id if job else None,
+            "job_status": job.status if job else None,
+            "coverage": safe_coverage(job_payload.get("coverage")),
+            "cross_checks": job_payload.get("cross_checks", []) if isinstance(job_payload.get("cross_checks", []), list) else [],
+            "created_at": _iso(contract.created_at),
+            "finished_at": _iso(job.finished_at) if job else None,
+            "payment_analysis": analyze_payments("\n".join(clauses_by_contract.get(contract.id, []))),
+        })
+        if job is None:
+            notes.append(f"{contract.filename}：无审查任务，风险为历史兼容数据且无任务质量信息。")
+        elif job.status in _FAILED:
+            notes.append(f"{contract.filename}：最新审查任务失败，未将旧任务风险作为当前结果。")
+
+    filename_by_id = {row.id: _clean_text(row.filename) for row in contracts}
+    risk_rows = [{
+        "id": risk.id,
+        "contract_id": risk.contract_id,
+        "filename": filename_by_id.get(risk.contract_id, ""),
+        "audit_job_id": risk.audit_job_id,
+        "agent": risk.agent,
+        "level": risk.level,
+        "category": _clean_text(risk.category),
+        "original_text": _clean_text(risk.original_text),
+        "risk_reason": _clean_text(risk.risk_reason),
+        "basis": _clean_text(risk.basis),
+        "suggestion": _clean_text(risk.suggestion),
+        "confidence": risk.confidence,
+        "tier": risk.tier,
+        "evidence_status": risk.evidence_status,
+        "original_text_verified": risk.original_text_verified,
+        "requires_manual_review": bool(risk.requires_manual_review),
+        "review_status": risk.review_status,
+        "support_relation_status": risk.support_relation_status,
+        "support_validation_reason": _clean_text(risk.support_validation_reason),
+        "claim_id": risk.claim_id,
+        "claim_status": risk.claim_status,
+        "secondary_review_status": risk.secondary_review_status,
+        "secondary_review_reason": _clean_text(risk.secondary_review_reason),
+        "contract_evidence": _json_value(risk.contract_evidence_json, []),
+        "rag_sources": _json_value(risk.rag_sources, []),
+        "created_at": _iso(risk.created_at),
+    } for risk in visible_risks]
+
+    visible_risk_ids = {row["id"] for row in risk_rows}
+    rectifications = []
+    if visible_risk_ids:
+        for row in db.query(Rectification).filter(Rectification.risk_id.in_(visible_risk_ids)).order_by(Rectification.id).all():
+            rectifications.append({
+                "id": row.id, "risk_id": row.risk_id, "contract": _clean_text(row.contract),
+                "risk": _clean_text(row.risk), "level": row.level, "owner": _clean_text(row.owner),
+                "status": row.status, "created": row.created, "due": row.due,
+                "note": _clean_text(row.note), "created_at": _iso(row.created_at),
+            })
+
+    categories = sorted({row["category"] for row in risk_rows})
+    matrix_rows = []
+    for contract in contract_rows:
+        counts = [sum(1 for risk in risk_rows if risk["contract_id"] == contract["id"] and risk["category"] == category) for category in categories]
+        matrix_rows.append({"contract_id": contract["id"], "filename": contract["filename"], "counts": counts})
+    statuses = [row["job_status"] for row in contract_rows]
+    summary = {
+        "total": len(contract_rows),
+        "completed": sum(value == "done" for value in statuses),
+        "review_required": sum(value == "review_required" for value in statuses),
+        "failed": sum(value in _FAILED for value in statuses),
+        "unreviewed": sum(value is None for value in statuses),
+        "running": sum(value is not None and value not in _TERMINAL_SUCCESS | _FAILED for value in statuses),
+        "risks": len(risk_rows),
+        "high": sum(row["level"] == "high" for row in risk_rows),
+        "medium": sum(row["level"] == "medium" for row in risk_rows),
+        "low": sum(row["level"] == "low" for row in risk_rows),
+        "supported": sum(row["evidence_status"] == "supported" and row["original_text_verified"] is True for row in risk_rows),
+    }
+    content = {
+        "contract_ids": ids, "summary": summary, "contracts": contract_rows,
+        "risks": risk_rows, "rectifications": rectifications,
+        "matrix": {"categories": categories, "rows": matrix_rows}, "notes": notes,
+    }
+    notes.extend(["风险按各合同最新审查任务统计；失败或未完成任务不使用旧结果替代。", "证据已核验需原文精确定位且依据支持；无高风险不等于合规。", "上传日期用于导入趋势，不能解释为当日审查或整改效果。"])
+    report_id = hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {"report_id": report_id, "generated_at": datetime.now(timezone.utc).isoformat(), **content}
 
 
 def _scope_contracts(query, department_scope: DepartmentScope):
@@ -101,37 +308,8 @@ def export_risk_ledger(
 
 
 def contracts_metadata(db: Session, *, department_scope: DepartmentScope = None) -> list[dict]:
-    """合同要素汇总：每份合同的甲方/标的/收付款节点 + 风险统计，供多维报表展示。"""
-    query = db.query(Contract)
-    query = _scope_contracts(query, department_scope)
-    contracts = query.order_by(Contract.id.desc()).all()
-    result = []
-    for c in contracts:
-        elems = {}
-        try:
-            elems = json.loads(c.elements_json or "{}")
-        except (ValueError, AttributeError):
-            pass
-        risk_rows = db.query(Risk.level, func.count(Risk.id)).filter(
-            Risk.contract_id == c.id
-        ).group_by(Risk.level).all()
-        risk_counts = {lv: cnt for lv, cnt in risk_rows}
-        result.append({
-            "id": c.id,
-            "filename": c.filename,
-            "contract_type": c.contract_type or "—",
-            "department": c.department or "—",
-            "party_a": elems.get("party_a") or "—",
-            "subject": elems.get("subject") or "—",
-            "payment_terms": (elems.get("payment_terms") or "—")[:80],  # 截断防超宽
-            "amount": elems.get("amount") or "—",
-            "risk_high": risk_counts.get("high", 0),
-            "risk_medium": risk_counts.get("medium", 0),
-            "risk_low": risk_counts.get("low", 0),
-            "risk_total": sum(risk_counts.values()),
-            "status": c.status,
-        })
-    return result
+    """合同选择器与报告采用相同的任务代次和质量口径。"""
+    return list(reversed(build_report_snapshot(db, department_scope=department_scope)["contracts"]))
 
 
 def dashboard_summary(db: Session, *, department_scope: DepartmentScope = None) -> dict:
@@ -182,152 +360,28 @@ def dashboard_summary(db: Session, *, department_scope: DepartmentScope = None) 
     }
 
 
-def report_summary(
-    db: Session,
-    range_key: str = "month",
-    *,
-    department_scope: DepartmentScope = None,
-) -> dict:
-    """多维报表聚合：KPI + 趋势 + 风险分布 + 部门排行 + 高风险类别 Top5。
-
-    形状对齐前端 `ReportData`（frontend/src/mock/reports.ts）。
-    全部来自真实聚合：KPI/风险分布/部门/Top 为全量统计；趋势按合同 created_at
-    逐日累计（合同级口径，与 KPI 一致），数据点数 = 有合同产生的自然日数，
-    响应以 mode 标注（real≥2 点 / sparse<2 点）。range_key 保留向后兼容，
-    当前趋势为全量累计、不随分段变化（数据跨度不足时分段无意义）。
-    """
-    range_key = range_key if range_key in _RANGE_LABELS else "month"
-
-    contracts_count_query = db.query(func.count(Contract.id))
-    contracts_count_query = _scope_contracts(contracts_count_query, department_scope)
-    total_contracts = contracts_count_query.scalar() or 0
-
-    risks_count_query = _scope_contracts(
-        db.query(func.count(Risk.id)).join(Contract, Risk.contract_id == Contract.id),
-        department_scope,
-    )
-    total_risks = risks_count_query.scalar() or 0
-
-    # 风险等级分布（用于 donut + KPI 高风险数）
-    level_query = _scope_contracts(
-        db.query(Risk.level, func.count(Risk.id)).join(Contract, Risk.contract_id == Contract.id),
-        department_scope,
-    )
-    level_rows = dict(level_query.group_by(Risk.level).all())
-    high = level_rows.get("high", 0)
-    medium = level_rows.get("medium", 0)
-    low = level_rows.get("low", 0)
-
-    # 合规通过率：无「高风险」合同占比（口径统一——合同下无 high 级风险即视为通过）
-    high_risk_query = _scope_contracts(
-        db.query(Risk.contract_id).join(Contract, Risk.contract_id == Contract.id),
-        department_scope,
-    )
-    high_risk_contract_ids = {
-        cid for (cid,) in high_risk_query.filter(Risk.level == "high").distinct().all()
-    }
-    passed = total_contracts - len(high_risk_contract_ids)
-    pass_rate = round(passed / total_contracts * 100, 1) if total_contracts else 0.0
-
-    # 部门风险排行：按合同部门聚合风险数
-    dept_query = db.query(Contract.department, func.count(Risk.id)).join(
-        Risk, Risk.contract_id == Contract.id
-    )
-    dept_query = _scope_contracts(dept_query, department_scope)
-    dept_rows = (
-        dept_query
-        .group_by(Contract.department)
-        .order_by(func.count(Risk.id).desc())
-        .all()
-    )
-    depts = [
-        {"name": dept or "未分类", "risk": cnt, "money": "—"}
-        for dept, cnt in dept_rows
-    ]
-
-    # 高风险条款 Top5：按类别聚合
-    cat_query = _scope_contracts(
-        db.query(Risk.category, func.count(Risk.id)).join(Contract, Risk.contract_id == Contract.id),
-        department_scope,
-    )
-    cat_rows = (
-        cat_query
-        .group_by(Risk.category)
-        .order_by(func.count(Risk.id).desc())
-        .limit(5)
-        .all()
-    )
-    tops = [{"name": cat, "value": cnt} for cat, cnt in cat_rows]
-
-    # 趋势：按合同真实 created_at 逐日累计（合同级口径，与 KPI 一致）。
-    # total=累计审查合同数，risk=累计含高风险合同数，pass=累计通过（无高风险）合同数。
-    # 数据点数 = 有合同产生的自然日数；<2 天时 mode=sparse，前端提示"数据积累中"。
-    labels, total_series, pass_series, risk_series = _cumulative_trend(
-        db, high_risk_contract_ids, department_scope=department_scope
-    )
-    mode = "real" if len(labels) >= 2 else "sparse"
-
+def report_summary(db: Session, range_key: str = "month", *, department_scope: DepartmentScope = None) -> dict:
+    """保留旧接口结构；通过率无人工结论支持时不作合规推断。"""
+    from collections import Counter
+    snapshot = build_report_snapshot(db, department_scope=department_scope)
+    contracts, risks, summary = snapshot["contracts"], snapshot["risks"], snapshot["summary"]
+    names = {c["id"]: c["department"] or "未分类" for c in contracts}
+    depts = Counter(names[r["contract_id"]] for r in risks)
+    tops = Counter(r["category"] for r in risks if r["level"] == "high")
+    days = sorted({c["created_at"][:10] for c in contracts if c["created_at"]})
+    trend = {"labels": days, "total": [], "pass": [], "risk": []}
+    for day in days:
+        current = [c for c in contracts if c["created_at"] and c["created_at"][:10] <= day]
+        trend["total"].append(len(current))
+        trend["pass"].append(0)
+        trend["risk"].append(sum(c["risk_high"] > 0 for c in current))
     return {
-        "kpi": {
-            "total": total_contracts,
-            "pass": pass_rate,
-            "risk": high,
-            "time": "—",  # 平均审查耗时需模型调用记录聚合，暂无
-        },
+        "kpi": {"total": summary["total"], "pass": 0, "risk": summary["high"], "time": "—"},
         "kpiTrend": {"total": "", "pass": "", "risk": "", "time": ""},
-        "trend": {
-            "labels": labels,
-            "total": total_series,
-            "pass": pass_series,
-            "risk": risk_series,
-        },
-        "donut": [
-            {"name": "高风险", "value": high},
-            {"name": "中风险", "value": medium},
-            {"name": "低风险", "value": low},
-        ],
-        "depts": depts,
-        "tops": tops,
-        "mode": mode,
+        "trend": trend,
+        "donut": [{"name": label, "value": summary[key]} for key, label in (("high", "高风险"), ("medium", "中风险"), ("low", "低风险"))],
+        "depts": [{"name": name, "risk": count, "money": "—"} for name, count in depts.most_common()],
+        "tops": [{"name": name, "value": count} for name, count in tops.most_common(5)],
+        "mode": "real" if len(days) >= 2 else "sparse",
+        "notes": ["旧版通过率字段不再推断合规；请使用证据报告中的审查质量状态。"],
     }
-
-
-def _cumulative_trend(
-    db: Session,
-    high_risk_contract_ids: set,
-    *,
-    department_scope: DepartmentScope = None,
-) -> tuple[list, list, list, list]:
-    """按合同 created_at 的自然日聚合，返回 (日期标签, 累计合同数, 累计通过数, 累计高风险数)。
-
-    真实时间序列：每个数据点对应一个有合同产生的日期，数值为截至当日的累计量。
-    数据稀疏（合同集中在少数几天）时点数就少，是真实反映而非编造。
-    """
-    query = db.query(Contract.id, Contract.created_at)
-    query = _scope_contracts(query, department_scope)
-    rows = query.order_by(Contract.created_at).all()
-    # 按日期分桶：{date_str: [该日合同数, 该日高风险合同数]}
-    buckets: dict[str, list[int]] = {}
-    for cid, created in rows:
-        if created is None:
-            continue
-        day = created.strftime("%m-%d")
-        b = buckets.setdefault(day, [0, 0])
-        b[0] += 1
-        if cid in high_risk_contract_ids:
-            b[1] += 1
-
-    labels: list[str] = []
-    total_series: list[int] = []
-    pass_series: list[int] = []
-    risk_series: list[int] = []
-    cum_total = cum_risk = 0
-    for day in sorted(buckets.keys()):
-        cnt, risk_cnt = buckets[day]
-        cum_total += cnt
-        cum_risk += risk_cnt
-        labels.append(day)
-        total_series.append(cum_total)
-        risk_series.append(cum_risk)
-        pass_series.append(cum_total - cum_risk)
-    return labels, total_series, pass_series, risk_series

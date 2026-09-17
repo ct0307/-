@@ -7,6 +7,7 @@ export const SESSION_KEYS = {
   department: 'department',
   authorizedDepartments: 'authorized_departments',
   activeAudit: 'qijian-active-audit',
+  completedAudit: 'qijian-completed-audit',
 } as const
 
 /** 清空当前用户的全部会话数据（登出 / 401 凭证失效时调用）。 */

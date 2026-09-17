@@ -170,29 +170,15 @@ def detect_clause_conflicts(text: str) -> list[ClauseConflict]:
 
 
 def analyze_payment_schedule(text: str) -> PaymentScheduleCheck:
-    """汇总付款条款中的阶段比例，避免由模型执行基础算术。"""
-    percentages: list[Decimal] = []
-    clause_ids: list[str] = []
-    for chunk in build_contract_chunks(text):
-        if not any(term in chunk.text for term in _PAYMENT_TERMS):
-            continue
-        if "违约金" in chunk.text and not any(term in chunk.text for term in ("预付款", "进度款", "尾款")):
-            continue
-        values = [Decimal(value) for value in _PERCENT_RE.findall(chunk.text)]
-        if not values:
-            continue
-        percentages.extend(values)
-        clause_ids.append(chunk.clause_id)
-    if not percentages:
-        return PaymentScheduleCheck("not_applicable", None, (), "未检出阶段付款比例")
-    total = sum(percentages, Decimal("0"))
-    status = "balanced" if total == Decimal("100") else "incomplete" if total < 100 else "excessive"
-    expression = " + ".join(f"{value.normalize()}%" for value in percentages)
+    """只有明确同基数且没有重复、累计或选择条件时才求和。"""
+    from app.services.report.payment_insights import analyze_payments
+    result = analyze_payments(text)
+    total = result["total_percentage"]
     return PaymentScheduleCheck(
-        status=status,
-        total_percentage=total,
-        clause_ids=tuple(dict.fromkeys(clause_ids)),
-        calculation=f"{expression} = {total.normalize()}%",
+        status=result["status"],
+        total_percentage=Decimal(total) if total is not None else None,
+        clause_ids=tuple(dict.fromkeys(e["clause_id"] for e in result["events"] if e["percentage"])),
+        calculation=result["calculation"],
     )
 
 

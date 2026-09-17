@@ -117,6 +117,44 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   }))
   const hasActiveAudit = computed(() => activeAudit.value !== null)
 
+  function rememberCompleted(selectedContractId: number, selectedFilename: string, jobId?: number) {
+    if (typeof window === 'undefined' || !jobId) return
+    try {
+      localStorage.setItem(SESSION_KEYS.completedAudit, JSON.stringify({
+        owner: localStorage.getItem(SESSION_KEYS.username) || '',
+        contractId: selectedContractId, filename: selectedFilename, jobId,
+      }))
+    } catch { /* 浏览器禁用存储不影响已获取的审查结果。 */ }
+  }
+
+  async function restoreCompletedAudit() {
+    if (step.value >= 2 || busy.value || activeAudit.value) return
+    let selected: { owner: string; contractId: number; filename: string; jobId: number }
+    try {
+      const raw = localStorage.getItem(SESSION_KEYS.completedAudit)
+      if (!raw) return
+      selected = JSON.parse(raw)
+      if (!selected || selected.owner !== localStorage.getItem(SESSION_KEYS.username)
+        || !Number.isInteger(selected.contractId) || selected.contractId <= 0
+        || !Number.isInteger(selected.jobId) || selected.jobId <= 0 || typeof selected.filename !== 'string') {
+        localStorage.removeItem(SESSION_KEYS.completedAudit)
+        return
+      }
+    } catch {
+      try { localStorage.removeItem(SESSION_KEYS.completedAudit) } catch { /* 存储不可用时保留页面可用性。 */ }
+      return
+    }
+    try {
+      return await loadCompletedAudit(selected.contractId, selected.filename, selected.jobId)
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response?.status
+      if (status === 403 || status === 404) {
+        try { localStorage.removeItem(SESSION_KEYS.completedAudit) } catch { /* 不覆盖原始请求错误。 */ }
+      }
+      throw error
+    }
+  }
+
   function saveActiveAudit(value: ActiveAudit | null) {
     activeAudit.value = value
     if (typeof window === 'undefined') return
@@ -149,6 +187,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     uploadRecords.value = []
     saveActiveAudit(null)
     step.value = 0
+    if (typeof window !== 'undefined') localStorage.removeItem(SESSION_KEYS.completedAudit)
   }
 
   function applyParsedContract(record: UploadRecord, parsed: ParseResult) {
@@ -295,6 +334,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
       crossChecks.value = res.cross_checks ?? []
       risks.value = loadedRisks
       step.value = 2
+      rememberCompleted(currentContractId, filename.value, res.job_id ?? initial.job_id)
       saveActiveAudit(null)
       return res
     } catch (error) {
@@ -349,6 +389,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
       crossChecks.value = result.cross_checks ?? []
       risks.value = loadedRisks
       step.value = 2
+      rememberCompleted(recovery.contractId, recovery.filename, result.job_id ?? initial.job_id)
       saveActiveAudit(null)
       return result
     } catch (error) {
@@ -389,6 +430,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
       crossChecks.value = result.cross_checks ?? []
       risks.value = loadedRisks
       step.value = 2
+      rememberCompleted(selectedContractId, selectedFilename, result.job_id ?? selectedJobId)
       return result
     } finally {
       if (requestGeneration === generation) busy.value = false
@@ -433,6 +475,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     runAudit,
     resumeActiveAudit,
     loadCompletedAudit,
+    restoreCompletedAudit,
     abortAudit,
     setRiskStatus,
   }

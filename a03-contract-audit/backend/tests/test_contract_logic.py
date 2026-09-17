@@ -31,10 +31,10 @@ def test_payment_schedule_calculates_percentage_total():
     from app.services.audit.contract_logic import analyze_payment_schedule
 
     balanced = analyze_payment_schedule(
-        "第一条 合同签订后支付30%预付款。\n第二条 验收后支付70%尾款。"
+        "第一条 合同签订后支付合同总价的30%预付款。\n第二条 验收后支付合同总价的70%尾款。"
     )
     incomplete = analyze_payment_schedule(
-        "第一条 合同签订后支付30%预付款。\n第二条 验收后支付60%尾款。"
+        "第一条 合同签订后支付合同总价的30%预付款。\n第二条 验收后支付合同总价的60%尾款。"
     )
 
     assert balanced.status == "balanced"

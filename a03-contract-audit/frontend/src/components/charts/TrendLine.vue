@@ -6,7 +6,7 @@ import BaseChart from './BaseChart.vue'
 import type { ReportData } from '@/mock/reports'
 import { readThemePalette, useTheme } from '@/theme/theme'
 
-const props = defineProps<{ data: ReportData['trend'] }>()
+const props = withDefaults(defineProps<{ data: ReportData['trend']; labels?: [string, string, string] }>(), { labels: () => ['审查总数', '通过数', '高风险数'] })
 const { effectiveTheme } = useTheme()
 
 const option = computed<EChartsCoreOption>(() => {
@@ -21,7 +21,7 @@ const option = computed<EChartsCoreOption>(() => {
       borderColor: palette.lineStrong,
       textStyle: { color: palette.text },
     },
-    legend: { data: ['审查总数', '通过数', '高风险数'], top: 0, textStyle: { color: palette.textSecondary } },
+    legend: { data: props.labels, top: 0, textStyle: { color: palette.textSecondary } },
     grid: { left: 40, right: 20, top: 40, bottom: 30 },
     xAxis: {
       type: 'category',
@@ -36,15 +36,15 @@ const option = computed<EChartsCoreOption>(() => {
     },
     series: [
       {
-        name: '审查总数',
+        name: props.labels[0],
         type: 'line',
         smooth: true,
         data: props.data.total,
         areaStyle: { opacity: 0.12 },
         lineStyle: { width: 2.5 },
       },
-      { name: '通过数', type: 'line', smooth: true, data: props.data.pass, lineStyle: { width: 2 } },
-      { name: '高风险数', type: 'line', smooth: true, data: props.data.risk, lineStyle: { width: 2 } },
+      { name: props.labels[1], type: 'line', smooth: true, data: props.data.pass, lineStyle: { width: 2 } },
+      { name: props.labels[2], type: 'line', smooth: true, data: props.data.risk, lineStyle: { width: 2 } },
     ],
   }
 })

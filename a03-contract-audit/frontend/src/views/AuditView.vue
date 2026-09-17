@@ -76,7 +76,11 @@ onMounted(async () => {
 })
 
 onMounted(async () => {
-  if (!session.hasActiveAudit) return
+  if (!session.hasActiveAudit) {
+    try { await session.restoreCompletedAudit() }
+    catch { ElMessage.error('上次审查结果恢复失败，请从审查历史重新选择') }
+    return
+  }
   try {
     const result = await session.resumeActiveAudit()
     if (!result) return
