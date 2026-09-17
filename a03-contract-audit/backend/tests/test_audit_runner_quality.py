@@ -1,4 +1,5 @@
 import json
+from functools import partial
 
 import pytest
 from sqlalchemy import create_engine
@@ -13,9 +14,22 @@ from app.services.parser.extractor import DocumentBlock, DocumentParseResult, So
 
 
 @pytest.fixture
-def db():
-    engine = create_engine("sqlite:///:memory:")
+def db(tmp_path, monkeypatch):
+    from app.services.audit import auditor
+    from app.services.audit.secondary_review import SqlAlchemySecondaryCallRecorder
+    from app.services.audit.window_repository import SqlAlchemyWindowCheckpoint
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'runner-quality.db'}")
     Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(
+        auditor, "SqlAlchemyWindowCheckpoint",
+        partial(SqlAlchemyWindowCheckpoint, session_factory=factory),
+    )
+    monkeypatch.setattr(
+        auditor, "SqlAlchemySecondaryCallRecorder",
+        partial(SqlAlchemySecondaryCallRecorder, session_factory=factory),
+    )
     with Session(engine) as session:
         yield session
     engine.dispose()
