@@ -11,6 +11,12 @@ from app.services.audit.rules.handlers.completeness import (
     work_scope_missing,
 )
 from app.services.audit.rules.handlers.payment import payment_total
+from app.services.audit.rules.handlers.amount import amount_consistency
+from app.services.audit.rules.handlers.cross_clause import (
+    date_order,
+    payee_consistency,
+    payment_deadline_conflict,
+)
 from app.services.audit.rules.schema import (
     HandlerOutcome,
     RuleDefinition,
@@ -27,6 +33,10 @@ HANDLERS: dict[str, RuleHandler] = {
     "payment_terms_missing": payment_terms_missing,
     "absolute_injury_waiver": absolute_injury_waiver,
     "payment_total": payment_total,
+    "amount_consistency": amount_consistency,
+    "payee_consistency": payee_consistency,
+    "date_order": date_order,
+    "payment_deadline_conflict": payment_deadline_conflict,
 }
 
 

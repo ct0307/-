@@ -34,5 +34,29 @@
     "severity": "high",
     "handler": "absolute_injury_waiver",
     "manual_review_on_unclear": true
+  },
+  {
+    "rule_id": "LEGAL-DATE-ORDER-001",
+    "version": "1.0.0",
+    "name": "签署与履行日期顺序检查",
+    "category": "temporal",
+    "agent": "legal",
+    "dimensions": ["legal"],
+    "contract_types": [],
+    "severity": "high",
+    "handler": "date_order",
+    "manual_review_on_unclear": true
+  },
+  {
+    "rule_id": "LEGAL-PAYMENT-DEADLINE-001",
+    "version": "1.0.0",
+    "name": "同触发条件付款期限冲突",
+    "category": "cross_clause",
+    "agent": "legal",
+    "dimensions": ["legal", "payment"],
+    "contract_types": [],
+    "severity": "high",
+    "handler": "payment_deadline_conflict",
+    "manual_review_on_unclear": true
   }
 ]

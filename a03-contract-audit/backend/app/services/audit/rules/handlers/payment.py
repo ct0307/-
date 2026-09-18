@@ -7,7 +7,16 @@ from app.services.audit.rules.schema import HandlerOutcome, RuleDefinition
 
 
 def payment_total(_rule: RuleDefinition, facts: dict) -> HandlerOutcome:
-    raw_values = facts.get("payment_percentages")
+    events = facts.get("payment_events")
+    if isinstance(events, (list, tuple)) and events:
+        if any(not isinstance(item, dict) or item.get("conditional") for item in events):
+            return HandlerOutcome(status="unclear", reason_code="PAYMENT_CONDITIONAL_UNCLEAR")
+        bases = {str(item.get("base") or "").strip() for item in events}
+        if not bases or "" in bases or len(bases) != 1:
+            return HandlerOutcome(status="unclear", reason_code="PAYMENT_BASE_UNCLEAR")
+        raw_values = [item.get("percentage") for item in events]
+    else:
+        raw_values = facts.get("payment_percentages")
     if not isinstance(raw_values, (list, tuple)) or not raw_values:
         return HandlerOutcome(
             status="unclear",

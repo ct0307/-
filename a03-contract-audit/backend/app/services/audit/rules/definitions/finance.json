@@ -22,5 +22,29 @@
     "severity": "high",
     "handler": "payment_total",
     "manual_review_on_unclear": true
+  },
+  {
+    "rule_id": "FIN-AMOUNT-CONSISTENCY-001",
+    "version": "1.0.0",
+    "name": "金额表述一致性检查",
+    "category": "numeric",
+    "agent": "finance",
+    "dimensions": ["payment"],
+    "contract_types": [],
+    "severity": "high",
+    "handler": "amount_consistency",
+    "manual_review_on_unclear": true
+  },
+  {
+    "rule_id": "FIN-PAYEE-CONSISTENCY-001",
+    "version": "1.0.0",
+    "name": "收款主体一致性检查",
+    "category": "cross_clause",
+    "agent": "finance",
+    "dimensions": ["payment"],
+    "contract_types": [],
+    "severity": "high",
+    "handler": "payee_consistency",
+    "manual_review_on_unclear": true
   }
 ]
