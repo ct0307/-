@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 
 RuleCategory = Literal[
@@ -43,3 +43,26 @@ class RuleDefinition(BaseModel):
         if len(set(normalized)) != len(normalized):
             raise ValueError("规则范围不能包含重复值")
         return normalized
+
+
+class HandlerOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["hit", "not_hit", "unclear"]
+    clause_ids: list[str] = Field(default_factory=list)
+    facts: dict[str, JsonValue] = Field(default_factory=dict)
+    calculation: str = ""
+    reason_code: str = Field(min_length=2, max_length=80)
+
+
+class RuleResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    rule_version: str
+    status: Literal["hit", "not_hit", "unclear", "error"]
+    severity: Literal["high", "medium", "low"]
+    clause_ids: list[str] = Field(default_factory=list)
+    facts: dict[str, JsonValue] = Field(default_factory=dict)
+    calculation: str = ""
+    reason_code: str
