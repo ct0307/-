@@ -139,6 +139,34 @@ def test_legacy_risk_and_verified_rectification_are_serialized():
     assert any("无审查任务" in note for note in snapshot["notes"])
 
 
+def test_snapshot_serializes_applicability_rule_and_decision_trace():
+    db, user = _database()
+    contract = _contract(db, user, "带决策轨迹.docx")
+    job = _job(db, user, contract, "done", 1)
+    risk = Risk(
+        contract_id=contract.id,
+        audit_job_id=job.id,
+        level="high",
+        category="付款风险",
+        original_text="验收前支付全部尾款",
+        basis="付款条件待核验",
+        suggestion="补充验收前置条件",
+        applicability_status="unknown_as_of",
+        applicability_reason_codes_json='["missing_effective_date"]',
+        rule_executions_json='[{"rule_id":"PAY-001","rule_version":"v3","status":"hit","reason":"付款先于验收"}]',
+        decision_trace_json='{"status":"manual_review","reason_codes":["RULE_RESULT_UNRESOLVED"]}',
+    )
+    db.add(risk)
+    db.commit()
+
+    row = build_report_snapshot(db)["risks"][0]
+
+    assert row["applicability_status"] == "unknown_as_of"
+    assert row["applicability_reason_codes"] == ["missing_effective_date"]
+    assert row["rule_executions"][0]["rule_id"] == "PAY-001"
+    assert row["decision_trace"] == {"status": "manual_review", "reason_codes": ["RULE_RESULT_UNRESOLVED"]}
+
+
 def test_excel_and_word_are_readable_and_sanitize_formula_and_xml_controls():
     db, user = _database()
     contract = _contract(db, user, "=HYPERLINK(\"bad\")\x01合同.docx")

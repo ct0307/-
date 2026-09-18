@@ -121,4 +121,23 @@ export interface RiskOut {
   support_validator_version: string
   secondary_review_status?: 'not_required' | 'confirmed' | 'rejected' | 'conflict' | 'manual_required'
   secondary_review_reason?: string
+  applicability_status?: 'applicable' | 'unknown_as_of' | 'expired' | 'not_yet_effective' | 'unresolved' | string
+  applicability_reason_codes?: string[]
+  rule_executions?: Array<{
+    rule_id?: string
+    rule_version?: string
+    status?: string
+    reason_code?: string
+    calculation?: string
+  }>
+  decision_trace?: {
+    status?: string
+    reason_codes?: string[]
+  }
+  collaboration_trace?: {
+    discovered_by?: 'legal' | 'finance' | 'system' | string
+    reviewed_by?: string[]
+    corrected?: boolean
+    conflict?: boolean
+  } | null
 }

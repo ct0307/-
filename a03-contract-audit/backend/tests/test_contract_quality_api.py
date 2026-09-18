@@ -130,6 +130,10 @@ def test_risk_api_returns_trace_and_redacts_business_retrieval_query(tmp_path):
             ),
             secondary_review_status="confirmed",
             secondary_review_reason="二次复核确认已有证据支持候选风险",
+            applicability_status="unknown_as_of",
+            applicability_reason_codes_json='["missing_effective_date"]',
+            rule_executions_json='[{"rule_id":"PAY-001","status":"hit"}]',
+            decision_trace_json='{"status":"manual_review","reason_codes":["RULE_RESULT_UNRESOLVED"]}',
         ))
         db.commit()
 
@@ -146,11 +150,19 @@ def test_risk_api_returns_trace_and_redacts_business_retrieval_query(tmp_path):
         assert legal_risk.contract_evidence[0]["anchors"][0]["page_number"] == 2
         assert legal_risk.secondary_review_status == "confirmed"
         assert legal_risk.secondary_review_reason == "二次复核确认已有证据支持候选风险"
+        assert legal_risk.applicability_status == "unknown_as_of"
+        assert legal_risk.applicability_reason_codes == ["missing_effective_date"]
+        assert legal_risk.rule_executions[0]["rule_id"] == "PAY-001"
+        assert legal_risk.decision_trace["status"] == "manual_review"
         assert business_risk["claim_id"] == "C-PAYMENT-001"
         assert business_risk["contract_evidence"][0]["clause_id"] == "第二条"
         assert "query" not in business_risk["retrieval_attempts"][0]
         assert business_risk["secondary_review_status"] == "confirmed"
         assert business_risk["secondary_review_reason"] == "二次复核确认已有证据支持候选风险"
+        assert business_risk["applicability_status"] == "unknown_as_of"
+        assert business_risk["applicability_reason_codes"] == ["missing_effective_date"]
+        assert business_risk["rule_executions"][0]["rule_id"] == "PAY-001"
+        assert business_risk["decision_trace"]["status"] == "manual_review"
 
     engine.dispose()
 

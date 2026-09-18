@@ -7,6 +7,7 @@ import { ElMessage } from 'element-plus'
 import type { RiskOut } from '@/api/types'
 import { chatWithRisk, type ChatMessage } from '@/api/chat'
 import { evidenceMeta } from '@/utils/risk-evidence'
+import { applicabilityMeta, ruleStatusMeta } from '@/utils/audit-trace'
 
 const props = defineProps<{
   modelValue: boolean
@@ -136,6 +137,30 @@ function onEnter(e: KeyboardEvent) {
 
       <section class="rd-block evidence-step">
         <span class="step-index mono">04</span>
+        <div class="step-content">
+          <h4>法规适用性</h4>
+          <el-tag :type="applicabilityMeta(risk.applicability_status).type" size="small">
+            {{ applicabilityMeta(risk.applicability_status).label }}
+          </el-tag>
+          <p v-if="risk.applicability_reason_codes?.length" class="rd-validation-note">
+            原因码：{{ risk.applicability_reason_codes.join('、') }}
+          </p>
+        </div>
+      </section>
+
+      <section v-if="risk.rule_executions?.length" class="rd-block evidence-step">
+        <span class="step-index mono">05</span>
+        <div class="step-content">
+          <h4>规则核验</h4>
+          <div v-for="(rule, i) in risk.rule_executions.slice(0, 8)" :key="`${rule.rule_id || 'rule'}-${i}`" class="trace-row">
+            <span>{{ rule.rule_id || '规则' }}<small v-if="rule.rule_version"> · {{ rule.rule_version }}</small></span>
+            <el-tag :type="ruleStatusMeta(rule.status).type" size="small">{{ ruleStatusMeta(rule.status).label }}</el-tag>
+          </div>
+        </div>
+      </section>
+
+      <section class="rd-block evidence-step">
+        <span class="step-index mono">06</span>
         <div class="step-content">
           <h4>修改建议</h4>
           <p class="rd-text">{{ risk.suggestion }}</p>
@@ -276,6 +301,26 @@ function onEnter(e: KeyboardEvent) {
   color: var(--brass);
   font-family: var(--mono);
   letter-spacing: 0;
+}
+.trace-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ivory);
+  font-size: 12px;
+}
+.trace-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trace-row small {
+  color: var(--muted);
 }
 .rd-clause {
   margin: 0;

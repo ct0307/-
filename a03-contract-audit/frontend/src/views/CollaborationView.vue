@@ -15,6 +15,7 @@ import {
 } from '@/mock/collaboration'
 import type { RiskOut } from '@/api/types'
 import { evidenceMeta } from '@/utils/risk-evidence'
+import { decisionMeta } from '@/utils/audit-trace'
 
 const router = useRouter()
 const session = useAuditSessionStore()
@@ -378,6 +379,7 @@ function goAudit() {
             <div class="risk-foot">
               <span class="basis mono">{{ r.basis }}</span>
               <span class="conf mono">{{ evidenceMeta('evidence_status' in r ? r.evidence_status : null).label }}</span>
+              <span class="trace mono">决策：{{ decisionMeta(r.decision_trace?.status).label }}</span>
             </div>
           </article>
         </div>

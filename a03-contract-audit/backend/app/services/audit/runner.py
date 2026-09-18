@@ -567,6 +567,18 @@ def _risk_model(
         support_relation_status=risk.get("support_relation_status", "unclear"),
         support_validation_reason=risk.get("support_validation_reason", ""),
         support_validator_version=risk.get("support_validator_version", "unvalidated"),
+        support_validation_failed_stage=risk.get("support_validation_failed_stage", "none"),
+        support_validation_reason_code=risk.get("support_validation_reason_code", ""),
+        applicability_status=risk.get("applicability_status", "unresolved"),
+        applicability_reason_codes_json=json.dumps(
+            risk.get("applicability_reason_codes", []), ensure_ascii=False
+        ),
+        rule_executions_json=json.dumps(
+            risk.get("rule_executions", []), ensure_ascii=False
+        ),
+        decision_trace_json=json.dumps(
+            risk.get("decision_trace", {}), ensure_ascii=False
+        ),
         secondary_review_status=risk.get("secondary_review_status", "not_required"),
         secondary_review_reason=risk.get("secondary_review_reason", ""),
         claim_id=risk.get("claim_id"),

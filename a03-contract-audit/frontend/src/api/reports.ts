@@ -58,6 +58,18 @@ export interface ReportRisk {
   contract_evidence: { clause_id?: string; match_type?: string; anchors?: { page?: number; page_number?: number }[] }[]
   rag_sources: { source?: string; title?: string; content?: string; quote?: string }[]
   support_validation_reason?: string
+  applicability_status?: string
+  applicability_reason_codes?: string[]
+  rule_executions?: Array<{
+    rule_id?: string
+    rule_version?: string
+    status?: string
+    reason?: string
+  }>
+  decision_trace?: {
+    status?: string
+    reason_codes?: string[]
+  }
 }
 
 export interface ReportSnapshot {

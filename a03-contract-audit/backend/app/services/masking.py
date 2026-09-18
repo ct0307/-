@@ -24,6 +24,14 @@ def _json_list(value: object) -> list:
     return parsed if isinstance(parsed, list) else []
 
 
+def _json_object(value: object) -> dict:
+    try:
+        parsed = json.loads(value or "")
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _public_retrieval_attempts(value: object) -> list[dict]:
     allowed = {"attempt", "support_status", "source_ids"}
     return [
@@ -98,6 +106,10 @@ def apply_risk_masking(risk: dict | object, role: str) -> dict:
             "support_relation_status": risk.support_relation_status,
             "support_validation_reason": risk.support_validation_reason,
             "support_validator_version": risk.support_validator_version,
+            "applicability_status": risk.applicability_status,
+            "applicability_reason_codes": _json_list(risk.applicability_reason_codes_json),
+            "rule_executions": _json_list(risk.rule_executions_json),
+            "decision_trace": _json_object(risk.decision_trace_json),
             "secondary_review_status": risk.secondary_review_status,
             "secondary_review_reason": risk.secondary_review_reason,
             "claim_id": risk.claim_id,

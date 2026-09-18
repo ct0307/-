@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 
 SUPPORT_VALIDATOR_VERSION = "rules-v2"
+SUPPORT_V3_VERSION = "support-v3"
 
 _ABSENCE_MARKERS = (
     "全文未检出",
@@ -51,6 +52,9 @@ class SupportValidation:
     status: str
     reason: str
     version: str = SUPPORT_VALIDATOR_VERSION
+    failed_stage: str = "none"
+    # 旧版校验结果没有稳定的原因码；留空后由查询执行器按 status 回退。
+    reason_code: str = ""
 
 
 def validate_support_relation(
@@ -117,3 +121,56 @@ def _meaningful_fragments(text: str) -> set[str]:
     for term in _GENERIC_TERMS:
         normalized = normalized.replace(term, " ")
     return _fragments(normalized) - _GENERIC_FRAGMENTS
+
+
+def verify_support(
+    risk: dict,
+    sources: list[dict] | tuple[dict, ...],
+    *,
+    semantic_verifier=None,
+) -> SupportValidation:
+    """Run ordered support-v3 gates and stop at the first failed gate."""
+    original = str(risk.get("original_text") or "").strip()
+    if risk.get("original_text_verified") is not True or not original:
+        return _v3("unclear", "original", "ORIGINAL_TEXT_UNRESOLVED", "原文未完成精确定位")
+
+    usable = [
+        source for source in sources
+        if source.get("reliable") is True
+        and str(source.get("source") or "").strip()
+        and str(source.get("content") or "").strip()
+    ]
+    if not usable:
+        return _v3("unclear", "authority", "SOURCE_AUTHORITY_UNRESOLVED", "没有可用的已核验权威来源")
+
+    applicability = {str(source.get("applicability_status") or "unknown") for source in usable}
+    if applicability != {"applicable"}:
+        return _v3("unclear", "applicability", "SOURCE_NOT_APPLICABLE", "来源适用性未确认或已失效")
+
+    risk_fragments = set().union(*(
+        _meaningful_fragments(str(risk.get(field, "")))
+        for field in ("category", "original_text", "risk_reason")
+    ))
+    source_text = " ".join(str(source["content"]) for source in usable).lower()
+    matched = {fragment for fragment in risk_fragments if fragment in source_text}
+    if len(matched) < 2:
+        return _v3("unclear", "facts", "FACTS_NOT_ALIGNED", "来源内容与风险事实缺少足够的一致性")
+
+    if semantic_verifier is not None:
+        relation = semantic_verifier(risk, usable)
+        if relation == "contradicted":
+            return _v3("contradicted", "semantic_relation", "EVIDENCE_CONTRADICTS_CLAIM", "权威来源与风险结论存在语义矛盾")
+        if relation != "supported":
+            return _v3("unclear", "semantic_relation", "SEMANTIC_RELATION_UNRESOLVED", "语义关系验证未得出明确支持")
+
+    return _v3("supported", "none", "EVIDENCE_SUPPORTS_CLAIM", "五层证据支持校验通过")
+
+
+def _v3(status: str, failed_stage: str, reason_code: str, reason: str) -> SupportValidation:
+    return SupportValidation(
+        status=status,
+        reason=reason,
+        version=SUPPORT_V3_VERSION,
+        failed_stage=failed_stage,
+        reason_code=reason_code,
+    )

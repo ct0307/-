@@ -32,6 +32,21 @@ class RiskOut(BaseModel):
     support_relation_status: str = "unclear"
     support_validation_reason: str = ""
     support_validator_version: str = "unvalidated"
+    support_validation_failed_stage: str = "none"
+    support_validation_reason_code: str = ""
+    applicability_status: str = "unresolved"
+    applicability_reason_codes: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("applicability_reason_codes", "applicability_reason_codes_json"),
+    )
+    rule_executions: list[dict] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("rule_executions", "rule_executions_json"),
+    )
+    decision_trace: dict = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("decision_trace", "decision_trace_json"),
+    )
     secondary_review_status: str = "not_required"
     secondary_review_reason: str = ""
     claim_id: str | None = None
@@ -75,6 +90,8 @@ class RiskOut(BaseModel):
         "evidence_ids",
         "retrieval_attempts",
         "contract_evidence",
+        "applicability_reason_codes",
+        "rule_executions",
         mode="before",
     )
     @classmethod
@@ -86,6 +103,17 @@ class RiskOut(BaseModel):
                 return []
             return parsed if isinstance(parsed, list) else []
         return value if isinstance(value, list) else []
+
+    @field_validator("decision_trace", mode="before")
+    @classmethod
+    def _parse_decision_trace(cls, value):
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value) if value else {}
+            except (TypeError, ValueError):
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return value if isinstance(value, dict) else {}
 
 
 class CrossCheckOut(BaseModel):

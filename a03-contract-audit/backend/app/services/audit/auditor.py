@@ -30,8 +30,10 @@ from app.core.logging import get_logger
 from app.llm.factory import get_llm_adapter
 from app.services.audit.evidence_validation import (
     SUPPORT_VALIDATOR_VERSION,
+    verify_support,
     validate_support_relation,
 )
+from app.services.audit.decision import apply_risk_decision, decide_risk
 from app.services.audit.contract_logic import (
     analyze_payment_schedule,
     build_logic_cross_checks,
@@ -231,6 +233,23 @@ def audit_contract(
     all_risks, secondary_issues = apply_secondary_decisions(
         all_risks, secondary_result
     )
+    # 二次复核只能提供补充信号，发布前仍统一经过原文、依据、规则和冲突硬门禁。
+    for risk in all_risks:
+        risk.update(apply_risk_decision(
+            risk,
+            decide_risk(
+                original_verified=risk.get("original_text_verified"),
+                support_status=risk.get("support_relation_status", "unclear"),
+                has_conflict=risk.get("claim_id") in exact_conflict_claim_ids,
+                rule_statuses=[
+                    str(item.get("status"))
+                    for item in risk.get("rule_executions", [])
+                    if isinstance(item, dict)
+                ],
+                parse_quality_ok=risk.get("parse_quality_ok", True),
+                secondary_status=risk.get("secondary_review_status", "not_required"),
+            ),
+        ))
     all_issues = [
         issue for issue in all_issues
         if _candidate_issue_still_applies(issue, all_risks)
@@ -684,14 +703,27 @@ def _agent_audit(
     for risk in grounded:
         fact_validation = validate_candidate_facts(risk, contract_text)
         if not fact_validation.valid:
-            risk["requires_manual_review"] = True
-            risk["claim_status"] = "manual_review"
+            risk["parse_quality_ok"] = False
             issues.append(ReviewIssue(
                 code="FACT_VALIDATION_FAILED",
                 agent=role,
                 window_id=risk["source_window_id"],
                 detail=fact_validation.reason,
             ))
+        risk.update(apply_risk_decision(
+            risk,
+            decide_risk(
+                original_verified=risk.get("original_text_verified"),
+                support_status=risk.get("support_relation_status", "unclear"),
+                has_conflict=False,
+                rule_statuses=[
+                    str(item.get("status"))
+                    for item in risk.get("rule_executions", [])
+                    if isinstance(item, dict)
+                ],
+                parse_quality_ok=risk.get("parse_quality_ok", True),
+            ),
+        ))
         if risk["original_text_verified"] is not True:
             issues.append(ReviewIssue(
                 code="ORIGINAL_TEXT_UNRESOLVED", agent=role,
@@ -852,10 +884,21 @@ def _ground_risks(
             risk.get("original_text", ""), contract_text
         )
         risk["original_text_verified"] = original_verified
-        validation = selected_validation
+        # V3 is applied after retrieval has selected authorized sources. Legacy
+        # sources without an applicability field retain the historical default;
+        # explicit unknown/expired applicability remains unresolved.
+        v3_sources = [
+            {**source, "applicability_status": source.get("applicability_status", "applicable")}
+            for source in reliable_sources
+        ]
+        validation = verify_support(risk, v3_sources)
+        if not v3_sources and selected_validation.status == "supported":
+            validation = selected_validation
         risk["support_relation_status"] = validation.status
         risk["support_validation_reason"] = validation.reason
         risk["support_validator_version"] = validation.version
+        risk["support_validation_failed_stage"] = validation.failed_stage
+        risk["support_validation_reason_code"] = validation.reason_code
         if (
             reliable_sources
             and applicability_status == "applicable"
@@ -864,20 +907,23 @@ def _ground_risks(
         ):
             risk["basis"] = "；".join(_format_source(source) for source in reliable_sources)
             risk["evidence_status"] = "supported"
-            risk["claim_status"] = "accepted"
-            risk["requires_manual_review"] = False
         elif reliable_sources:
             risk["basis"] = "；".join(_format_source(source) for source in reliable_sources)
             risk["evidence_status"] = "partially_supported"
-            risk["claim_status"] = "manual_review"
             risk["confidence"] = min(int(risk.get("confidence", 0)), 70)
-            risk["requires_manual_review"] = True
         else:
             risk["basis"] = NO_RELIABLE_BASIS
             risk["evidence_status"] = "unsupported"
-            risk["claim_status"] = "manual_review"
             risk["confidence"] = min(int(risk.get("confidence", 0)), 50)
-            risk["requires_manual_review"] = True
+        risk.update(apply_risk_decision(
+            risk,
+            decide_risk(
+                original_verified=original_verified,
+                support_status=validation.status,
+                has_conflict=False,
+                parse_quality_ok=risk.get("parse_quality_ok", True),
+            ),
+        ))
     return risks
 
 
@@ -1012,6 +1058,13 @@ def _risk_from_claim(
         "support_relation_status": "unclear",
         "support_validation_reason": "尚未执行依据支持关系校验",
         "support_validator_version": SUPPORT_VALIDATOR_VERSION,
+        "support_validation_failed_stage": "none",
+        "support_validation_reason_code": "NOT_VALIDATED",
+        "applicability_status": "unresolved",
+        "applicability_reason_codes": [],
+        "rule_executions": [],
+        "decision_trace": {},
+        "parse_quality_ok": True,
         "source_window_id": claim.source_window_id,
         "source_clause_ids": list(claim.clause_ids),
         "disclaimer": DISCLAIMER,

@@ -339,6 +339,12 @@ class Risk(Base):
     support_relation_status: Mapped[str] = mapped_column(String(16), default="unclear")
     support_validation_reason: Mapped[str] = mapped_column(Text, default="")
     support_validator_version: Mapped[str] = mapped_column(String(32), default="unvalidated")
+    support_validation_failed_stage: Mapped[str] = mapped_column(String(32), default="none")
+    support_validation_reason_code: Mapped[str] = mapped_column(String(64), default="")
+    applicability_status: Mapped[str] = mapped_column(String(24), default="unresolved")
+    applicability_reason_codes_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    rule_executions_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    decision_trace_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
     claim_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     claim_status: Mapped[str] = mapped_column(
         String(24), default="pending_evidence", server_default="pending_evidence"

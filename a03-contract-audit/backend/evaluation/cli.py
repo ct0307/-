@@ -25,6 +25,7 @@ from evaluation.audit_comparison import (
 )
 from evaluation.audit_performance import compare_runs, load_run, render_markdown
 from evaluation.audit_quality import evaluate_audit_files
+from evaluation.audit_ablation import compare_ablation_runs, render_ablation_markdown
 from evaluation.benchmark_runner import (
     OpenAICompatibleTarget,
     TargetUnavailable,
@@ -603,6 +604,30 @@ def _run_audit_performance(args: argparse.Namespace) -> int:
     return EXIT_OK if report.quality.gate_passed else EXIT_FAILED
 
 
+def _run_audit_ablation(args: argparse.Namespace) -> int:
+    runs = []
+    input_hashes = []
+    for path in args.run:
+        snapshot = read_json_object_snapshot(path, f"消融运行 {path}")
+        runs.append(snapshot.value)
+        input_hashes.append({"path": str(path), "sha256": snapshot.sha256})
+    result = compare_ablation_runs(runs)
+    run_id = args.run_id or _default_run_id("audit-ablation")
+    writer = EvidenceWriter.create(
+        args.runs_root,
+        run_id=run_id,
+        command="audit-ablation",
+        inputs={"gold_sha256": result["gold_sha256"], "run_inputs": input_hashes},
+    )
+    for row in result["runs"]:
+        writer.append("audit-ablation", {"event": "version", **row})
+    writer.append("audit-ablation", {"event": "summary", **result})
+    _write_json_atomic(writer.run_dir / "ablation-summary.json", result)
+    _write_text_atomic(writer.run_dir / "report.md", render_ablation_markdown(result))
+    writer.write_manifest(status="passed", modules={"audit": "passed"})
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="A03 硬指标证据流水线")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -663,6 +688,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit_performance.add_argument("--candidate", type=Path, required=True)
     audit_performance.add_argument("--json-output", type=Path, required=True)
     audit_performance.add_argument("--markdown-output", type=Path, required=True)
+    audit_ablation = subcommands.add_parser("audit-ablation", help="比较冻结 V0-V4 消融运行")
+    audit_ablation.add_argument("--run", action="append", required=True, type=Path)
+    audit_ablation.add_argument("--runs-root", type=Path, default=Path("evaluation-runs"))
+    audit_ablation.add_argument("--run-id")
     report = subcommands.add_parser("report", help="校验证据并生成 Markdown 报告")
     report.add_argument("--run-dir", type=Path, required=True)
     return parser
@@ -687,6 +716,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_audit_compare(args)
         if args.command == "audit-performance":
             return _run_audit_performance(args)
+        if args.command == "audit-ablation":
+            return _run_audit_ablation(args)
         if args.command == "report":
             return _run_report(args)
         raise ValueError(f"未知子命令: {args.command}")
