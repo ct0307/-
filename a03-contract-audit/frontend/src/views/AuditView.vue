@@ -245,6 +245,30 @@ const batchItemStatusType = {
   failed: 'danger',
 } as const
 
+const legacyRetryableCodes = new Set([
+  'MODEL_TIMEOUT',
+  'MODEL_UNAVAILABLE',
+  'AUDIT_PERSISTENCE_UNAVAILABLE',
+  'OUTPUT_TRUNCATED',
+  'INVALID_MODEL_OUTPUT',
+  'PAGINATION_EXHAUSTED',
+  'AUDIT_DEADLINE_EXCEEDED',
+])
+
+function batchFailureMessage(item: AuditBatchItem) {
+  return item.error?.trim() || (item.status === 'failed' ? item.review_reason?.trim() : '') || ''
+}
+
+function isRetryableFailure(item: AuditBatchItem) {
+  if (item.status !== 'failed') return false
+  if (typeof item.retryable === 'boolean') return item.retryable
+  return Boolean(item.error_code && legacyRetryableCodes.has(item.error_code))
+}
+
+const hasRetryableFailures = computed(() => {
+  return batchStore.batch?.items.some(isRetryableFailure) ?? false
+})
+
 const batchProgressStatus = computed(() => {
   const batch = batchStore.batch
   if (!batch) return undefined
@@ -429,7 +453,7 @@ const onboardSteps = [
               <h2>{{ batchStatusLabel[batchStore.batch.status] }}</h2>
             </div>
             <el-button
-              v-if="batchStore.batch.failed > 0"
+              v-if="hasRetryableFailures"
               :icon="RefreshRight"
               :loading="batchStore.loading"
               @click="retryAuditBatch"
@@ -453,7 +477,17 @@ const onboardSteps = [
               <div class="batch-result-item-top">
                 <div class="batch-result-item-main">
                   <strong>{{ item.filename }}</strong>
-                  <span v-if="item.error" class="batch-result-item-error">{{ item.error }}</span>
+                  <template v-if="item.status === 'failed'">
+                    <span class="batch-result-item-error">
+                      {{ batchFailureMessage(item) || '审查未能生成完整可靠结果' }}
+                    </span>
+                    <span v-if="item.error_code" class="batch-result-item-code mono">
+                      错误码：{{ item.error_code }}
+                    </span>
+                    <span v-if="item.error_action" class="batch-result-item-action-hint">
+                      {{ item.error_action }}
+                    </span>
+                  </template>
                   <span
                     v-else-if="item.status === 'review_required' && item.review_reason"
                     class="batch-result-item-review-reason"
@@ -687,6 +721,16 @@ const onboardSteps = [
   display: block;
   overflow-wrap: anywhere;
 }
+.batch-result-item-code,
+.batch-result-item-action-hint {
+  display: block;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.batch-result-item-code { color: var(--muted); }
+.batch-result-item-action-hint { color: var(--amber); }
 .batch-result-item-main strong {
   font-size: 13px;
 }

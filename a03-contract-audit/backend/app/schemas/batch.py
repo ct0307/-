@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.services.audit.result_snapshot import quality_snapshot
+from app.services.audit.failure import audit_failure
 from app.services.audit.progress import (
     ProgressStage,
     progress_from_status,
@@ -29,6 +30,8 @@ class BatchItemOut(BaseModel):
     progress_stage: ProgressStage = "queued"
     error: str | None = None
     error_code: str | None = None
+    retryable: bool = False
+    error_action: str | None = None
     attempts: int
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -44,10 +47,14 @@ class BatchItemOut(BaseModel):
             status = str(data.get("status", "queued"))
             data.setdefault("progress", progress_from_status(status))
             data.setdefault("progress_stage", stage_from_status(status))
+            failure = audit_failure(value)
+            if failure is not None:
+                data.update(error=failure.message, error_code=failure.code,
+                            retryable=failure.retryable, error_action=failure.action)
             return data
         quality = quality_snapshot(value, getattr(value, "contract", None))
         status = getattr(value, "status")
-        return {
+        data = {
             field: getattr(value, field)
             for field in (
                 "id", "contract_id", "filename", "status", "error", "error_code",
@@ -62,6 +69,11 @@ class BatchItemOut(BaseModel):
             "ocr_confidence": quality.ocr_confidence,
             "review_reason": quality.review_reason,
         }
+        failure = audit_failure(value)
+        if failure is not None:
+            data.update(error=failure.message, error_code=failure.code,
+                        retryable=failure.retryable, error_action=failure.action)
+        return data
 
     model_config = {"from_attributes": True}
 

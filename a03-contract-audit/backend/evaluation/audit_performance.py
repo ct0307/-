@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,8 @@ from typing import Any
 class RunSpeedMetrics:
     sample_count: int
     total_ms: int | None
+    total_latency_p50_ms: float | None
+    total_latency_p95_ms: float | None
     phase_ms: dict[str, float]
     llm_calls: int | None
     llm_latency_p50_ms: float | None
@@ -44,6 +47,9 @@ class QualityComparison:
     unauthorized_evidence_count: int | None
     unverified_auto_publish_count: int | None
     gate_passed: bool | None
+    reasons: tuple[str, ...] = ()
+    baseline_business_metrics: dict[str, float] | None = None
+    candidate_business_metrics: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -66,11 +72,11 @@ def _samples(run: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _sum_if_complete(samples: list[dict], field: str) -> int | None:
-    if not samples or any(field not in sample for sample in samples):
+    values = [sample[field] for sample in samples if field in sample]
+    if not all(type(value) is int and value >= 0 for value in values):
+        raise ValueError(f"{field} 必须为非负整数")
+    if not samples or len(values) != len(samples):
         return None
-    values = [sample[field] for sample in samples]
-    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
-        raise ValueError(f"{field} 必须为数值")
     return int(sum(values))
 
 
@@ -88,6 +94,8 @@ def _percentile(values: list[float], percentile: float) -> float | None:
 
 
 def _speed_metrics(samples: list[dict]) -> RunSpeedMetrics:
+    total_ms = _sum_if_complete(samples, "total_ms")
+    total_latencies = [sample["total_ms"] for sample in samples] if total_ms is not None else []
     call_lists = [sample.get("llm_calls") for sample in samples]
     calls_complete = bool(samples) and all(isinstance(value, list) for value in call_lists)
     calls = [call for value in call_lists if isinstance(value, list) for call in value]
@@ -119,7 +127,9 @@ def _speed_metrics(samples: list[dict]) -> RunSpeedMetrics:
         cache_hits = sum(1 for sample in samples if sample["parse_cache_hit"])
     return RunSpeedMetrics(
         sample_count=len(samples),
-        total_ms=_sum_if_complete(samples, "total_ms"),
+        total_ms=total_ms,
+        total_latency_p50_ms=_percentile(total_latencies, 0.50),
+        total_latency_p95_ms=_percentile(total_latencies, 0.95),
         phase_ms=phase_means,
         llm_calls=len(calls) if calls_complete else None,
         llm_latency_p50_ms=_percentile(latencies, 0.50) if latency_complete else None,
@@ -198,11 +208,82 @@ def compare_runs(
     )
     unsafe = candidate_quality.unauthorized_evidence_count
     unverified = candidate_quality.unverified_auto_publish_count
-    quality_gate = (
-        unsafe == 0 and unverified == 0
-        if unsafe is not None and unverified is not None
-        else None
+    safety_violation = any(
+        sample.get(field, 0) > 0
+        for sample in candidate_samples
+        for field in ("unauthorized_evidence_count", "unverified_auto_publish_count")
     )
+    reasons: list[str] = []
+    identity_fields = (
+        "dataset_sha256", "model", "prompt_sha256", "knowledge_revision",
+        "dimensions", "concurrency", "deadline_seconds",
+    )
+    identities = []
+    for prefix, run in (("baseline", baseline), ("candidate", candidate)):
+        identity = run.get("identity")
+        if not isinstance(identity, dict) or any(
+            field not in identity or identity[field] is None for field in identity_fields
+        ):
+            unavailable.append(f"{prefix}.identity")
+            identities.append(None)
+        else:
+            valid = all(
+                isinstance(identity[field], str) and bool(identity[field].strip())
+                for field in ("dataset_sha256", "model", "prompt_sha256")
+            )
+            valid = valid and type(identity["knowledge_revision"]) is int and identity["knowledge_revision"] >= 0
+            valid = valid and type(identity["concurrency"]) is int and identity["concurrency"] > 0
+            deadline = identity["deadline_seconds"]
+            valid = valid and type(deadline) in (int, float) and math.isfinite(deadline) and deadline > 0
+            dimensions = identity["dimensions"]
+            valid = valid and isinstance(dimensions, list) and bool(dimensions) and all(
+                isinstance(dimension, str) and bool(dimension.strip()) for dimension in dimensions
+            )
+            if not valid:
+                unavailable.append(f"{prefix}.identity")
+                identities.append(None)
+            else:
+                identities.append({field: identity[field] for field in identity_fields})
+    if all(identity is not None for identity in identities) and identities[0] != identities[1]:
+        reasons.append("运行身份不一致，不能据此启用候选配置")
+    case_sets = []
+    for prefix, samples in (("baseline", baseline_samples), ("candidate", candidate_samples)):
+        case_ids = [sample.get("case_id") for sample in samples]
+        if not case_ids or any(not isinstance(case_id, str) or not case_id.strip() for case_id in case_ids):
+            unavailable.append(f"{prefix}.case_ids")
+            case_sets.append(None)
+        else:
+            if len(set(case_ids)) != len(case_ids):
+                reasons.append("样本标识重复，不能比较")
+            case_sets.append(set(case_ids))
+    if all(cases is not None for cases in case_sets) and case_sets[0] != case_sets[1]:
+        reasons.append("基线和候选样本集合不一致")
+    quality_fields = (
+        "high_risk_recall", "risk_f1", "evidence_support_rate",
+        "coverage_rate", "manual_review_rate",
+    )
+    business_metrics = []
+    for prefix, run in (("baseline", baseline), ("candidate", candidate)):
+        metrics = run.get("quality_metrics")
+        if not isinstance(metrics, dict) or any(field not in metrics for field in quality_fields):
+            unavailable.append(f"{prefix}.quality_metrics")
+            business_metrics.append(None)
+            continue
+        for field in quality_fields:
+            value = metrics[field]
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"{prefix}.quality_metrics.{field} 必须是 0 至 1 的有限数值")
+        business_metrics.append({field: metrics[field] for field in quality_fields})
+    if all(metrics is not None for metrics in business_metrics):
+        before, after = business_metrics
+        for field in quality_fields[:-1]:
+            if after[field] < before[field]:
+                reasons.append(f"质量指标下降：{field}")
+        if after["manual_review_rate"] > before["manual_review_rate"]:
+            reasons.append("人工复核比例上升，需人工核对后再批准")
+    if safety_violation:
+        reasons.append("候选存在越权证据或未复核自动发布")
+    quality_gate = False if safety_violation else None if unavailable else not reasons
     return AuditPerformanceReport(
         baseline_name=str(baseline.get("name") or "baseline"),
         candidate_name=str(candidate.get("name") or "candidate"),
@@ -218,6 +299,9 @@ def compare_runs(
             unauthorized_evidence_count=unsafe,
             unverified_auto_publish_count=unverified,
             gate_passed=quality_gate,
+            reasons=tuple(reasons),
+            baseline_business_metrics=business_metrics[0],
+            candidate_business_metrics=business_metrics[1],
         ),
         unavailable_metrics=tuple(sorted(unavailable)),
     )
@@ -251,6 +335,10 @@ def render_markdown(report: AuditPerformanceReport) -> str:
         "|---|---:|---:|---:|",
         f"| 总耗时(ms) | {_display(report.speed.baseline.total_ms)} | "
         f"{_display(report.speed.candidate.total_ms)} | {_display(report.speed.total_ms_delta)} |",
+        f"| 单份总耗时 P50(ms) | {_display(report.speed.baseline.total_latency_p50_ms)} | "
+        f"{_display(report.speed.candidate.total_latency_p50_ms)} |  |",
+        f"| 单份总耗时 P95(ms) | {_display(report.speed.baseline.total_latency_p95_ms)} | "
+        f"{_display(report.speed.candidate.total_latency_p95_ms)} |  |",
         f"| LLM 调用数 | {_display(report.speed.baseline.llm_calls)} | "
         f"{_display(report.speed.candidate.llm_calls)} | {_display(report.speed.llm_calls_delta)} |",
         "",
@@ -258,6 +346,11 @@ def render_markdown(report: AuditPerformanceReport) -> str:
         "",
         "| 指标 | 基线 | 候选 |",
         "|---|---:|---:|",
+        *[
+            f"| {field} | {_display((report.quality.baseline_business_metrics or {}).get(field))} | "
+            f"{_display((report.quality.candidate_business_metrics or {}).get(field))} |"
+            for field in ("high_risk_recall", "risk_f1", "evidence_support_rate", "coverage_rate", "manual_review_rate")
+        ],
         f"| 越权证据数 | {_display(report.quality.baseline.unauthorized_evidence_count)} | "
         f"{_display(report.quality.candidate.unauthorized_evidence_count)} |",
         f"| 未复核自动发布数 | {_display(report.quality.baseline.unverified_auto_publish_count)} | "
@@ -265,5 +358,6 @@ def render_markdown(report: AuditPerformanceReport) -> str:
         f"| 质量门禁 |  | {_display(report.quality.gate_passed)} |",
         "",
         "不可用指标：" + ("、".join(report.unavailable_metrics) or "无"),
+        "门禁原因：" + ("；".join(report.quality.reasons) or "无"),
         "",
     ])

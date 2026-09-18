@@ -37,7 +37,7 @@ function importBatch() {
   }
 }
 
-function auditBatch(itemStatus: ItemStatus) {
+function auditBatch(itemStatus: ItemStatus, itemOverrides: Record<string, unknown> = {}) {
   const batchStatus = itemStatus === 'review_required'
     ? 'review_required'
     : itemStatus === 'failed'
@@ -58,6 +58,8 @@ function auditBatch(itemStatus: ItemStatus) {
       status: itemStatus,
       error: itemStatus === 'failed' ? '模型服务暂不可用' : null,
       error_code: itemStatus === 'failed' ? 'MODEL_UNAVAILABLE' : null,
+      retryable: itemStatus === 'failed',
+      error_action: itemStatus === 'failed' ? '请检查模型服务状态后重试；若重复失败，请联系管理员' : null,
       attempts: 1,
       started_at: '2026-09-13T10:01:00Z',
       finished_at: ['review_required', 'failed'].includes(itemStatus)
@@ -68,6 +70,7 @@ function auditBatch(itemStatus: ItemStatus) {
       review_reason: itemStatus === 'review_required'
         ? '二次复核发现证据支持关系存在冲突'
         : null,
+      ...itemOverrides,
     }],
   }
 }
@@ -92,10 +95,11 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 interface PrepareOptions {
   requestedStatusJobs?: Array<string | null>
   requestedRiskJobs?: Array<string | null>
+  itemOverrides?: Record<string, unknown>
 }
 
 async function prepare(page: Page, itemStatus: ItemStatus, options: PrepareOptions = {}) {
-  const batch = auditBatch(itemStatus)
+  const batch = auditBatch(itemStatus, options.itemOverrides)
   const unexpectedRequests: string[] = []
   unexpectedRequestsByPage.set(page, unexpectedRequests)
   await page.addInitScript(() => {
@@ -217,7 +221,40 @@ test('failed is the only quality state that offers batch retry', async ({ page }
   const region = await prepare(page, 'failed')
 
   await expect(region.getByText('模型服务暂不可用')).toBeVisible()
+  await expect(region.getByText('错误码：MODEL_UNAVAILABLE')).toBeVisible()
+  await expect(region.getByText('请检查模型服务状态后重试；若重复失败，请联系管理员')).toBeVisible()
   await expect(region.getByRole('button', { name: '重试失败项' })).toBeVisible()
+})
+
+test('non-retryable failure shows action without offering blind retry', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const region = await prepare(page, 'failed', {
+    itemOverrides: {
+      error: '模型供应商拒绝了审查请求',
+      error_code: 'MODEL_REJECTED',
+      retryable: false,
+      error_action: '请联系管理员检查模型凭据、额度或服务策略后再提交审查',
+    },
+  })
+  await expect(region.getByText('模型供应商拒绝了审查请求')).toBeVisible()
+  await expect(region.getByText('错误码：MODEL_REJECTED')).toBeVisible()
+  await expect(region.getByText('请联系管理员检查模型凭据、额度或服务策略后再提交审查')).toBeVisible()
+  await expect(region.getByRole('button', { name: '重试失败项' })).toHaveCount(0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
+
+test('historical failed response falls back to its review reason', async ({ page }) => {
+  const region = await prepare(page, 'failed', {
+    itemOverrides: {
+      error: null,
+      error_code: null,
+      retryable: undefined,
+      error_action: undefined,
+      review_reason: '历史任务：合同文本不完整，需人工复核',
+    },
+  })
+  await expect(region.getByText('历史任务：合同文本不完整，需人工复核')).toBeVisible()
+  await expect(region.getByRole('button', { name: '重试失败项' })).toHaveCount(0)
 })
 
 test('restores an active quality-state batch from the url after reload', async ({ page }) => {

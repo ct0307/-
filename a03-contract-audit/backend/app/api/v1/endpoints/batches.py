@@ -27,6 +27,7 @@ from app.services.audit.jobs import (
     import_batch_request_fingerprint,
     normalize_dimensions,
 )
+from app.services.audit.failure import audit_failure
 from app.services.batch.service import (
     ACTIVE_AUDIT_ITEM_STATUSES,
     retry_failed_item,
@@ -443,6 +444,9 @@ def retry_batch(
     pending_dispatch: list[AuditBatchItem] = []
     for item in batch.items:
         if item.status != "failed":
+            continue
+        failure = audit_failure(item)
+        if failure is None or not failure.retryable:
             continue
         decision = retry_failed_item(item.status, attempts=item.attempts)
         item.status = decision.status

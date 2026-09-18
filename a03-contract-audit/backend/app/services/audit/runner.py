@@ -22,6 +22,7 @@ from app.services.audit.protocol import ReviewIssue
 from app.services.audit.progress import ProgressCallback
 from app.services.audit.result_quality import AuditCoverage, decide_audit_status
 from app.services.rag.applicability import resolve_legal_as_of
+from app.services.audit.failure import QUALITY_REASON_MESSAGES, audit_failure
 from app.services.parser.extractor import (
     DocumentParseResult,
     extract_document,
@@ -31,25 +32,7 @@ from app.services.parser.cache import get_cached_parse, save_parse_cache
 
 log = get_logger("audit_runner")
 
-_QUALITY_REASON_MESSAGES = {
-    "INCOMPLETE_COVERAGE": "审查覆盖不完整",
-    "OUTPUT_TRUNCATED": "模型输出被截断",
-    "INVALID_MODEL_OUTPUT": "模型输出格式无效",
-    "MODEL_TIMEOUT": "模型调用超时",
-    "MODEL_UNAVAILABLE": "模型服务不可用",
-    "MODEL_REJECTED": "模型供应商拒绝了审查请求",
-    "PAGINATION_EXHAUSTED": "模型分页审查未完成",
-    "EVIDENCE_UNRESOLVED": "风险依据尚未核验",
-    "ORIGINAL_TEXT_UNRESOLVED": "风险原文尚未核验",
-    "PARSE_QUALITY_LOW": "文档解析质量不足，需人工复核",
-    "CONTRACT_TEXT_INCOMPLETE": "合同文本不完整，需人工复核",
-    "SECONDARY_REVIEW_CONFLICT": "二次复核存在冲突",
-    "SECONDARY_REVIEW_PENDING": "二次复核尚未完成",
-    "UNBOUND_CONFLICT": "冲突项无法关联到具体风险，需人工复核",
-    "AUDIT_DEADLINE_EXCEEDED": "审查达到整体时限，需人工复核",
-    "DIMENSION_MISMATCH": "模型返回了本次范围外的风险",
-    "FACT_VALIDATION_FAILED": "候选风险的结构化事实校验失败",
-}
+_QUALITY_REASON_MESSAGES = QUALITY_REASON_MESSAGES
 
 
 class StaleAuditRun(RuntimeError):
@@ -169,7 +152,10 @@ def run_audit(
         quality_reasons = list(decision.reasons)
         review_reason = _review_reason(quality_reasons)
         if prior_requires_review:
-            reasons = [prior_review_reason, review_reason]
+            # 清理旧审查质量摘要，保留独立的要素人工复核要求。
+            prior_parts = (prior_review_reason or "").split("；")
+            prior_parts = [part for part in prior_parts if part and part not in QUALITY_REASON_MESSAGES.values()]
+            reasons = [*prior_parts, *(review_reason or "").split("；")]
             review_reason = "；".join(dict.fromkeys(reason for reason in reasons if reason)) or None
         final_requires_review = decision.requires_review or prior_requires_review
         final_status = (
@@ -258,6 +244,10 @@ def run_audit(
                 },
                 ensure_ascii=False,
             )
+            failure = audit_failure(item)
+            if failure is not None:
+                item.error = failure.message
+                item.error_code = failure.code
             item.finished_at = datetime.now(timezone.utc)
             item.lease_expires_at = None
             item.execution_token = None

@@ -17,6 +17,8 @@ export interface AuditBatchItem {
   progress_stage: AuditProgressStage
   error: string | null
   error_code?: string | null
+  retryable?: boolean
+  error_action?: string | null
   attempts: number
   started_at: string | null
   finished_at: string | null

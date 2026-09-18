@@ -684,6 +684,33 @@ def test_partial_failure_publishes_verified_risk_and_quality_snapshot(monkeypatc
     assert "供应商返回" not in saved_item.result_json
 
 
+def test_quality_failure_persists_safe_reason_and_deduplicates_repeated_review(monkeypatch, db):
+    contract = _contract(db, "timeout.txt")
+    contract.requires_review = True
+    contract.review_reason = "关键要素冲突，请人工确认；审查覆盖不完整；模型调用超时"
+    batch = AuditBatch(owner_id=1, department="法务部", idempotency_key="quality-timeout")
+    db.add(batch)
+    db.flush()
+    item = AuditBatchItem(batch_id=batch.id, contract_id=contract.id,
+                          filename=contract.filename, status="reviewing",
+                          audit_generation=1, execution_token="quality-token")
+    db.add(item)
+    db.commit()
+    monkeypatch.setattr(runner, "extract_document", lambda path: DocumentParseResult(
+        text="有效合同正文" * 60, source="native"))
+    monkeypatch.setattr(runner, "audit_contract", lambda *args, **kwargs: {
+        "risks": [], "cross_checks": [], "coverage": {"planned": 1, "completed": 0},
+        "issues": [{"code": "MODEL_TIMEOUT", "agent": "legal", "detail": "token=private"}],
+    })
+    result = run_audit(db, contract, batch_item_id=item.id, execution_token="quality-token")
+    db.refresh(item)
+    assert result["status"] == "audit_failed"
+    assert item.error_code == "MODEL_TIMEOUT"
+    assert "超时" in item.error
+    assert "private" not in item.error
+    assert contract.review_reason.count("模型调用超时") == 1
+
+
 def test_run_audit_releases_claim_transaction_before_external_work(monkeypatch, db: Session):
     contract = _contract(db, "atomic.txt")
     parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
