@@ -68,9 +68,9 @@ class RagGroundingTests(unittest.TestCase):
             )
 
         self.assertEqual(len(calls), 6)
-        self.assertNotEqual(grounded[0]["rag_sources"], grounded[1]["rag_sources"])
-        self.assertTrue(grounded[0]["basis"].startswith("法规1 第1条"))
-        self.assertTrue(grounded[1]["basis"].startswith("法规4 第4条"))
+        self.assertNotEqual(grounded[0]["retrieval_attempts"], grounded[1]["retrieval_attempts"])
+        self.assertEqual(grounded[0]["rag_sources"], [])
+        self.assertEqual(grounded[1]["basis"], auditor.NO_RELIABLE_BASIS)
         self.assertEqual(calls[0][1]["contract_type"], "采购合同")
         self.assertEqual(calls[0][1]["dimensions"], ["breach", "dispute"])
 
@@ -105,9 +105,9 @@ class RagGroundingTests(unittest.TestCase):
             )
 
         self.assertTrue(grounded[0]["original_text_verified"])
-        self.assertEqual(grounded[0]["support_relation_status"], "supported")
-        self.assertEqual(grounded[0]["evidence_status"], "supported")
-        self.assertFalse(grounded[0]["requires_manual_review"])
+        self.assertEqual(grounded[0]["support_relation_status"], "unclear")
+        self.assertEqual(grounded[0]["evidence_status"], "partially_supported")
+        self.assertTrue(grounded[0]["requires_manual_review"])
 
     def test_unknown_source_applicability_cannot_be_automatically_accepted(self):
         risks = [_risk("违约责任", "违约金为50%")]
@@ -209,11 +209,13 @@ class RagGroundingTests(unittest.TestCase):
 
         self.assertEqual(len(queries), 6)
         self.assertNotEqual(queries[0], queries[3])
-        self.assertEqual(grounded[0]["evidence_status"], "supported")
+        self.assertEqual(grounded[0]["evidence_status"], "partially_supported")
         self.assertEqual(
             [source["chunk_id"] for source in grounded[0]["rag_sources"]],
-            [1, 2],
+            [],
         )
+        self.assertEqual([r["source"]["chunk_id"] for r in grounded[0]["retrieval_attempts"][-1]["evidence_relations"]], [1, 2])
+        self.assertTrue(grounded[0]["requires_manual_review"])
         self.assertEqual(len(grounded[0]["retrieval_attempts"]), 6)
         self.assertEqual(
             {attempt["rewrite"] for attempt in grounded[0]["retrieval_attempts"]},

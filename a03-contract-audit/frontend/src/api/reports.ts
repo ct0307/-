@@ -73,6 +73,20 @@ export interface ReportRisk {
 }
 
 export interface ReportSnapshot {
+  schema_version?: string
+  state?: string
+  operations?: {
+    metric_version: string
+    as_of_date: string
+    high_risk_contracts: number
+    pending_risk_count: number
+    overdue_count: number
+    unknown_due_count: number
+    amount_note: string
+    risk_count_basis: string
+    departments: { department: string; contract_count: number; risk_count: number; high_risk_contracts: number; high_risk_rate: number; contract_ids: number[]; high_risk_contract_ids: number[] }[]
+    overdue_actions: { id: number; risk: string; owner: string; overdue_days: number; due: string }[]
+  }
   report_id: string
   generated_at: string
   contract_ids: number[]

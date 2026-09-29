@@ -92,7 +92,7 @@ def list_contract_type_profiles(
 def create_lookup(
     body: LookupItemCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_roles(["admin"])),
+    current_user: User = Depends(require_roles("admin")),
 ):
     if body.category not in _VALID_CATEGORIES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"非法 category: {body.category}")
@@ -182,7 +182,7 @@ def update_contract_type_profile(
 def delete_lookup(
     item_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_roles(["admin"])),
+    current_user: User = Depends(require_roles("admin")),
 ):
     item = db.get(LookupItem, item_id)
     if not item:

@@ -4,10 +4,11 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, RefreshRight, View, WarningFilled } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { getLookups } from '@/api/admin'
 
 import type { RiskOut } from '@/api/types'
+import type { Handoff } from '@/api/handoffs'
 import type { AuditBatchItem } from '@/api/batches'
 import { useAuditSessionStore } from '@/stores/audit-session'
 import { useRectifyStore } from '@/stores/rectify'
@@ -16,6 +17,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useBatchStore } from '@/stores/batch'
 import { useImportInboxStore } from '@/stores/import-inbox'
 import ContractInbox from '@/components/audit/ContractInbox.vue'
+import HandoffQueue from '@/components/audit/HandoffQueue.vue'
 import RiskReviewDrawer from '@/components/audit/RiskReviewDrawer.vue'
 import AnnotationModal from '@/components/audit/AnnotationModal.vue'
 import {
@@ -201,6 +203,10 @@ async function deleteImportDraft(itemId: number) {
 }
 
 async function auditReadyItems() {
+  if (!['legal', 'finance', 'admin'].includes(auth.role)) {
+    ElMessage.warning('当前角色无权发起审查')
+    return
+  }
   const targetIds = [...inbox.auditTargetIds]
   if (!targetIds.length) return
   try {
@@ -213,6 +219,28 @@ async function auditReadyItems() {
     await inbox.pollOnce()
   } catch {
     ElMessage.error(batchStore.error || '审查批次提交失败')
+  }
+}
+
+async function reviewHandoff(row: Handoff) {
+  if (session.busy || session.hasActiveAudit) {
+    ElMessage.warning('请先完成当前审查任务')
+    return
+  }
+  try {
+    if (row.audit_job_id) {
+      await session.loadCompletedAudit(row.contract_id, row.filename, row.audit_job_id)
+    } else {
+      session.reset()
+      session.contractId = row.contract_id
+      session.filename = row.filename
+      await session.runAudit(row.contract_type, dimensions.value.filter(item => item.on).map(item => item.key))
+    }
+    ElMessage.success('已打开交接合同的审查结果')
+    await nextTick()
+    document.querySelector<HTMLElement>('[data-audit-detail]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '审查结果加载失败')
   }
 }
 
@@ -365,24 +393,32 @@ function openReview(risk: RiskOut) {
 
 async function confirmRisk(risk: RiskOut) {
   try {
-    await session.setRiskStatus(risk, 'confirmed')
+    const { value: comment } = await ElMessageBox.prompt('请记录确认该风险的依据、处置判断或复核范围', '填写人工复核意见', {
+      inputType: 'textarea', inputPlaceholder: '至少说明你核对了什么以及为何确认', inputValidator: value => !!value?.trim() || '复核意见不能为空',
+      confirmButtonText: '提交确认', cancelButtonText: '取消',
+    })
+    await session.setRiskStatus(risk, 'confirmed', comment)
     // 跨模块联动：生成整改项 + 推通知
     await rectify.addFromRisk(risk, session.filename || '当前合同', auth.username)
     notify.push('rectify', '生成整改项', `已就"${risk.category}"生成整改项，进入整改跟踪。`)
     ElMessage.success('已确认并生成整改项')
     drawerOpen.value = false
-  } catch {
-    ElMessage.error('操作失败')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error('操作失败')
   }
 }
 
 async function ignoreRisk(risk: RiskOut) {
   try {
-    await session.setRiskStatus(risk, 'ignored')
+    const { value: comment } = await ElMessageBox.prompt('请说明为何判断为误报或无需处理', '填写人工复核意见', {
+      inputType: 'textarea', inputPlaceholder: '至少说明误报依据或排除理由', inputValidator: value => !!value?.trim() || '复核意见不能为空',
+      confirmButtonText: '提交误报', cancelButtonText: '取消',
+    })
+    await session.setRiskStatus(risk, 'ignored', comment)
     ElMessage.success('已标记为误报')
     drawerOpen.value = false
-  } catch {
-    ElMessage.error('操作失败')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error('操作失败')
   }
 }
 
@@ -409,7 +445,7 @@ const elementLabels: Record<string, string> = {
 
 // 3 步引导数据
 const onboardSteps = [
-  { num: '1', title: '上传合同', desc: '支持 PDF / Word / TXT，文件即刻加密存储' },
+  { num: '1', title: '上传合同', desc: '支持 PDF / Word / TXT，文件存入当前部署环境' },
   { num: '2', title: '确认信息', desc: '逐份核对合同类型与归属部门' },
   { num: '3', title: '人工复核 / 生成整改', desc: '确认风险条款，自动生成整改跟踪项' },
 ]
@@ -417,6 +453,7 @@ const onboardSteps = [
 
 <template>
   <div class="audit-page">
+    <HandoffQueue @review="reviewHandoff" />
     <ContractInbox
       :items="inbox.batch?.items ?? []"
       :contract-types="contractTypeOptions"
@@ -426,6 +463,7 @@ const onboardSteps = [
       :all-ready-selected="inbox.allReadySelected"
       :some-ready-selected="inbox.someReadySelected"
       :can-change-department="canChangeDepartment"
+      :can-review="['legal', 'finance', 'admin'].includes(auth.role)"
       :loading="inbox.loading || batchStore.loading"
       @upload="uploadFiles"
       @confirm="confirmImportItem"
@@ -560,10 +598,10 @@ const onboardSteps = [
           <div v-if="session.requiresReview" class="ocr-review-alert" role="alert">
             <el-icon><WarningFilled /></el-icon>
             <div>
-              <strong>扫描件需人工复核</strong>
+              <strong>审查结果需人工复核</strong>
               <p>
-                {{ session.reviewReason || 'OCR 结果未达到自动采信门槛' }}
-                · OCR 置信度 {{ formatOcrConfidence(session.ocrConfidence) }}
+                {{ session.reviewReason || '请核对解析质量、风险依据及适用条件' }}
+                <span v-if="session.ocrConfidence != null"> · OCR 置信度 {{ formatOcrConfidence(session.ocrConfidence) }}</span>
               </p>
             </div>
           </div>

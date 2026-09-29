@@ -59,6 +59,11 @@ class OpenAICompatibleAdapter(LLMAdapter):
         request_id: str | None = None,
     ) -> tuple[dict, int]:
         """POST 并返回 (响应 JSON, 耗时毫秒)。异常统一包成 LLMError。"""
+        from app.core.model_policy import check_model_endpoint
+        try:
+            check_model_endpoint(self.base_url, settings)
+        except ValueError as exc:
+            raise LLMError(str(exc), code="MODEL_OUTBOUND_BLOCKED", retryable=False) from exc
         url = f"{self.base_url}{path}"
         start = time.perf_counter()
         safe_error: LLMError | None = None
@@ -68,6 +73,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 json=payload,
                 headers=self._headers(request_id),
                 timeout=self.timeout,
+                **({"trust_env": False, "follow_redirects": False} if settings.MODEL_PROCESSING_MODE == "private_model" else {}),
             )
             resp.raise_for_status()
         except httpx.TimeoutException:

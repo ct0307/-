@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.core.model_policy import check_model_endpoint
 from app.services.runtime.status import RuntimeProbeError
 
 
@@ -14,6 +15,10 @@ def configured_models_url() -> str:
 
 
 def _probe_once() -> dict[str, Any]:
+    try:
+        check_model_endpoint(settings.LLM_BASE_URL, settings)
+    except ValueError:
+        raise RuntimeProbeError("model_outbound_blocked", "模型出站策略禁止探测当前地址") from None
     headers = {"Accept": "application/json"}
     if settings.LLM_API_KEY:
         headers["Authorization"] = f"Bearer {settings.LLM_API_KEY}"
@@ -22,6 +27,7 @@ def _probe_once() -> dict[str, Any]:
             configured_models_url(),
             headers=headers,
             timeout=min(float(settings.LLM_TIMEOUT), 10.0),
+            **({"trust_env": False, "follow_redirects": False} if settings.MODEL_PROCESSING_MODE == "private_model" else {}),
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:

@@ -47,3 +47,18 @@
 ## 消融对比
 
 比赛报告至少保留四组同一金标结果：BM25、向量、BM25+向量 RRF、RRF+真实 Cross-Encoder。当前未配置 Cross-Encoder 时，系统保留融合顺序并将覆盖度评分标记为 `deterministic_evidence_v1`，不得写成模型 reranker。
+
+## 当前检索预测 runner（2026-09-29）
+
+在上述金标每行增加 `query`，可选 `contract_type`、`dimensions`、`as_of`（YYYY-MM-DD）。当前稳定 ID 规则：权威父法条为 `source_id:article_number`，普通切片为 `chunk:<数据库ID>`。普通切片评测必须冻结同一知识库，不跨重新导入的数据集比较 ID。
+
+```powershell
+.\.venv\Scripts\python.exe -m evaluation.retrieval_runner `
+  --gold data/retrieval-gold.jsonl `
+  --output-dir ../outputs/retrieval-run-20260929 `
+  --k 5 --min-recall 0.90
+```
+
+输出 `predictions.jsonl` 与 `report.json`，包含当前源码指纹、知识库修订号与内容指纹、非密钥模型/检索配置、输入金标哈希和运行指纹。输出目录必须不存在，避免覆盖已有证据。runner 使用生产 `retrieve()` 路径，不默认生成四组消融；实际 exact/hybrid/bm25/keyword 模式逐案例保留。知识库运行前后不一致时拒绝产物。
+
+异常案例保留空预测与异常类型，仍进入指标分母；任何检索异常均判运行失败。无稳定 ID 的静态兜底不会冒充知识库命中。当前阈值只检查 Recall，MRR/Precision/nDCG 同时报告；真实双人金标、四组消融及基线退化门禁仍需后续完成。测试合成案例仅验证工具，不能作为检索质量达标证据。

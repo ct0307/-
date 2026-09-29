@@ -24,6 +24,9 @@ export function transitionRuntimeStatus(
   state: RuntimeStatusState,
   result: RuntimeStatus,
 ): RuntimeStatusState {
+  if (result.processing_mode === 'rules_fallback') {
+    return { current: result, consecutiveFailures: 0, lastOnline: null }
+  }
   if (result.status === 'online') {
     return { current: result, consecutiveFailures: 0, lastOnline: result }
   }

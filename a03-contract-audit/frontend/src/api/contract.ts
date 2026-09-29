@@ -79,6 +79,6 @@ export function batchUploadContracts(files: File[], contractType = ''): Promise<
   return client.post('/contracts/batch-upload', fd, { params, timeout: 300_000 })
 }
 
-export function updateRiskStatus(riskId: number, riskStatus: RiskOut['review_status']): Promise<unknown> {
-  return client.patch(`/risks/${riskId}/status`, { review_status: riskStatus })
+export function updateRiskStatus(riskId: number, riskStatus: RiskOut['review_status'], reviewComment = ''): Promise<unknown> {
+  return client.patch(`/risks/${riskId}/status`, { review_status: riskStatus, review_comment: reviewComment })
 }

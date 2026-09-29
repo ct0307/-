@@ -362,9 +362,10 @@ def test_nonexistent_amount_claim_requires_review_instead_of_done(
 
     assert contract.status == "review_required"
     assert result["status"] == "review_required"
-    assert result["quality_reasons"] == ["FACT_VALIDATION_FAILED"]
+    assert "FACT_VALIDATION_FAILED" in result["quality_reasons"]
+    assert "EVIDENCE_UNRESOLVED" in result["quality_reasons"]
     assert [issue["code"] for issue in result["issues"]] == [
-        "FACT_VALIDATION_FAILED"
+        "FACT_VALIDATION_FAILED", "EVIDENCE_UNRESOLVED"
     ]
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 1
 

@@ -33,7 +33,7 @@ def _json_object(value: object) -> dict:
 
 
 def _public_retrieval_attempts(value: object) -> list[dict]:
-    allowed = {"attempt", "support_status", "source_ids"}
+    allowed = {"attempt", "support_status", "candidate_match_status", "source_ids"}
     return [
         {key: item[key] for key in allowed if key in item}
         for item in _json_list(value)

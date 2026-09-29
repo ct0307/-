@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.models import AuditBatchItem, Contract, Risk
 from app.services.audit.auditor import audit_contract
+from app.services.audit.finalization import save_workflow
 from app.services.audit.evidence_persistence import (
     build_contract_evidence,
     replace_contract_clauses,
@@ -251,6 +252,8 @@ def run_audit(
             item.finished_at = datetime.now(timezone.utc)
             item.lease_expires_at = None
             item.execution_token = None
+        if final_status in {'done','review_required'}:
+            save_workflow(db,publishing,batch_item_id,result.get('workflow',{}),result.get('cross_checks',[]))
         db.commit()
         persist_ms = round((time.perf_counter() - persist_started) * 1000)
         log.info(
@@ -346,6 +349,7 @@ def _compute_audit(
     text = parsed.text
     cross_checks: list[dict] = []
     risk_payloads: list[dict] = []
+    workflow = {}
     issues: list[ReviewIssue] = []
     coverage = AuditCoverage(1, 1)
     audit_timings = {
@@ -398,6 +402,7 @@ def _compute_audit(
         legal_as_of_source = legal_as_of_context.source
         risk_payloads.extend(result["risks"])
         cross_checks = result["cross_checks"]
+        workflow = result.get('workflow', {})
         issues.extend(_review_issues(result.get("issues", [])))
         coverage = _audit_coverage(result.get("coverage"), issues)
         audit_timings.update(result.get("timings", {}))
@@ -419,6 +424,7 @@ def _compute_audit(
     return {
         "risk_count": risk_count,
         "cross_checks": cross_checks,
+        "workflow": workflow,
         "ocr_confidence": parsed.ocr_confidence,
         "legal_as_of": legal_as_of,
         "legal_as_of_source": legal_as_of_source,

@@ -11,9 +11,10 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_roles
+from app.api.deps import allowed_departments, require_roles
 from app.db.session import get_db
-from app.models.models import Rectification, User
+from app.models.models import Contract, Risk, Rectification, User
+from app.services.authorized_risks import load_authorized_risk
 from app.schemas.contract import (
     RectificationCreate,
     RectificationOut,
@@ -47,7 +48,12 @@ def list_rectifications(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("legal", "finance", "business")),
 ) -> list[RectificationOut]:
-    rows = db.query(Rectification).order_by(Rectification.id.desc()).all()
+    query = db.query(Rectification)
+    if user.role != "admin":
+        query = query.join(Risk, Rectification.risk_id == Risk.id).join(Contract, Risk.contract_id == Contract.id).filter(
+            Contract.deleted_at.is_(None), Contract.department.in_(allowed_departments(user)),
+        )
+    rows = query.order_by(Rectification.id.desc()).all()
     return [RectificationOut.from_orm_row(r) for r in rows]
 
 
@@ -61,12 +67,22 @@ def create_rectification(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"非法风险等级: {payload.level}")
     if payload.status != "待处理":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "新整改项必须从“待处理”开始")
+    if payload.risk_id is None:
+        raise HTTPException(422, "整改必须关联已授权的风险项")
+    risk, contract = load_authorized_risk(db, payload.risk_id, user)
+    if risk.review_status not in {"confirmed", "to_modify"}:
+        raise HTTPException(409, "请先复核风险再创建整改任务")
     created = payload.created or date.today().isoformat()
     due = payload.due or (date.today() + timedelta(days=7)).isoformat()
+    try:
+        if date.fromisoformat(due) < date.fromisoformat(created):
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(422, "日期格式应为 YYYY-MM-DD，截止日不得早于创建日")
     row = Rectification(
-        contract=payload.contract,
-        risk=payload.risk,
-        level=payload.level,
+        contract=contract.filename,
+        risk=risk.category,
+        level=risk.level,
         owner=payload.owner,
         status=payload.status,
         created=created,
@@ -90,7 +106,7 @@ def update_rectification_status(
     rc_id: str,
     payload: RectificationStatusUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("legal", "finance")),
+    user: User = Depends(require_roles("legal", "finance", "business")),
 ) -> RectificationOut:
     if payload.status not in _VALID_STATUS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"非法状态: {payload.status}")
@@ -98,6 +114,13 @@ def update_rectification_status(
     row = db.query(Rectification).filter(Rectification.id == pk).first()
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "整改项不存在")
+    if row.risk_id is None:
+        if user.role != "admin":
+            raise HTTPException(403, "历史整改缺少合同归属，请管理员核验")
+    else:
+        load_authorized_risk(db, row.risk_id, user)
+    if user.role == "business" and (row.owner != user.username or row.status not in {"待处理", "处理中"} or payload.status not in {"处理中", "待复核"}):
+        raise HTTPException(403, "业务人员仅可办理本人整改并提交复核")
     old = row.status
     if payload.status not in _ALLOWED_TRANSITIONS.get(old, set()):
         raise HTTPException(

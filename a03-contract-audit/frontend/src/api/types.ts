@@ -112,6 +112,17 @@ export interface RiskOut {
   confidence: number
   tier: 'green' | 'yellow' | 'red' // 人工干预档位
   review_status: 'pending' | 'confirmed' | 'ignored' | 'to_modify'
+  evidence_ids?: string[]
+  retrieval_attempts?: Array<{
+    attempt?: string
+    support_status?: string
+    candidate_match_status?: string
+    source_ids?: string[]
+    evidence_relations?: Array<{
+      source?: { source?: string; content?: string; id?: number; chunk_id?: number; evidence_id?: string }
+      relation?: string; status?: string; reason?: string; validator_version?: string
+    }>
+  }>
   rag_sources: Array<{ content: string; source: string; score: number }> // RAG 检索溯源
   evidence_status: 'supported' | 'partially_supported' | 'unsupported' | string
   original_text_verified: boolean | null

@@ -134,7 +134,7 @@ def test_legacy_risk_and_verified_rectification_are_serialized():
     snapshot = build_report_snapshot(db)
 
     assert snapshot["summary"]["unreviewed"] == 1
-    assert snapshot["summary"]["supported"] == 1
+    assert snapshot["summary"]["supported"] == 0  # 历史词面验证不属于新版语义核验通过。
     assert [row["risk_id"] for row in snapshot["rectifications"]] == [risk.id]
     assert any("无审查任务" in note for note in snapshot["notes"])
 

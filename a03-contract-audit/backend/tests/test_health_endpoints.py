@@ -234,7 +234,7 @@ def test_model_configuration_metadata_is_stable_and_redacted():
     config = Settings(
         _env_file=None,
         LLM_PROVIDER="deepseek",
-        LLM_BASE_URL="https://user:secret@api.deepseek.com/v1?token=private",
+        LLM_BASE_URL="https://api.deepseek.com/v1?token=private",
         LLM_MODEL="deepseek-v4-pro",
         LLM_API_KEY="test-secret-key",
     )

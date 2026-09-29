@@ -2,7 +2,7 @@
 // 合同全文批注：左侧风险原文列表（真实 original_text），右侧批注。
 // 点击右侧批注项 → 左侧对应原文平滑滚动到中央并 flash 高亮。
 import { computed, nextTick, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { RiskOut } from '@/api/types'
 import { useAuditSessionStore } from '@/stores/audit-session'
 
@@ -24,11 +24,14 @@ async function applyAsSuggestion(risk: RiskOut) {
   if (appliedIds.value.has(risk.id) || applyingId.value === risk.id) return
   applyingId.value = risk.id
   try {
-    await session.setRiskStatus(risk, 'to_modify')
+    const { value } = await ElMessageBox.prompt('请说明修改建议的复核判断和适用条件', '填写复核意见', {
+      inputType: 'textarea', inputValidator: value => !!value?.trim() || '复核意见不能为空',
+    })
+    await session.setRiskStatus(risk, 'to_modify', value)
     appliedIds.value.add(risk.id)
-    ElMessage.success('已应用为合同修改建议，可在整改跟踪中查看')
-  } catch {
-    ElMessage.error('操作失败')
+    ElMessage.success('已标记为需修改，复核意见已保存')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error('操作失败')
   } finally {
     applyingId.value = null
   }

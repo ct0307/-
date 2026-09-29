@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 
 SUPPORT_VALIDATOR_VERSION = "rules-v2"
-SUPPORT_V3_VERSION = "support-v3"
+SUPPORT_V3_VERSION = "support-v4"
 
 _ABSENCE_MARKERS = (
     "全文未检出",
@@ -55,6 +55,7 @@ class SupportValidation:
     failed_stage: str = "none"
     # 旧版校验结果没有稳定的原因码；留空后由查询执行器按 status 回退。
     reason_code: str = ""
+    evidence_relations: tuple[dict, ...] = ()
 
 
 def validate_support_relation(
@@ -129,7 +130,34 @@ def verify_support(
     *,
     semantic_verifier=None,
 ) -> SupportValidation:
-    """Run ordered support-v3 gates and stop at the first failed gate."""
+    """逐证据判定；冲突进入人工复核，不拼接来源制造支持关系。"""
+    from dataclasses import replace
+
+    if not sources:
+        return _verify_single(risk, [], semantic_verifier=semantic_verifier)
+    outcomes = [_verify_single(risk, [source], semantic_verifier=semantic_verifier) for source in sources]
+    relations = tuple({
+        "source": dict(source),
+        "relation": "supporting" if result.status == "supported" else
+                    "contradicting" if result.status == "contradicted" else
+                    "rejected" if result.failed_stage in {"authority", "applicability"} else "contextual",
+        "status": result.status, "reason_code": result.reason_code,
+        "reason": result.reason, "validator_version": result.version,
+    } for source, result in zip(sources, outcomes))
+    statuses = {result.status for result in outcomes}
+    if {"supported", "contradicted"} <= statuses:
+        result = _v3("unclear", "semantic_relation", "CONFLICTING_EVIDENCE", "支持与反驳依据并存，需人工裁决")
+    elif "contradicted" in statuses:
+        result = next(result for result in outcomes if result.status == "contradicted")
+    elif "supported" in statuses:
+        result = next(result for result in outcomes if result.status == "supported")
+    else:
+        result = outcomes[0]
+    return replace(result, evidence_relations=relations)
+
+
+def _verify_single(risk: dict, sources: list[dict], *, semantic_verifier=None) -> SupportValidation:
+    """单一候选的逐层验证，验证器缺席或故障时保守降级。"""
     original = str(risk.get("original_text") or "").strip()
     if risk.get("original_text_verified") is not True or not original:
         return _v3("unclear", "original", "ORIGINAL_TEXT_UNRESOLVED", "原文未完成精确定位")
@@ -156,14 +184,17 @@ def verify_support(
     if len(matched) < 2:
         return _v3("unclear", "facts", "FACTS_NOT_ALIGNED", "来源内容与风险事实缺少足够的一致性")
 
-    if semantic_verifier is not None:
+    if semantic_verifier is None:
+        return _v3("unclear", "semantic_relation", "SEMANTIC_VERIFIER_UNAVAILABLE", "未启用经过验证的语义判断器，需人工核验")
+    try:
         relation = semantic_verifier(risk, usable)
-        if relation == "contradicted":
-            return _v3("contradicted", "semantic_relation", "EVIDENCE_CONTRADICTS_CLAIM", "权威来源与风险结论存在语义矛盾")
-        if relation != "supported":
-            return _v3("unclear", "semantic_relation", "SEMANTIC_RELATION_UNRESOLVED", "语义关系验证未得出明确支持")
-
-    return _v3("supported", "none", "EVIDENCE_SUPPORTS_CLAIM", "五层证据支持校验通过")
+    except Exception:
+        return _v3("unclear", "semantic_relation", "SEMANTIC_VERIFIER_FAILED", "语义验证不可用，需人工核验")
+    if relation == "contradicted":
+        return _v3("contradicted", "semantic_relation", "EVIDENCE_CONTRADICTS_CLAIM", "权威来源与风险结论存在语义矛盾")
+    if relation != "supported":
+        return _v3("unclear", "semantic_relation", "SEMANTIC_RELATION_UNRESOLVED", "语义关系验证未得出明确支持")
+    return _v3("supported", "none", "EVIDENCE_SUPPORTS_CLAIM", "本条证据已通过来源、适用性、事实和语义验证")
 
 
 def _v3(status: str, failed_stage: str, reason_code: str, reason: str) -> SupportValidation:

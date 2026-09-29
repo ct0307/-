@@ -64,6 +64,9 @@ def init_db() -> None:
 # 开发期轻量补列：create_all 只建表不改已有表结构。SQLite 无 alembic 时，
 # 检测到 risks 缺少新增列则 ADD COLUMN，避免删库。生产（PostgreSQL）走 alembic 迁移。
 _DEV_COLUMNS = {
+    "audit_window_runs": [
+        ("run_fingerprint", "VARCHAR(64) DEFAULT '' NOT NULL"),
+    ],
     "users": [
         ("authorized_departments_json", "TEXT DEFAULT '[]' NOT NULL"),
     ],
@@ -146,6 +149,11 @@ _DEV_COLUMNS = {
         ("error_code", "VARCHAR(64)"),
     ],
     "knowledge_chunks": [
+        ("trust_status", "VARCHAR(24) DEFAULT 'unverified' NOT NULL"),
+        ("approved_by", "INTEGER"),
+        ("approved_at", "DATETIME"),
+        ("approval_version", "INTEGER DEFAULT 0 NOT NULL"),
+        ("approved_content_hash", "VARCHAR(64) DEFAULT '' NOT NULL"),
         ("article_number", "VARCHAR(64)"),
         ("version", "VARCHAR(64)"),
         ("effective_date", "DATE"),
@@ -175,7 +183,7 @@ _DEV_INDEXES = {
     ), (
         "uq_audit_window_runs_identity",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_window_runs_identity ON audit_window_runs("
-        "audit_job_id, audit_generation, agent, dimensions_hash, window_id, protocol_version)",
+        "audit_job_id, audit_generation, agent, dimensions_hash, window_id, protocol_version, run_fingerprint)",
     )),
     "contracts": ((
         "uq_contracts_uploader_upload_idempotency",
@@ -218,6 +226,7 @@ def _migrate_dev_columns() -> None:
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
                     log.info("db.migrate_column", table=table, column=name)
+        _migrate_window_identity(conn)
         for table, indexes in _DEV_INDEXES.items():
             if not inspector.has_table(table):
                 continue
@@ -236,7 +245,7 @@ def _migrate_dev_columns() -> None:
                     "ix_audit_window_runs_audit_job_id": {"audit_job_id"},
                     "uq_audit_window_runs_identity": {
                         "audit_job_id", "audit_generation", "agent", "dimensions_hash",
-                        "window_id", "protocol_version",
+                        "window_id", "protocol_version", "run_fingerprint",
                     },
                     "uq_contracts_uploader_upload_idempotency": {
                         "uploaded_by", "upload_idempotency_key"
@@ -257,6 +266,31 @@ def _migrate_dev_columns() -> None:
                 conn.execute(text(
                     f"UPDATE {table} SET status = 'reviewing' WHERE status = 'auditing'"
                 ))
+
+
+def _migrate_window_identity(conn) -> None:
+    """保留旧检查点数据，将运行指纹纳入开发库唯一约束。"""
+    inspector = inspect(conn)
+    table = "audit_window_runs"
+    if not inspector.has_table(table):
+        return
+    name = "uq_audit_window_runs_identity"
+    columns = ["audit_job_id", "audit_generation", "agent", "dimensions_hash",
+               "window_id", "protocol_version", "run_fingerprint"]
+    constraints = inspector.get_unique_constraints(table)
+    indexes = inspector.get_indexes(table)
+    old_constraint = next((c for c in constraints if c["name"] == name and
+                           "run_fingerprint" not in c["column_names"]), None)
+    old_index = next((i for i in indexes if i["name"] == name and
+                     "run_fingerprint" not in i["column_names"]), None)
+    if old_index:
+        conn.execute(text(f"DROP INDEX {name}"))
+    if old_constraint:
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        with Operations(MigrationContext.configure(conn)).batch_alter_table(table) as batch:
+            batch.drop_constraint(name, type_="unique")
+            batch.create_unique_constraint(name, columns)
 
 
 def _seed_users() -> None:

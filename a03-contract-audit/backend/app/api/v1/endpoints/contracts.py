@@ -161,7 +161,7 @@ def batch_upload_contracts(
     files: list[UploadFile] = File(..., description="批量上传合同文件，最多50份"),
     contract_type: str = "",
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(["legal", "finance", "admin"])),
+    user: User = Depends(require_roles("legal", "finance", "admin")),
 ) -> list[dict]:
     """批量上传合同：一次最多50份，逐文件处理。
 
@@ -683,7 +683,7 @@ def _get_contract(db: Session, contract_id: int, user: User | None = None) -> Co
 def escalate_contract(
     contract_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_roles(["legal", "finance", "admin"])),
+    current_user: User = Depends(require_roles("legal", "finance", "admin")),
 ):
     """三方会审发起：更新合同状态 + 写审计日志。
 

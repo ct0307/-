@@ -31,6 +31,7 @@ class PublicRuntimeStatus:
     error_code: str | None = None
     latency_ms: int | None = None
     last_success_at: str | None = None
+    processing_mode: str = "external_model"
 
 
 def _get_runtime_status_snapshot() -> PublicRuntimeStatus:
@@ -110,4 +111,7 @@ def _get_cached_runtime_status(
 def get_runtime_status(
     _user: User = Depends(get_current_user),
 ) -> PublicRuntimeStatus:
-    return _get_cached_runtime_status()
+    if settings.MODEL_PROCESSING_MODE == "rules_fallback":
+        return PublicRuntimeStatus(status="degraded", checked_at=datetime.now(timezone.utc).isoformat(),
+                                   detail="规则模式，模型调用已禁用", processing_mode="rules_fallback")
+    return replace(_get_cached_runtime_status(), processing_mode=settings.MODEL_PROCESSING_MODE)

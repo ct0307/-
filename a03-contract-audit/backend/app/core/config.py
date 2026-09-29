@@ -71,6 +71,7 @@ class Settings(BaseSettings):
 
     # LLM Adapter：当前项目测试基线使用 DeepSeek 中转；生产环境需评估合同出公网风险
     LLM_PROVIDER: str = "deepseek"  # qwen / deepseek / openclaw
+    MODEL_PROCESSING_MODE: Literal["private_model", "external_model", "rules_fallback"] = "external_model"
     LLM_BASE_URL: str = "https://yorhamc.com/v1"
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "deepseek-v4-flash"
@@ -81,6 +82,9 @@ class Settings(BaseSettings):
     AUDIT_BATCH_SECONDARY_ENABLED: bool = False
     AUDIT_BATCH_ENRICHMENT_ENABLED: bool = False
     AUDIT_MODEL_CONCURRENCY: int = Field(default=2, ge=1, le=3)
+    AUDIT_MAX_MODEL_CALLS: int = Field(default=120, ge=1, le=1000)
+    AUDIT_MAX_TOKEN_BUDGET: int = Field(default=3000000, ge=1000, le=10000000)
+    AUDIT_DIRECTED_MAX_CALLS: int = Field(default=3, ge=0, le=10)
 
     # Embedding 配置（RAG 向量化用）
     # EMBED_BACKEND=local（默认）：sentence-transformers 本地模型，合同数据不出企业
@@ -163,6 +167,9 @@ settings = get_settings()
 def validate_llm_configuration(config: Settings) -> None:
     """校验模型连接的结构配置，不发起网络请求。"""
     errors: list[str] = []
+    from app.core.model_policy import check_model_endpoint
+    if config.MODEL_PROCESSING_MODE != "rules_fallback":
+        check_model_endpoint(config.LLM_BASE_URL, config)
     provider = config.LLM_PROVIDER.strip().lower()
     if provider not in {"qwen", "deepseek", "openclaw"}:
         errors.append("LLM_PROVIDER 不受支持")
@@ -174,11 +181,11 @@ def validate_llm_configuration(config: Settings) -> None:
     except ValueError:
         parsed = None
         errors.append("LLM_BASE_URL 端口无效")
-    if parsed is None or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    if config.MODEL_PROCESSING_MODE != "rules_fallback" and (parsed is None or parsed.scheme not in {"http", "https"} or not parsed.hostname):
         errors.append("LLM_BASE_URL 必须是有效的 HTTP(S) 地址")
-    if not config.LLM_MODEL.strip():
+    if config.MODEL_PROCESSING_MODE != "rules_fallback" and not config.LLM_MODEL.strip():
         errors.append("LLM_MODEL 不能为空")
-    if provider == "deepseek" and not config.LLM_API_KEY.strip():
+    if config.MODEL_PROCESSING_MODE != "rules_fallback" and provider == "deepseek" and not config.LLM_API_KEY.strip():
         errors.append("DeepSeek 模式必须配置 LLM_API_KEY")
 
     if errors:
@@ -188,6 +195,13 @@ def validate_llm_configuration(config: Settings) -> None:
 def llm_configuration_metadata(config: Settings) -> dict[str, str]:
     """返回可安全记录的模型配置摘要。"""
     validate_llm_configuration(config)
+    if config.MODEL_PROCESSING_MODE == "rules_fallback":
+        return {
+            "llm_provider": "rules",
+            "llm_model": "disabled",
+            "llm_endpoint": "",
+            "llm_config_fingerprint": sha256(b"rules_fallback").hexdigest()[:12],
+        }
     endpoint = safe_http_authority(config.LLM_BASE_URL.strip())
     if endpoint is None:
         raise ValueError("模型配置无效：LLM_BASE_URL 必须是有效的 HTTP(S) 地址")

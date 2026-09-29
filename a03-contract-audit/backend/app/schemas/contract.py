@@ -204,6 +204,7 @@ class ContractOut(BaseModel):
 
 class RiskStatusUpdate(BaseModel):
     review_status: str  # confirmed/ignored/to_modify
+    review_comment: str = Field(default="", max_length=2000)
 
 
 class KnowledgeImport(BaseModel):

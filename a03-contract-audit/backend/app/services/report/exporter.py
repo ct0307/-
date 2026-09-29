@@ -15,6 +15,7 @@ from app.models.models import AuditBatchItem, Contract, ContractClause, Rectific
 from app.services.report.renderers import export_report_docx, export_report_xlsx
 from app.services.report.payment_insights import analyze_payments
 from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
+from app.services.report.operations import operational_summary
 
 DepartmentScope = str | set[str] | None
 
@@ -170,6 +171,8 @@ def build_report_snapshot(
         "requires_manual_review": bool(risk.requires_manual_review),
         "review_status": risk.review_status,
         "support_relation_status": risk.support_relation_status,
+        "support_validator_version": risk.support_validator_version,
+        "evidence_ids": _json_value(risk.evidence_ids_json, []),
         "support_validation_reason": _clean_text(risk.support_validation_reason),
         "applicability_status": risk.applicability_status,
         "applicability_reason_codes": _json_value(risk.applicability_reason_codes_json, []),
@@ -212,13 +215,23 @@ def build_report_snapshot(
         "high": sum(row["level"] == "high" for row in risk_rows),
         "medium": sum(row["level"] == "medium" for row in risk_rows),
         "low": sum(row["level"] == "low" for row in risk_rows),
-        "supported": sum(row["evidence_status"] == "supported" and row["original_text_verified"] is True for row in risk_rows),
+        "supported": sum(row["evidence_status"] == "supported" and row["original_text_verified"] is True
+                         and row["support_relation_status"] == "supported" and row["support_validator_version"] == "support-v4"
+                         and bool(row["evidence_ids"]) and bool(row["rag_sources"]) for row in risk_rows),
     }
     content = {
         "contract_ids": ids, "summary": summary, "contracts": contract_rows,
         "risks": risk_rows, "rectifications": rectifications,
         "matrix": {"categories": categories, "rows": matrix_rows}, "notes": notes,
     }
+    content["operations"] = operational_summary(content)
+    operations = content["operations"]
+    notes.extend([
+        f"运营口径 {operations['metric_version']}，统计日 {operations['as_of_date']}：高风险合同 {operations['high_risk_contracts']} 份，待复核风险 {operations['pending_risk_count']} 条，逾期整改 {operations['overdue_count']} 项，截止日期待确认 {operations['unknown_due_count']} 项。",
+        operations["amount_note"], operations["risk_count_basis"], "历史数据不足，未生成环比或同比。",
+    ])
+    content["schema_version"] = "report-v2"
+    content["state"] = "NO_AUTH_SCOPE" if department_scope == set() else "NO_DATA" if not contracts else "NO_COMPLETED_AUDIT" if not any(value in _TERMINAL_SUCCESS for value in statuses) else "READY"
     notes.extend(["风险按各合同最新审查任务统计；失败或未完成任务不使用旧结果替代。", "证据已核验需原文精确定位且依据支持；无高风险不等于合规。", "上传日期用于导入趋势，不能解释为当日审查或整改效果。"])
     report_id = hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return {"report_id": report_id, "generated_at": datetime.now(timezone.utc).isoformat(), **content}

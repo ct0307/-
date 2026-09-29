@@ -116,6 +116,9 @@ async function prepare(page: Page, itemStatus: ItemStatus, options: PrepareOptio
       return fulfillJson(route, { status: 'online', checked_at: '2026-09-13T10:00:00Z' })
     }
     if (path.includes('/admin/lookups/')) return fulfillJson(route, [])
+    if (path.endsWith('/handoffs') && method === 'GET') {
+      return fulfillJson(route, { state: 'NO_DATA', items: [] })
+    }
     if (path.endsWith('/imports/42') && method === 'GET') return fulfillJson(route, importBatch())
     if (path.endsWith('/batches/from-import') && method === 'POST') {
       return fulfillJson(route, batch, 202)

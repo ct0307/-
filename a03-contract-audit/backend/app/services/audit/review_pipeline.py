@@ -49,6 +49,7 @@ class WindowReviewRequest:
     system_prompt: str
     build_user_prompt: Callable[[ReviewWindow, int, tuple[str, ...]], str]
     deadline: float | None = None
+    run_fingerprint: str = ''
     discovery_system_prompt: str | None = None
     build_discovery_prompt: Callable[
         [ReviewWindow, int, tuple[str, ...], tuple[RiskFinding, ...], int], str

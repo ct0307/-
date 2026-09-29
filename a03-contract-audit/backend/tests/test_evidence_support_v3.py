@@ -67,6 +67,6 @@ def test_v3_result_has_reason_and_version():
         "reliable": True,
         "applicability_status": "applicable",
     }])
-    assert result.version == "support-v3"
+    assert result.version == "support-v4"
     assert result.reason_code
     assert result.failed_stage in {"none", "facts", "semantic_relation"}

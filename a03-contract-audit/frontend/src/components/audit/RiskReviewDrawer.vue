@@ -89,6 +89,19 @@ function onEnter(e: KeyboardEvent) {
         <span class="rd-confidence mono">{{ evidenceMeta(risk.evidence_status).label }}</span>
       </div>
 
+      <section v-if="risk.retrieval_attempts?.some(a => a.evidence_relations?.length)" class="rd-block evidence-step candidate-evidence">
+        <span class="step-index mono">03A</span>
+        <div class="step-content">
+          <h4>候选资料（未核验）</h4>
+          <p class="rd-validation-note">以下内容仅表示检索命中，未通过支持关系核验，不能直接作为正式依据。</p>
+          <div v-for="(relation, i) in (risk.retrieval_attempts?.flatMap(a => a.evidence_relations || []) || []).slice(0, 8)" :key="i" class="rag-source-card">
+            <div class="rag-source-head"><span class="rag-tag">{{ relation.source?.source || '候选来源' }} · {{ relation.source?.evidence_id || relation.source?.chunk_id || relation.source?.id || '未编号' }}</span><el-tag size="small" type="warning">{{ relation.status || 'unclear' }}</el-tag></div>
+            <p v-if="relation.source?.content" class="rag-content">{{ relation.source.content }}</p>
+            <p class="rag-content">{{ relation.reason || '尚未完成支持关系核验' }}</p>
+          </div>
+        </div>
+      </section>
+
       <section class="rd-block evidence-step">
         <span class="step-index mono">01</span>
         <div class="step-content">

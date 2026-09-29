@@ -50,7 +50,7 @@ onBeforeUnmount(() => {
   >
     <span class="pulse"><i /></span>
     <div class="txt">
-      <b>本地算力</b>
+      <b>{{ runtime.processing_mode === 'private_model' ? '私有模型' : runtime.processing_mode === 'external_model' ? '外部模型 · 数据可能出站' : runtime.processing_mode === 'rules_fallback' ? '规则模式' : '模型服务' }}</b>
       <small>{{ label }}</small>
     </div>
   </div>

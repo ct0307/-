@@ -28,14 +28,27 @@ const endDate = ref('')
 const selected = ref<number[]>([])
 const range = ref<'selected' | 'filtered' | 'all'>('selected')
 const pickerOpen = ref(false)
+const drilldownIds = ref<number[] | null>(null)
 const page = ref(1)
 const pageSize = 10
 const statuses: Record<string, string> = { done: '处理完成', review_required: '待人工复核', failed: '审查失败', queued: '排队中', parsing: '解析中', reviewing: '审查中', validating: '校验中', unreviewed: '未审查' }
 const levelNames: Record<string, string> = { high: '高风险', medium: '中风险', low: '低风险' }
+
+function drilldown(ids: number[]) {
+  if (!ids.length) { ElMessage.info('当前指标没有匹配合同'); return }
+  selected.value = ids.slice(0, 200)
+  drilldownIds.value = [...selected.value]
+  search.value = ''; type.value = ''; department.value = ''; status.value = ''; startDate.value = ''; endDate.value = ''
+  page.value = 1
+  range.value = 'selected'
+  pickerOpen.value = true
+  if (ids.length > 200) ElMessage.info('已选择前 200 份，请通过部门和时间继续缩小范围')
+}
 const evidenceNames: Record<string, string> = { supported: '依据支持', partially_supported: '部分支持', unsupported: '缺少支持', contradicted: '依据矛盾', unclear: '待核实' }
 const types = computed(() => [...new Set(contracts.value.map(c => c.contract_type).filter(Boolean))])
 const departments = computed(() => [...new Set(contracts.value.map(c => c.department).filter(Boolean))])
 const filtered = computed(() => contracts.value.filter(c =>
+  (!drilldownIds.value || drilldownIds.value.includes(c.id)) &&
   (!search.value || (c.filename + c.party_a + c.subject).toLowerCase().includes(search.value.toLowerCase())) &&
   (!type.value || c.contract_type === type.value) &&
   (!department.value || c.department === department.value) &&
@@ -213,6 +226,7 @@ onBeforeUnmount(() => {
       <p v-if="invalidDates" class="risk-high">导入起日不能晚于止日。</p>
       <el-empty v-if="!contracts.length && !loading" description="暂无合同，请先导入真实测试合同"><el-button type="primary" @click="router.push('/audit')">导入合同</el-button></el-empty>
       <div id="contract-selection" v-show="pickerOpen">
+      <p v-if="drilldownIds" class="scope-hint">当前仅展示指标下钻合同（{{ drilldownIds.length }} 份）。<el-button link @click="drilldownIds = null">返回全部候选合同</el-button></p>
       <div class="filters">
         <label class="search-label">搜索合同<el-input v-model="search" aria-label="搜索合同" placeholder="合同名称、甲方或标的" clearable /></label>
         <label>合同类型<select v-model="type" aria-label="合同类型"><option value="">全部类型</option><option v-for="value in types" :key="value">{{ value }}</option></select></label>
@@ -248,6 +262,23 @@ onBeforeUnmount(() => {
           <article><span>高风险条款</span><strong class="risk-high">{{ snapshot.summary.high }}</strong><small>全部风险 {{ snapshot.summary.risks }} 条</small></article>
           <article><span>待人工复核合同</span><strong>{{ snapshot.summary.review_required }}</strong><small>失败 {{ snapshot.summary.failed }} · 进行中 {{ snapshot.summary.running }}</small></article>
           <article><span>原文与依据已核验</span><strong>{{ snapshot.summary.supported }}<em> / {{ snapshot.summary.risks }}</em></strong><small>原文定位与依据支持同时满足</small></article>
+        </section>
+        <section v-if="snapshot.operations" class="evidence-panel">
+          <h3>当前风险与整改</h3>
+          <p class="muted">统计日 {{ snapshot.operations.as_of_date }} · {{ snapshot.operations.metric_version }} · 历史数据不足，暂不显示环比。</p>
+          <div class="selection-actions">
+            <el-button @click="drilldown(snapshot.contracts.filter(c => c.risk_high > 0).map(c => c.id))">高风险合同 {{ snapshot.operations.high_risk_contracts }} 份</el-button>
+            <el-button @click="router.push('/rectify')">逾期整改 {{ snapshot.operations.overdue_count }} 项</el-button>
+            <span>待复核风险 {{ snapshot.operations.pending_risk_count }} 条 · 日期待确认 {{ snapshot.operations.unknown_due_count }} 项</span>
+          </div>
+          <p class="muted">{{ snapshot.operations.amount_note }}</p>
+          <p class="muted">{{ snapshot.operations.risk_count_basis }}</p>
+          <el-table :data="snapshot.operations.departments">
+            <el-table-column prop="department" label="部门" min-width="100" />
+            <el-table-column prop="contract_count" label="合同数" width="90" />
+            <el-table-column label="高风险合同占比" min-width="145"><template #default="{ row }">{{ row.high_risk_contracts }} / {{ row.contract_count }}（{{ (row.high_risk_rate * 100).toFixed(1) }}%）</template></el-table-column>
+            <el-table-column label="下钻" width="100"><template #default="{ row }"><el-button link @click="drilldown(row.contract_ids)">查看合同</el-button></template></el-table-column>
+          </el-table>
         </section>
         <section class="chart-grid">
           <el-card shadow="never"><template #header>导入日期分布（累计）</template><TrendLine :data="trend" :labels="['导入合同', '当前已完成', '含高风险合同']" /><p class="muted">按导入日期分组展示当前状态，不表示历史审查效果。</p></el-card>

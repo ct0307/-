@@ -3,7 +3,10 @@ import hashlib
 import io
 import json
 import re
+from datetime import datetime, timezone
+from typing import Literal
 from dataclasses import asdict
+from pydantic import BaseModel, ConfigDict, Field
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import func
@@ -29,8 +32,47 @@ from app.services.rag.legal_import import (
 )
 from app.services.rag.legal_sources import LegalSourceError
 from app.services.rag.revision import bump_knowledge_revision
+from app.services.rag.trust import chunk_fingerprint
 
 router = APIRouter()
+
+
+class KnowledgeApproval(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    status: Literal["approved_internal", "rejected", "unverified"]
+    reason: str = Field(min_length=2, max_length=500)
+    expected_version: int = Field(ge=0)
+
+
+@router.patch("/{chunk_id}/approval")
+def approve_knowledge(chunk_id: int, payload: KnowledgeApproval,
+                      db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))) -> dict:
+    """管理员审批或撤销单条知识，乐观版本防止覆盖并发审批。"""
+    if user.role != "admin":
+        raise HTTPException(403, "仅管理员可审批知识来源")
+    chunk = db.query(KnowledgeChunk).filter(KnowledgeChunk.id == chunk_id).first()
+    if chunk is None:
+        raise HTTPException(404, "知识条目不存在")
+    if chunk.legal_article_id is not None and payload.status == "approved_internal":
+        raise HTTPException(409, "权威法源请通过核验导入恢复，不得降格为企业规则审批")
+    changed = db.query(KnowledgeChunk).filter(
+        KnowledgeChunk.id == chunk_id,
+        KnowledgeChunk.approval_version == payload.expected_version,
+    ).update({
+        "trust_status": payload.status, "approved_by": user.id,
+        "approved_at": datetime.now(timezone.utc),
+        "approved_content_hash": chunk_fingerprint(chunk) if payload.status == "approved_internal" else "",
+        "approval_version": payload.expected_version + 1,
+    }, synchronize_session=False)
+    if not changed:
+        db.rollback()
+        raise HTTPException(409, "审批状态已变化，请刷新后重试")
+    bump_knowledge_revision(db)
+    audit_log.record(db, user_id=user.id, action="knowledge_approval", target=f"knowledge:{chunk_id}",
+                     detail=f"{payload.status};version={payload.expected_version + 1};reason={payload.reason}")
+    db.commit()
+    db.refresh(chunk)
+    return {"id": chunk.id, "trust_status": chunk.trust_status, "approval_version": chunk.approval_version}
 
 # 切片长度上限（字符）：bge-small-zh 有效窗口约 400 中文字符，留 20 字余量。
 _MAX_CHUNK_CHARS = 380
@@ -807,6 +849,9 @@ def get_knowledge_detail(
         "title": chunk.source or chunk.content[:20],
         "cat": cat_label,
         "content": chunk.content,
+        "trust_status": chunk.trust_status,
+        "approval_version": chunk.approval_version,
+        "legal_article_id": chunk.legal_article_id,
         "date": chunk.created_at.strftime("%Y-%m-%d") if chunk.created_at else "",
     }
 
@@ -814,7 +859,7 @@ def get_knowledge_detail(
 def delete_knowledge(
     chunk_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(["admin"])),
+    user: User = Depends(require_roles("admin")),
 ) -> dict:
     """删除单条知识库条目（仅 admin）。"""
     chunk = db.query(KnowledgeChunk).filter(KnowledgeChunk.id == chunk_id).first()

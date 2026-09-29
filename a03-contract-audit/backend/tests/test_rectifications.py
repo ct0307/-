@@ -54,6 +54,8 @@ def _row(status: str = "处理中"):
 @pytest.fixture(autouse=True)
 def _disable_audit_log(monkeypatch):
     monkeypatch.setattr(rectifications.audit_log, "record", lambda *_args, **_kwargs: None)
+    # 本文件只验证流转；真实部门授权由 test_workflow_authorization 的 SQLite 集成测试覆盖。
+    monkeypatch.setattr(rectifications, "load_authorized_risk", lambda *_args: (None, None))
 
 
 def test_processing_item_requires_resolution_before_review():
@@ -63,7 +65,7 @@ def test_processing_item_requires_resolution_before_review():
             "RC001",
             RectificationStatusUpdate(status="待复核"),
             _Db(row),
-            SimpleNamespace(id=2),
+            SimpleNamespace(id=2, role="legal"),
         )
     assert caught.value.status_code == 400
     assert row.status == "处理中"
@@ -72,7 +74,7 @@ def test_processing_item_requires_resolution_before_review():
 def test_review_submission_and_approval_form_a_two_step_closure():
     row = _row()
     db = _Db(row)
-    user = SimpleNamespace(id=2)
+    user = SimpleNamespace(id=2, role="legal")
 
     submitted = rectifications.update_rectification_status(
         "RC001",
@@ -102,7 +104,7 @@ def test_review_rejection_requires_comment():
             "RC001",
             RectificationStatusUpdate(status="处理中"),
             _Db(row),
-            SimpleNamespace(id=2),
+            SimpleNamespace(id=2, role="legal"),
         )
     assert caught.value.status_code == 400
     assert row.status == "待复核"
@@ -115,7 +117,7 @@ def test_cannot_skip_review_and_close_processing_item():
             "RC001",
             RectificationStatusUpdate(status="已闭环", resolution="已修改"),
             _Db(row),
-            SimpleNamespace(id=2),
+            SimpleNamespace(id=2, role="legal"),
         )
     assert caught.value.status_code == 409
     assert row.status == "处理中"
@@ -130,7 +132,7 @@ def test_new_item_cannot_start_as_closed():
                 status="已闭环",
             ),
             _Db(None),
-            SimpleNamespace(id=2),
+            SimpleNamespace(id=2, role="legal"),
         )
     assert caught.value.status_code == 400
 
@@ -143,7 +145,7 @@ def test_approval_requires_review_comment():
             "RC001",
             RectificationStatusUpdate(status="已闭环"),
             _Db(row),
-            SimpleNamespace(id=2),
+            SimpleNamespace(id=2, role="legal"),
         )
     assert caught.value.status_code == 400
     assert row.status == "待复核"

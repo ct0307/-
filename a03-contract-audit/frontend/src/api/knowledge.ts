@@ -108,10 +108,21 @@ export interface KnowledgeDetail {
   cat: string
   content: string
   date: string
+  trust_status: 'unverified' | 'approved_internal' | 'rejected' | 'authoritative'
+  approval_version: number
+  legal_article_id: number | null
 }
 
 export async function getKnowledgeDetail(numericId: number): Promise<KnowledgeDetail> {
   return client.get(`/knowledge/${numericId}`)
+}
+
+export function updateKnowledgeApproval(numericId: number, payload: {
+  status: 'approved_internal' | 'rejected' | 'unverified'
+  reason: string
+  expected_version: number
+}): Promise<{ id: number; trust_status: string; approval_version: number }> {
+  return client.patch(`/knowledge/${numericId}/approval`, payload)
 }
 
 /** 删除知识库条目（仅 admin，id 为后端数字主键，前端卡片 id 格式为 "K01"）。*/

@@ -15,6 +15,7 @@ const props = defineProps<{
   allReadySelected: boolean
   someReadySelected: boolean
   canChangeDepartment: boolean
+  canReview?: boolean
   loading: boolean
 }>()
 
@@ -53,6 +54,7 @@ const counts = computed(() => ({
 }))
 
 const auditButtonLabel = computed(() => {
+  if (props.canReview === false) return '请通过合同交接提交法务审查'
   if (!counts.value.ready) return '暂无就绪合同'
   if (props.selectedIds.length) return `审查选中的 ${props.selectedIds.length} 份合同`
   return `审查全部 ${counts.value.ready} 份就绪合同`
@@ -335,7 +337,7 @@ async function deleteDraft(item: ImportItem) {
       <el-button
         type="primary"
         :loading="loading"
-        :disabled="counts.ready === 0"
+        :disabled="counts.ready === 0 || canReview === false"
         :aria-label="auditButtonLabel"
         @click="emit('auditReady')"
       >{{ auditButtonLabel }}</el-button>

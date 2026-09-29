@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Callable
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.llm.factory import get_llm_adapter
+from app.services.audit.workflow import AuditBudget, BudgetAdapter, directed_review, group_risks, runtime_identity
 from app.services.audit.evidence_validation import (
     SUPPORT_VALIDATOR_VERSION,
     verify_support,
@@ -120,6 +121,11 @@ def audit_contract(
     planned = completed = 0
     canonical_dimensions = _canonical_dimensions(dimensions)
     _dimension_instruction(canonical_dimensions)
+    from app.services.rag.revision import current_knowledge_revision
+    knowledge_revision = current_knowledge_revision(db) if db is not None else 0
+    identity = runtime_identity(contract_text, knowledge_revision=knowledge_revision)
+    budget = AuditBudget(max_calls=settings.AUDIT_MAX_MODEL_CALLS, max_tokens=settings.AUDIT_MAX_TOKEN_BUDGET)
+    adapter_factory = lambda: BudgetAdapter(get_llm_adapter(), budget)
     payment_schedule = analyze_payment_schedule(contract_text)
     shared_context: dict = {
         "elements": elements,
@@ -175,6 +181,8 @@ def audit_contract(
             clock=clock,
             window_completed_callback=report_window_complete,
             legal_as_of=legal_as_of,
+            adapter_factory=adapter_factory,
+            run_fingerprint=identity['fingerprint'],
         )
 
     first_pass_bundle = first_pass(run_first_pass, roles=active_roles)
@@ -215,6 +223,8 @@ def audit_contract(
 
     cross_checks = detect_conflicts(shared_context, elements)
     cross_checks.extend(build_logic_cross_checks(contract_text))
+    directed = directed_review(all_risks, cross_checks, adapter_factory(), contract_text=contract_text,
+                               max_calls=settings.AUDIT_DIRECTED_MAX_CALLS, deadline=deadline, clock=clock)
     exact_conflict_claim_ids = conflict_claim_ids(all_risks, cross_checks)
     recorder = (
         SqlAlchemySecondaryCallRecorder(
@@ -224,7 +234,7 @@ def audit_contract(
         if contract_id is not None else None
     )
     secondary_result = SecondaryReviewer(
-        get_llm_adapter(), recorder=recorder, clock=clock
+        adapter_factory(), recorder=recorder, clock=clock
     ).review(
         risks=all_risks,
         conflict_claim_ids=exact_conflict_claim_ids,
@@ -268,6 +278,8 @@ def audit_contract(
         "issues": [issue.model_dump(mode="json") for issue in all_issues],
         "coverage": {"planned": planned, "completed": completed},
         "timings": timings,
+        "workflow": {'identity': identity, 'budget': budget.snapshot(), 'groups': group_risks(all_risks),
+                     'directed_reviews': directed, 'rounds': 1},
     }
 
 
@@ -463,6 +475,8 @@ def _agent_audit(
     clock: Callable[[], float] = time.monotonic,
     window_completed_callback: Callable[[], None] | None = None,
     legal_as_of: date | None = None,
+    adapter_factory: Callable | None = None,
+    run_fingerprint: str = '',
 ) -> AgentAuditResult:
     """单个 Agent 的窗口审查、原文核验和逐项 RAG 依据校验。"""
     agent_started = time.perf_counter()
@@ -631,12 +645,14 @@ def _agent_audit(
             enrichment_system_prompt=enrichment_system_prompt,
             build_enrichment_prompt=build_enrichment_prompt,
             build_enrichment_batch_prompt=build_enrichment_batch_prompt,
+            run_fingerprint=run_fingerprint,
         )
         for window in windows
     ]
     window_results = _review_window_requests(
         requests,
         checkpoint=checkpoint,
+        adapter_factory=adapter_factory,
         max_workers=settings.AUDIT_MODEL_CONCURRENCY,
         clock=clock,
         window_completed_callback=window_completed_callback,
@@ -872,8 +888,6 @@ def _ground_risks(
             if reliable_sources and applicability_statuses == {"applicable"}
             else "unresolved"
         )
-        risk["rag_sources"] = reliable_sources
-        risk["evidence_ids"] = [_evidence_id(source) for source in reliable_sources]
         risk["applicability_status"] = applicability_status
         risk["applicability_reason_codes"] = sorted({
             str(source.get("applicability_reason_code"))
@@ -887,28 +901,34 @@ def _ground_risks(
         # V3 is applied after retrieval has selected authorized sources. Legacy
         # sources without an applicability field retain the historical default;
         # explicit unknown/expired applicability remains unresolved.
-        v3_sources = [
-            {**source, "applicability_status": source.get("applicability_status", "applicable")}
-            for source in reliable_sources
-        ]
+        v3_sources = selected_sources
         validation = verify_support(risk, v3_sources)
-        if not v3_sources and selected_validation.status == "supported":
-            validation = selected_validation
+        supporting_sources = [
+            relation["source"] for relation in validation.evidence_relations
+            if relation["relation"] == "supporting"
+        ]
+        risk["rag_sources"] = supporting_sources
+        risk["evidence_ids"] = [_evidence_id(source) for source in supporting_sources]
+        if risk["retrieval_attempts"]:
+            risk["retrieval_attempts"][-1]["evidence_relations"] = list(validation.evidence_relations)
+        for attempt in risk["retrieval_attempts"]:
+            attempt["candidate_match_status"] = attempt["support_status"]
+            attempt["support_status"] = validation.status
         risk["support_relation_status"] = validation.status
         risk["support_validation_reason"] = validation.reason
         risk["support_validator_version"] = validation.version
         risk["support_validation_failed_stage"] = validation.failed_stage
         risk["support_validation_reason_code"] = validation.reason_code
         if (
-            reliable_sources
+            supporting_sources
             and applicability_status == "applicable"
             and original_verified is True
             and validation.status == "supported"
         ):
-            risk["basis"] = "；".join(_format_source(source) for source in reliable_sources)
+            risk["basis"] = "；".join(_format_source(source) for source in supporting_sources)
             risk["evidence_status"] = "supported"
         elif reliable_sources:
-            risk["basis"] = "；".join(_format_source(source) for source in reliable_sources)
+            risk["basis"] = NO_RELIABLE_BASIS
             risk["evidence_status"] = "partially_supported"
             risk["confidence"] = min(int(risk.get("confidence", 0)), 70)
         else:
@@ -1111,9 +1131,9 @@ def detect_conflicts(shared_context: dict, elements: dict) -> list[dict]:
             "from": "legal",
             "to": "finance",
             "trigger": "法务识别合同为「关联方交易」",
-            "action": "强制触发财务 Agent 对交易价格做「公允性」审查",
+            "action": "请求财务定向复查；价格公允性仍需外部业务凭证和人工判断",
             "verdict": "conflict",
-            "note": "关联交易需财务复核价格公允性，防止利益输送 → 联合推理判高风险，建议三员会审。",
+            "note": "关联交易触发财务复查提示；执行状态见定向复查记录，不直接判定交易不公允。",
             "category": "关联交易",
             "claim_ids": list(legal.get("related_party_claim_ids", [])),
         })
@@ -1127,9 +1147,9 @@ def detect_conflicts(shared_context: dict, elements: dict) -> list[dict]:
             "from": "finance",
             "to": "legal",
             "trigger": "财务发现「收款账户与合同主体不一致」",
-            "action": "阻断流程并回传法务 Agent 提示法律与舞弊风险",
+            "action": "请求法务核对收款主体；未确认前保留人工复核",
             "verdict": "conflict",
-            "note": "收款账户与乙方主体不符，存在合同主体资格与资金安全双重风险 → 建议驳回。",
+            "note": "账户文本与主体名称不一致只是待核查信号，不能直接推断舞弊或要求驳回。",
             "category": "收款账户",
             "claim_ids": list(finance.get("payee_claim_ids", [])),
         })
@@ -1141,7 +1161,7 @@ def detect_conflicts(shared_context: dict, elements: dict) -> list[dict]:
             "from": "legal",
             "to": "finance",
             "trigger": "法务与财务均检出高风险条款",
-            "action": "双 Agent 高风险结论汇入中央节点联合决策",
+            "action": "汇总双 Agent 观点，交由人工终审",
             "verdict": "watch",
             "note": "法律与财务维度同时告警，建议协商并列为重点复核，进入待观察。",
             "category": "联合高风险",

@@ -38,7 +38,8 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.llm.base import LLMError
 from app.llm.factory import get_embedding_adapter
-from app.models.models import KnowledgeChunk, LegalArticle
+from app.models.models import KnowledgeChunk, LegalArticle, LegalSource
+from app.services.rag.trust import approval_fingerprint, reference_sources
 from app.services.rag.revision import bump_knowledge_revision, current_knowledge_revision
 from app.services.rag.legal_sources import chinese_number_to_int, int_to_chinese_number
 from app.services.rag.reranker import get_reranker
@@ -124,8 +125,13 @@ def _load_docs_from_session(db: Session) -> tuple[tuple, ...]:
         KnowledgeChunk.embedding_dimension, KnowledgeChunk.scope_mode,
         KnowledgeChunk.legal_article_id, KnowledgeChunk.chunk_index,
         KnowledgeChunk.chunk_count, LegalArticle.content,
+        LegalSource.source_id, LegalSource.title, LegalSource.file_sha256, LegalArticle.content_hash,
+        KnowledgeChunk.trust_status, KnowledgeChunk.approved_by, KnowledgeChunk.approved_at,
+        KnowledgeChunk.approved_content_hash, KnowledgeChunk.approval_version,
     ).outerjoin(
         LegalArticle, KnowledgeChunk.legal_article_id == LegalArticle.id
+    ).outerjoin(
+        LegalSource, LegalArticle.source_id == LegalSource.source_id
     ).all()
     return tuple(tuple(row) for row in rows)
 
@@ -250,6 +256,16 @@ def retrieve(
             doc for doc in docs
             if (_doc_value(doc, 5) or _extract_article_number(doc[1])) == article_number
         ]
+        named, identities = reference_sources(plan.original_query, docs)
+        if named:
+            exact_docs = [doc for doc in exact_docs if str(_doc_value(doc, 18) or doc[2]) in identities]
+        # 同名旧导入不能盖过有法源身份的正式父记录。
+        canonical_titles = {_doc_value(doc, 19) for doc in exact_docs if _doc_value(doc, 18)}
+        exact_docs = [doc for doc in exact_docs if _doc_value(doc, 18) or doc[2] not in canonical_titles]
+        source_keys = {str(_doc_value(doc, 18) or doc[2]) for doc in exact_docs}
+        if len(source_keys) > 1:
+            log.info("rag.ambiguous_reference", article_number=article_number, source_ids=sorted(source_keys))
+            return []
         if not exact_docs:
             return []
         exact_docs.sort(key=lambda doc: (
@@ -500,11 +516,25 @@ def _result_from_doc(
         expiry_date,
         as_of,
     )
+    trust_status = _doc_value(doc, 22, "unverified")
+    authoritative = bool(
+        _doc_value(doc, 18) and _doc_value(doc, 20) and _doc_value(doc, 17)
+        and hashlib.sha256(str(_doc_value(doc, 17)).encode("utf-8")).hexdigest() == _doc_value(doc, 21)
+    )
+    approved = bool(
+        trust_status == "approved_internal" and _doc_value(doc, 23) and _doc_value(doc, 24)
+        and _doc_value(doc, 25) == approval_fingerprint(_doc_value(doc, i) for i in (1, 2, 4, 5, 6, 7, 8, 9, 10, 13))
+    )
+    reliable = trust_status != "rejected" and (authoritative or approved)
     return {
         "chunk_id": doc[0],
         "matched_content": matched_content,
         "content": _doc_value(doc, 17) or matched_content,
-        "source": doc[2],
+        "source": _doc_value(doc, 19) or doc[2],
+        "source_id": _doc_value(doc, 18),
+        "trust_status": "rejected" if trust_status == "rejected" else "authoritative" if authoritative else "approved_internal" if approved else "unverified",
+        "provenance_type": "official_legal_source" if authoritative else "approved_rule" if approved else "user_upload",
+        "approval_version": _doc_value(doc, 26, 0),
         "score": round(score, 4),
         "article_number": _doc_value(doc, 5) or _extract_article_number(matched_content),
         "version": _doc_value(doc, 6),
@@ -513,7 +543,7 @@ def _result_from_doc(
         "applicability_status": applicability.status,
         "applicability_reason_code": applicability.reason_code,
         "retrieval_mode": retrieval_mode,
-        "reliable": _doc_value(doc, 13) in {"global", "scoped"},
+        "reliable": bool(reliable),
         "legal_article_id": _doc_value(doc, 14),
         "chunk_index": _doc_value(doc, 15),
         "chunk_count": _doc_value(doc, 16),

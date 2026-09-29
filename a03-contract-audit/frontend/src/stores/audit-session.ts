@@ -445,9 +445,9 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     }
   }
 
-  async function setRiskStatus(risk: RiskOut, status: RiskOut['review_status']) {
+  async function setRiskStatus(risk: RiskOut, status: RiskOut['review_status'], reviewComment = '') {
     const requestGeneration = generation
-    await updateRiskStatus(risk.id, status)
+    await updateRiskStatus(risk.id, status, reviewComment)
     if (requestGeneration !== generation) return
     risk.review_status = status
   }
