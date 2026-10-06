@@ -76,7 +76,7 @@ def build_contract_chunks(
                 source_anchors=_anchors_for_range(text, blocks, start, end),
             ))
     else:
-        for index, match in enumerate(re.finditer(r"\S(?:.*?\S)?(?=\n\s*\n|\Z)", text, re.DOTALL)):
+        for index, match in enumerate(re.finditer(r"\S(?:.*?\S)?(?=\n\s*\n|\s*\Z)", text, re.DOTALL)):
             content = match.group(0).strip()
             if content:
                 chunks.append(_make_chunk(

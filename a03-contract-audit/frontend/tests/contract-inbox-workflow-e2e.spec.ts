@@ -57,12 +57,14 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 }
 
 interface PrepareOptions {
+  progressImport?: boolean
   failContract11Result?: boolean
   failBatchCreate?: boolean
   onBatchCreate?: (body: { import_item_ids: number[]; dimensions: string[] }) => void
 }
 
 async function prepare(page: Page, options: PrepareOptions = {}) {
+  let importReads = 0
   await page.addInitScript(() => {
     localStorage.setItem('token', 'test-token')
     localStorage.setItem('role', 'legal')
@@ -81,7 +83,14 @@ async function prepare(page: Page, options: PrepareOptions = {}) {
       return fulfillJson(route, [{ value: '采购合同' }, { value: '软件开发外包合同' }])
     }
     if (path.endsWith('/imports') && method === 'POST') return fulfillJson(route, mixedBatch, 202)
-    if (path.endsWith('/imports/42') && method === 'GET') return fulfillJson(route, mixedBatch)
+    if (path.endsWith('/imports/42') && method === 'GET') {
+      importReads += 1
+      if (options.progressImport) return fulfillJson(route, {
+        ...mixedBatch,
+        items: [importItem({status: importReads === 1 ? 'auditing' : 'done'})],
+      })
+      return fulfillJson(route, mixedBatch)
+    }
     if (path.endsWith('/imports/42/items/2') && method === 'PATCH') {
       return fulfillJson(route, { ...mixedBatch.items[1], status: 'ready' })
     }
@@ -117,6 +126,8 @@ async function prepare(page: Page, options: PrepareOptions = {}) {
             filename: '开发协议.txt',
             status: 'failed',
             error: '模型服务暂不可用',
+            error_code: 'MODEL_UNAVAILABLE',
+            retryable: true,
             attempts: 1,
             started_at: null,
             finished_at: '2026-09-11T10:01:00Z',
@@ -241,6 +252,16 @@ test('audits every ready contract without requiring row selection', async ({ pag
   await page.getByRole('button', { name: '审查全部 2 份就绪合同' }).click()
 
   expect(submittedIds).toEqual([1, 2])
+})
+
+test('提交后收件箱持续同步至已审查，无需刷新', async ({page}) => {
+  await prepare(page, {progressImport:true})
+  await page.goto(`${baseUrl}/audit`)
+  await page.locator('input[type="file"]').setInputFiles([
+    {name:'采购合同.txt',mimeType:'text/plain',buffer:Buffer.from('采购服务器设备')},
+  ])
+  await page.getByRole('button',{name:'审查全部 1 份就绪合同'}).click()
+  await expect(page.getByRole('table',{name:'待审合同队列'})).toContainText('已审查', {timeout:6000})
 })
 
 test('audits only the explicitly selected ready contract', async ({ page }) => {

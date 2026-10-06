@@ -55,6 +55,9 @@ const statusType: Record<string, 'success' | 'warning' | 'info' | 'danger'> = {
   已整改: 'info',
   待人工复核: 'danger',
   解析失败: 'danger',
+  未审查: 'info',
+  审查中: 'warning',
+  审查失败: 'danger',
 }
 
 // ── 点击行查看风险详情 ──
@@ -107,6 +110,9 @@ function goAudit() { router.push('/audit') }
         </el-select>
         <el-select v-model="statusFilter" style="width: 140px" @change="page = 1">
           <el-option label="全部合规状态" value="全部" />
+          <el-option label="未审查" value="未审查" />
+          <el-option label="审查中" value="审查中" />
+          <el-option label="审查失败" value="审查失败" />
           <el-option label="待人工复核" value="待人工复核" />
           <el-option label="解析失败" value="解析失败" />
           <el-option label="待整改" value="待整改" />
@@ -131,8 +137,8 @@ function goAudit() { router.push('/audit') }
           <el-table-column prop="name" label="合同名称" min-width="200" />
           <el-table-column prop="type" label="类型" width="150" />
           <el-table-column prop="submitter" label="提交人" width="90" />
-          <el-table-column prop="time" label="审查时间" width="150">
-            <template #default="{ row }"><span class="mono">{{ row.time }}</span></template>
+          <el-table-column prop="time" label="导入时间" width="170">
+            <template #default="{ row }"><span class="mono">{{ new Date(row.time).toLocaleString('zh-CN', { hour12: false }) }}</span></template>
           </el-table-column>
           <el-table-column label="风险等级" width="100">
             <template #default="{ row }"><el-tag :type="levelType[row.level]" size="small">{{ row.level }}</el-tag></template>

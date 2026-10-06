@@ -131,7 +131,10 @@ export function createImportInboxStore(
         try {
           await pollOnce(batchId)
         } finally {
-          if (polling.value) timer = setTimeout(tick, 1500)
+          if (polling.value) timer = setTimeout(() => {
+            // pollOnce 已记录错误并停止轮询；首次调用仍向调用者报告失败。
+            void tick().catch(() => {})
+          }, 1500)
         }
       }
       await tick()

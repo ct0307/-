@@ -97,8 +97,14 @@ def _dept_accessible(contract, user) -> bool:
 
 # 审查状态推导：人工复核优先；其次是整改状态；其余为合规。
 def _derive_status(contract: Contract, risks: list) -> str:
+    if contract.status == "audit_failed":
+        return "审查失败"
+    if contract.status in {"queued", "auditing", "reviewing", "validating", "parsing"}:
+        return "审查中"
     if contract.status == "failed":
         return "解析失败"
+    if contract.status in {"uploaded", "parsed"}:
+        return "未审查"
     if contract.status == "review_required" or contract.requires_review:
         return "待人工复核"
     if not risks:
@@ -136,12 +142,11 @@ def list_contracts_history(
     for c in contracts:
         risks = db.query(Risk).filter(Risk.contract_id == c.id).all()
         submitter_obj = users.get(c.uploaded_by)
-        # 时间格式 YYYY-MM-DD HH:mm（本地化显示，非 ISO）
+        # SQLite 的 naive 时间为 UTC；传输时保留时区，由客户端本地化。
         dt = c.created_at
-        if dt.tzinfo is not None:
-            # SQLite 以 UTC 存储，直接取 naive 字符串
-            dt = dt.replace(tzinfo=None)
-        time_str = dt.strftime("%Y-%m-%d %H:%M") if dt else ""
+        if dt is not None and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        time_str = dt.isoformat() if dt else ""
         submitter_raw = submitter_obj.username if submitter_obj else ""
         result.append(HistoryRow(
             id=f"C{c.id:04d}",

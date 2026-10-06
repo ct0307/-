@@ -216,7 +216,7 @@ async function auditReadyItems() {
     )
     await router.replace({ query: { ...route.query, batch: String(created.id) } })
     ElMessage.success(`已提交 ${created.total} 份合同`)
-    await inbox.pollOnce()
+    await inbox.startPolling()
   } catch {
     ElMessage.error(batchStore.error || '审查批次提交失败')
   }
@@ -318,6 +318,7 @@ async function retryAuditBatch() {
       dimensions.value.filter((item) => item.on).map((item) => item.key),
     )
     ElMessage.success(`已重新提交 ${result?.retried ?? 0} 个失败项`)
+    await inbox.startPolling()
   } catch {
     ElMessage.error(batchStore.error || '失败项重试失败')
   }

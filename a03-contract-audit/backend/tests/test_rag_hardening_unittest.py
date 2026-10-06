@@ -238,10 +238,11 @@ class RagHardeningTests(unittest.TestCase):
     def test_alembic_history_loads_rag_metadata_revision(self):
         backend_dir = Path(__file__).resolve().parents[1]
         result = subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "alembic.ini", "history"],
+            [sys.executable, "-X", "utf8", "-m", "alembic", "-c", "alembic.ini", "history"],
             cwd=backend_dir,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
         )
 
@@ -256,11 +257,12 @@ class RagHardeningTests(unittest.TestCase):
             env.update({"DB_BACKEND": "sqlite", "SQLITE_PATH": database.as_posix()})
 
             upgrade = subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+                [sys.executable, "-X", "utf8", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
                 cwd=backend_dir,
                 env=env,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 check=False,
             )
             self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
@@ -271,11 +273,12 @@ class RagHardeningTests(unittest.TestCase):
             engine.dispose()
 
             downgrade = subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "downgrade", "base"],
+                [sys.executable, "-X", "utf8", "-m", "alembic", "-c", "alembic.ini", "downgrade", "base"],
                 cwd=backend_dir,
                 env=env,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 check=False,
             )
             self.assertEqual(downgrade.returncode, 0, downgrade.stdout + downgrade.stderr)
@@ -292,8 +295,8 @@ class RagHardeningTests(unittest.TestCase):
             env = os.environ.copy()
             env.update({"DB_BACKEND": "sqlite", "SQLITE_PATH": database.as_posix()})
             previous = subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "20260726_02"],
-                cwd=backend_dir, env=env, capture_output=True, text=True, check=False,
+                [sys.executable, "-X", "utf8", "-m", "alembic", "-c", "alembic.ini", "upgrade", "20260726_02"],
+                cwd=backend_dir, env=env, capture_output=True, text=True, encoding="utf-8", check=False,
             )
             self.assertEqual(previous.returncode, 0, previous.stdout + previous.stderr)
 
@@ -313,8 +316,8 @@ class RagHardeningTests(unittest.TestCase):
             engine.dispose()
 
             upgrade = subprocess.run(
-                [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
-                cwd=backend_dir, env=env, capture_output=True, text=True, check=False,
+                [sys.executable, "-X", "utf8", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+                cwd=backend_dir, env=env, capture_output=True, text=True, encoding="utf-8", check=False,
             )
             self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
 

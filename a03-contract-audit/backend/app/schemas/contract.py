@@ -408,13 +408,13 @@ class RectificationStatusUpdate(BaseModel):
 class HistoryRow(BaseModel):
     """审查记录行：前端 HistoryView 台账展示。8 字段，与前端 mock/history.ts 精确对齐。
 
-    level/status 用中文枚举，time 格式 YYYY-MM-DD HH:mm，搜索/筛选在前端本地做。
+    level/status 用中文枚举，time 为带时区的 ISO 8601 导入时间，搜索/筛选在前端本地做。
     """
     id: str            # 格式 "C{合同id:04d}"
     name: str          # 合同文件名
     type: str          # 合同类型
     submitter: str     # 上传人用户名
-    time: str          # YYYY-MM-DD HH:mm
+    time: str          # ISO 8601，含时区
     level: str         # 高风险/中风险/低风险
     riskCount: int
     status: str        # 合规/待整改/已整改

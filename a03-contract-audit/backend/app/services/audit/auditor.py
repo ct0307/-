@@ -18,6 +18,7 @@
 所有结论统一标注"仅供参考，以人工复核为准"。
 """
 import hashlib
+import re
 import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -665,6 +666,8 @@ def _agent_audit(
         completed += result.completed_windows
         issues.extend(result.issues)
         for candidate in result.candidates:
+            if _is_explicit_normal_conclusion(candidate.reason, candidate.suggestion):
+                continue
             candidate_payload = {
                 "level": candidate.level,
                 "category": candidate.category,
@@ -756,6 +759,18 @@ def _agent_audit(
                 detail="候选风险缺少可支持结论的可靠依据，需人工复核",
             ))
     return AgentAuditResult(grounded, issues, planned, completed)
+
+
+def _is_explicit_normal_conclusion(reason: str, suggestion: str) -> bool:
+    """仅排除明确通过且无实质问题描述的模型结论，矛盾或不确定项保留复核。"""
+    normal = re.search(r"无需(?:修改|调整)|无须(?:修改|调整)|可(?:继续)?保留", suggestion)
+    if not normal:
+        return False
+    affirmative = re.search(r"未发现(?:明显)?风险|不存在(?:明显)?风险|无(?:明显)?风险|已明确|符合.*要求", reason)
+    if not affirmative:
+        return False
+    residual = re.sub(r"未发现(?:明显)?风险|不存在(?:明显)?风险|无(?:明显)?风险|无需(?:修改|调整)|无须(?:修改|调整)", "", reason + suggestion)
+    return not re.search(r"但|然而|仍|可能|不明确|未明确|缺少|缺失|不足|不合理|过高|过低|风险|应当|建议|需要|须补|需补", residual)
 
 
 def _deduplicate_grounded_risks(risks: list[dict]) -> list[dict]:
