@@ -6,10 +6,22 @@
 
 | 材料 | 状态 | 说明 |
 |---|---|---|
+| [《契鉴》完善版参赛源码（ZIP）](../a03-contract-audit/outputs/submission/契鉴_参赛源码_完善版_20261008.zip) | 本地验收与包校验通过 | 2026-10-08四项源码加固，667个项目文件及逐文件摘要清单；后端1633项、前端132项通过，39项条件跳过，类型与构建通过。附[验收说明](../a03-contract-audit/docs/submission-hardening-acceptance.md)及[源码包校验记录](../a03-contract-audit/outputs/submission/源码包校验说明.json)；ZIP保存在本地忽略目录 |
 | [《契鉴》网评PPT字体排版优化版（PDF预览）](../a03-contract-audit/outputs/qijian-typesetting-20261003/契鉴_网评PPT_字体排版优化版.pdf) | PDF可用，可编辑版待找回 | 18页；当前本地保留同版PDF，原PPTX文件缺失，暂不作为可编辑交付。附[排版验收说明](../a03-contract-audit/outputs/qijian-typesetting-20261003/排版与验收说明.md)、[工作流说明](../a03-contract-audit/outputs/qijian-workflow-ppt-20261003/修订说明.md)、[报表修订说明](../a03-contract-audit/outputs/qijian-report-upgrade-ppt-20261002/修订与验收说明.md)与[原有证据说明](../a03-contract-audit/outputs/qijian-evidence-revision-20261002/验收与证据说明.md) |
 | [项目详细方案重构版](../a03-contract-audit/契鉴_项目详细方案_重构版.docx) | 已完成 | 7 章往届式版本，已完成 Word 分页、结构、事实、语言和逐页视觉验收 |
 | [项目概要介绍重构版](../a03-contract-audit/docs/project-overview/契鉴_项目概要介绍_重构版.docx) | 已完成 | 9 页往届式版本，已完成结构、事实、语言和逐页视觉验收 |
 | [《契鉴》参赛答辩 PPT](../a03-contract-audit/docs/competition-materials/契鉴_参赛答辩PPT.pptx) | 已完成 | 15 页主讲、5 页答辩备份，16:9，带逐页演讲者备注；5 张原生表格；无动画和旁白；已完成 SVG 与 PowerPoint 逐页视觉验收 |
+
+## 2026-10-31 对照实验与创新表述
+
+| 材料 | 状态 | 说明 |
+|---|---|---|
+| [对照实验记录与创新点定稿（Word）](../a03-contract-audit/outputs/agent-comparison-20261031-gpt61-run/契鉴_对照实验记录与创新点定稿.docx) / [PDF预览](../a03-contract-audit/outputs/agent-comparison-20261031-gpt61-run/契鉴_对照实验记录与创新点定稿.pdf) | 模型实跑完成，风险效果待人工盲评 | gpt-6.1-sol；20份合成测试合同、三组各3次重复、300次请求，294成功、6超时。不能作为双Agent准确率提升的证明；文件保存在本机忽略目录 |
+| [三项创新最终表述](../a03-contract-audit/docs/evaluation/agent-comparison/innovation-final.md) | 已定稿 | 法财职责分离与受控交叉复核、风险证据链、分级人工介入与整改留痕；附实现证据及答辩边界 |
+| [评测协议与复核说明](../a03-contract-audit/docs/evaluation/agent-comparison/README.md) | 运行工具和复核模板齐全 | 说明三组对照、输入处理、盲评和评分；独立人工标注尚未完成 |
+| [AI法务财务复核与对照分析（Word）](../a03-contract-audit/outputs/agent-comparison-20261031-ai-review/契鉴_AI法务财务复核与对照分析.docx) / [PDF](../a03-contract-audit/outputs/agent-comparison-20261031-ai-review/契鉴_AI法务财务复核与对照分析.pdf) | AI模拟复核完成，非人工金标 | 6页；1644条输出全部裁决。AI参考覆盖S1 61.0%、S2 65.3%、D2 59.4%，本轮未观察到双Agent整体覆盖优势，不能称法律准确率 |
+| [20份合同AI复核标注清单（Word）](../a03-contract-audit/outputs/agent-comparison-20261031-ai-review/契鉴_20份合同AI复核标注清单.docx) / [PDF](../a03-contract-audit/outputs/agent-comparison-20261031-ai-review/契鉴_20份合同AI复核标注清单.pdf) | AI候选底稿 | 50页；124项AI支持参考、28项不确定参考，含原文、理由、建议及排除说明，已逐页视觉复核 |
+| [AI法务财务分别标注（CSV）](../a03-contract-audit/outputs/agent-comparison-20261031-ai-review/AI法务财务分别标注.csv) / [全部输出逐条裁决（CSV）](../a03-contract-audit/outputs/agent-comparison-20261031-ai-review/全部模型输出AI逐条裁决.csv) | 明细可核查 | 独立角色候选196行、原预测裁决1644行；[完整性核验](../a03-contract-audit/outputs/agent-comparison-20261031-ai-review/verification.json)记录原实验及人工模板未变、正式风险质量指标仍未测量 |
 
 ## 历史材料
 
