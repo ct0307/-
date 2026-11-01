@@ -9,6 +9,8 @@ from app.api.deps import allowed_departments, require_department_access
 from app.models.models import Contract, Risk, Rectification, RectificationEvent, User
 from app.schemas.contract import RectificationOut, RectificationEventOut
 from app.services import audit_log
+from app.services.masking import is_full_access, mask_original_text
+from app.services.sensitive_data import redact_sensitive_values
 from app.services.authorized_risks import load_authorized_risk
 
 PROFESSIONAL = {"legal", "finance", "admin"}
@@ -143,6 +145,17 @@ def output(db, row, user):
     result.events = [RectificationEventOut(id=e.id, action=e.action, actor_id=e.actor_id, actor=e.actor,
         occurred_at=e.occurred_at, from_status=e.from_status, to_status=e.to_status,
         snapshot=json.loads(e.snapshot_json)) for e in db.query(RectificationEvent).filter(RectificationEvent.rectification_id == row.id).order_by(RectificationEvent.id).all()]
+    if not is_full_access(user.role):
+        # 只处理响应副本，事件及证据原件保留完整；业务角色沿用风险接口的原文上限。
+        masked = redact_sensitive_values(result.model_dump())
+        if owner:
+            masked["owner"] = user.username  # 本人已知登录标识供客户端匹配执行入口。
+        masked["before_text"] = mask_original_text(result.before_text)
+        for event in masked["events"]:
+            saved = event["snapshot"]
+            if isinstance(saved.get("before_text"), str):
+                saved["before_text"] = mask_original_text(saved["before_text"])
+        return RectificationOut.model_validate(masked)
     return result
 
 

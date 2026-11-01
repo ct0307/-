@@ -287,3 +287,79 @@ def test_review_rejects_other_department_before_mutation(data):
     with pytest.raises(HTTPException) as e: update(data,row,'已闭环',user=4,review_comment='越权通过')
     assert e.value.status_code==403
     assert data[0].get(Rectification,1).status=='待复核'
+
+
+@pytest.mark.parametrize('role', ['business', 'legal', 'finance', 'admin'])
+def test_rectification_response_respects_role_masking_without_changing_evidence(data, role):
+    """列表与事件快照遵守风险接口的原文权限，留存证据不受响应脱敏影响。"""
+    import json
+    from app.services.masking import mask_original_text
+
+    db, users, _, risk = data
+    original = '联系人：测试人员，电话13800138000；' + '合同条款' * 40 + '私密尾文'
+    risk.original_text = original
+    db.commit()
+    row = create(data, note='请联系13800138000补齐材料')
+    user = users[0]
+    user.role = role
+    db.commit()
+
+    response = api.list_rectifications(db, user)[0]
+    if role == 'business':
+        assert response.before_text == mask_original_text(original)
+        assert response.events[0].snapshot['before_text'] == mask_original_text(original)
+        assert '13800138000' not in response.model_dump_json()
+        assert '私密尾文' not in response.model_dump_json()
+        assert response.can_execute is True
+    else:
+        assert response.before_text == original
+        assert response.events[0].snapshot['before_text'] == original
+        assert response.note == row.note
+    assert db.get(Risk, risk.id).original_text == original
+    saved = json.loads(db.query(RectificationEvent).one().snapshot_json)
+    assert saved['before_text'] == original
+    assert saved['note'] == '请联系13800138000补齐材料'
+
+
+def test_business_submission_masks_nested_material_and_snapshot_fields(data):
+    """写接口同样经统一响应脱敏，不能从重复序列化的证据字段取回敏感值。"""
+    import json
+
+    row = update(data, create(data), '处理中')
+    response = update(data, row, '待复核', resolution='请联系13800138000核对',
+        evidence_contract_ids=[data[2][1].id], after_text='联系人：测试人员，修改后条款')
+    assert '13800138000' not in response.model_dump_json()
+    assert '测试人员' not in response.model_dump_json()
+    assert response.evidence[0].content_sha256 == 'b' * 64
+    saved = data[0].get(Rectification, 1)
+    assert saved.resolution == '请联系13800138000核对'
+    assert saved.after_text == '联系人：测试人员，修改后条款'
+    submitted = data[0].query(RectificationEvent).filter_by(action='submit').one()
+    snapshot = json.loads(submitted.snapshot_json)
+    assert json.loads(snapshot['evidence_json'])[0]['description'] == saved.resolution
+    assert snapshot['evidence'][0]['description'] == saved.resolution
+
+
+@pytest.mark.parametrize('username', ['owner@example.com', '13800138000'])
+@pytest.mark.parametrize('is_owner', [True, False])
+def test_business_owner_identity_preserves_own_execution_entry_only(data, username, is_owner):
+    """仅本人登录标识可保留，其他业务查看者及历史快照仍执行脱敏。"""
+    db, users, _, _ = data
+    users[0].username = username
+    users[4].department = users[0].department
+    db.commit()
+    row = create(data, owner=username)
+    viewer = users[0] if is_owner else users[4]
+
+    response = api.list_rectifications(db, viewer)[0]
+    assert response.can_execute is is_owner
+    assert response.owner == (username if is_owner else '[已脱敏]')
+    assert response.events[0].snapshot['owner'] == '[已脱敏]'
+    if is_owner:
+        started = update(data, row, '处理中')
+        assert started.owner == username
+        assert started.can_execute is True
+        assert all(event.snapshot['owner'] == '[已脱敏]' for event in started.events)
+    else:
+        assert username not in response.model_dump_json()
+    assert db.get(Rectification, 1).owner == username

@@ -5,7 +5,7 @@ from docx.shared import Cm, Pt, RGBColor
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from .decision_brief import decision_brief, contract_facts, excerpt, value_text, validation_text, human_review_text
-from .rectification_details import rectification_details
+from .rectification_details import rectification_details, rectification_source
 
 
 def export_decision_docx(snapshot):
@@ -167,7 +167,7 @@ def export_decision_docx(snapshot):
     doc.add_heading("四、整改与人工签批记录", 1)
     if snapshot["rectifications"]:
         table(["风险 / 任务", "责任人", "截止日", "实际状态"], [
-            [f"R{t['risk_id']} / {t['id']}", value_text(t.get("owner"),"待分派"), value_text(t.get("due"),"待约定"), value_text(t.get("status"))] for t in snapshot["rectifications"]
+            [f"R{t['risk_id']} / {t['id']}\n{rectification_source(t)}", value_text(t.get("owner"),"待分派"), value_text(t.get("due"),"待约定"), value_text(t.get("status"))] for t in snapshot["rectifications"]
         ],[5.2,4,4,4.2])
         for task in snapshot["rectifications"]:
             doc.add_heading(f"整改 {task['id']} · {value_text(task.get('status'))}", 2)

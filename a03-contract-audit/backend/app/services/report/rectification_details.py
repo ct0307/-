@@ -4,10 +4,18 @@ import json
 from .decision_brief import value_text
 
 
+def rectification_source(task: dict) -> str:
+    scope = {"current": "当前审查整改", "historical": "历史审查整改（不计入当前风险发现）"}
+    return (scope.get(task.get("source_scope"), "来源审查未记录")
+            + " / 审查任务 " + value_text(task.get("audit_job_id"), "未记录")
+            + " / 代次 " + value_text(task.get("audit_generation"), "未记录"))
+
+
 def rectification_details(task: dict) -> list[tuple[str, str]]:
     stage = {"unsigned": "未签署", "signed": "已签署", "unknown": "签署阶段待确认"}
     method = {"revision": "草稿修订", "supplement": "补充协议", "performance": "履约措施"}
     rows = [
+        ("来源审查", rectification_source(task)),
         ("整改措施", value_text(task.get("note"))),
         ("验收条件", value_text(task.get("acceptance_criteria"))),
         ("合同阶段 / 处理方式", stage.get(task.get("contract_stage"), "待确认") + " / " + method.get(task.get("handling_method"), "待确认")),

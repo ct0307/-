@@ -192,9 +192,12 @@ def build_report_snapshot(
     } for risk in visible_risks]
 
     visible_risk_ids = {row["id"] for row in risk_rows}
+    # 整改是独立业务记录，重审不能撤销已接受的剩余风险或抹去验收历史。
+    risks_by_id = {risk.id: risk for risk in all_risks}
+    jobs_by_id = {job.id: job for job in jobs}
     rectifications = []
-    if visible_risk_ids:
-        tasks = db.query(Rectification).filter(Rectification.risk_id.in_(visible_risk_ids)).order_by(Rectification.id).all()
+    if risks_by_id:
+        tasks = db.query(Rectification).filter(Rectification.risk_id.in_(risks_by_id)).order_by(Rectification.id).all()
         events_by_task = {}
         if tasks:
             for event in db.query(RectificationEvent).filter(RectificationEvent.rectification_id.in_([task.id for task in tasks])).order_by(RectificationEvent.id).all():
@@ -205,8 +208,13 @@ def build_report_snapshot(
                     "snapshot": _json_value(event.snapshot_json, {}),
                 })
         for row in tasks:
+            source_risk = risks_by_id[row.risk_id]
+            source_job = jobs_by_id.get(source_risk.audit_job_id)
             rectifications.append({
                 "id": row.id, "risk_id": row.risk_id, "contract": _clean_text(row.contract),
+                "contract_id": source_risk.contract_id, "audit_job_id": source_risk.audit_job_id,
+                "audit_generation": source_job.audit_generation if source_job else None,
+                "source_scope": "current" if row.risk_id in visible_risk_ids else "historical",
                 "risk": _clean_text(row.risk), "level": row.level, "owner": _clean_text(row.owner),
                 "status": row.status, "created": row.created, "due": row.due,
                 "note": _clean_text(row.note), "created_at": _iso(row.created_at),
@@ -222,6 +230,8 @@ def build_report_snapshot(
                 "escalated_at": _iso(row.escalated_at), "version": row.version,
                 "events": events_by_task.get(row.id, []),
             })
+    if any(task["source_scope"] == "historical" for task in rectifications):
+        notes.append("整改记录包含所选授权合同的历史审查任务；历史整改及剩余风险继续跟踪，不计入当前风险发现数。")
 
     categories = sorted({row["category"] for row in risk_rows})
     matrix_rows = []

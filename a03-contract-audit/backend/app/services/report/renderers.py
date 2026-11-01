@@ -10,7 +10,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from .excel_decision import build_overview, add_review_sheets
 from .word_decision import export_decision_docx
-from .rectification_details import rectification_details
+from .rectification_details import rectification_details, rectification_source
 
 STATUS = {"done": "处理完成", "review_required": "待人工复核", "failed": "审查失败", "audit_failed": "审查失败", "queued": "排队中", "reviewing": "审查中", "parsing": "解析中", "validating": "校验中"}
 LEVEL = {"high": "高风险", "medium": "中风险", "low": "低风险"}
@@ -124,8 +124,8 @@ def export_report_xlsx(snapshot):
     _sheet(wb, "证据索引", ["风险ID", "合同", "原文定位", "原文核验", "检索来源与正文", "依据支持关系"], [
         [r["id"], r["filename"], location(r), "已核验" if r["original_text_verified"] else "未核验", sources(r), r.get("support_validation_reason")] for r in snapshot["risks"]
     ], [12, 36, 40, 16, 95, 55])
-    _sheet(wb, "整改跟踪", ["整改ID", "风险ID", "合同", "问题", "负责人", "状态", "截止日", "备注"], [
-        [r["id"], r["risk_id"], r["contract"], r["risk"], r["owner"] or "未分派", r["status"], r["due"], r["note"]] for r in snapshot["rectifications"]
+    _sheet(wb, "整改跟踪", ["整改ID", "风险ID", "合同", "问题", "负责人", "状态", "截止日", "备注", "来源审查"], [
+        [r["id"], r["risk_id"], r["contract"], r["risk"], r["owner"] or "未分派", r["status"], r["due"], r["note"], rectification_source(r)] for r in snapshot["rectifications"]
     ])
     _sheet(wb, "整改验收记录", ["整改ID", "验收阅读项", "已留存内容"], [
         [task["id"], label, content] for task in snapshot["rectifications"]

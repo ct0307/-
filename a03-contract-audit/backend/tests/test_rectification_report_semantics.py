@@ -1,6 +1,7 @@
 """风险接受与整改消除在报告中保持独立，不把责任决策误记为消除。"""
 from datetime import date
 from io import BytesIO
+import pytest
 
 from docx import Document
 from openpyxl import load_workbook
@@ -9,7 +10,7 @@ from app.services.report.operations import operational_summary
 from app.services.report.decision_brief import decision_brief
 from tests.test_decision_reports import sample
 from app.services.report.renderers import export_report_xlsx, export_report_docx
-from tests.test_evidence_reports import _database, _contract
+from tests.test_evidence_reports import _database, _contract, _job
 from app.models.models import Rectification, RectificationEvent, Risk
 from app.services.report.exporter import build_report_snapshot
 from datetime import datetime, timezone
@@ -89,4 +90,89 @@ def test_snapshot_keeps_persisted_evidence_and_event_history_after_reload():
     assert row["resolution"] == "已核对保函原件"
     assert row["evidence"][0]["content_sha256"] == "b" * 64
     assert row["events"][0]["snapshot"]["resolution"] == "第一次提交已退回"
+    db.close()
+
+
+@pytest.mark.parametrize("latest_status", ["done", "review_required", "failed", "queued"])
+def test_reaudit_keeps_historical_rectification_without_counting_old_risk(latest_status):
+    db, user = _database()
+    contract = _contract(db, user, "重审来源.txt")
+    old_job = _job(db, user, contract, "done", 1)
+    risk = Risk(contract_id=contract.id, audit_job_id=old_job.id, category="旧付款风险", level="high",
+                original_text="预付款", basis="待核验", suggestion="补充保函", review_status="confirmed")
+    db.add(risk)
+    db.flush()
+    task = Rectification(contract=contract.filename, risk=risk.category, level=risk.level, risk_id=risk.id,
+                         owner=user.username, status="已接受风险", created="2026-11-01", due="2026-11-07",
+                         residual_risk="履约争议仍存在")
+    db.add(task)
+    db.flush()
+    db.add(RectificationEvent(rectification_id=task.id, actor_id=user.id, actor=user.username,
+                             action="accept", occurred_at=datetime.now(timezone.utc), from_status="待风险接受",
+                             to_status="已接受风险", snapshot_json='{"residual_risk":"履约争议仍存在"}'))
+    latest_job = _job(db, user, contract, latest_status, 2)
+    contract.audit_generation = 2
+    db.commit()
+
+    snapshot = build_report_snapshot(db, [contract.id], department_scope={contract.department})
+
+    assert snapshot["risks"] == []
+    assert snapshot["summary"]["risks"] == 0
+    assert snapshot["operations"]["high_risk_contracts"] == 0
+    assert snapshot["operations"]["accepted_risk_count"] == 1
+    saved = snapshot["rectifications"][0]
+    assert saved["contract_id"] == contract.id
+    assert saved["audit_job_id"] == old_job.id != latest_job.id
+    assert saved["audit_generation"] == 1
+    assert saved["source_scope"] == "historical"
+    assert saved["residual_risk"] == "履约争议仍存在"
+    assert saved["events"][0]["snapshot"]["residual_risk"] == "履约争议仍存在"
+    assert build_report_snapshot(db, department_scope=set())["rectifications"] == []
+
+    workbook = load_workbook(BytesIO(export_report_xlsx(snapshot)))
+    excel_text = "\n".join(str(cell.value) for row in workbook["整改验收记录"] for cell in row)
+    assert "历史审查整改（不计入当前风险发现）" in excel_text
+    assert "代次 1" in excel_text
+    document = Document(BytesIO(export_report_docx(snapshot)))
+    word_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert "历史审查整改（不计入当前风险发现）" in word_text
+    assert "代次 1" in word_text
+    assert "履约争议仍存在" in word_text
+    db.close()
+
+
+def test_historical_and_current_tasks_keep_selected_contract_and_department_scope():
+    db, user = _database()
+    contract = _contract(db, user, "所选合同.txt")
+    excluded = _contract(db, user, "未选择合同.txt")
+    foreign = _contract(db, user, "其他部门合同.txt", department="财务部")
+    old_job = _job(db, user, contract, "done", 1)
+    current_job = _job(db, user, contract, "done", 2)
+    records = []
+    for source, job, status in [(contract, old_job, "已接受风险"),
+                                (contract, current_job, "处理中"),
+                                (excluded, None, "已接受风险"), (foreign, None, "已接受风险")]:
+        risk = Risk(contract_id=source.id, audit_job_id=job.id if job else None, category=source.filename,
+                    level="medium", original_text="条款", basis="待核验", suggestion="修改", review_status="confirmed")
+        db.add(risk)
+        db.flush()
+        task = Rectification(contract=source.filename, risk=risk.category, level=risk.level, risk_id=risk.id,
+                             owner=user.username, status=status, created="2026-11-01", due="2026-11-07")
+        db.add(task)
+        records.append((risk, task))
+    contract.audit_generation = 2
+    db.commit()
+
+    snapshot = build_report_snapshot(db, [contract.id], department_scope={contract.department})
+
+    assert [risk["id"] for risk in snapshot["risks"]] == [records[1][0].id]
+    assert snapshot["summary"]["risks"] == 1
+    assert snapshot["operations"]["accepted_risk_count"] == 1
+    assert [task["risk_id"] for task in snapshot["rectifications"]] == [records[0][0].id, records[1][0].id]
+    assert [task["source_scope"] for task in snapshot["rectifications"]] == ["historical", "current"]
+    assert [task["audit_generation"] for task in snapshot["rectifications"]] == [1, 2]
+    assert all(task["contract_id"] == contract.id for task in snapshot["rectifications"])
+    unselected_snapshot = build_report_snapshot(db, department_scope={contract.department})
+    assert records[2][1].id in {task["id"] for task in unselected_snapshot["rectifications"]}
+    assert records[3][1].id not in {task["id"] for task in unselected_snapshot["rectifications"]}
     db.close()
