@@ -10,6 +10,8 @@
 - 脱敏后字段用标记 [已脱敏] 说明，满足"可解释"要求
 """
 import json
+from app.services.audit.evidence_state import evidence_validation_mode
+from app.services.sensitive_data import redact_sensitive_text, redact_sensitive_values
 
 
 def _json_list(value: object) -> list:
@@ -65,6 +67,7 @@ def mask_original_text(text: str, max_len: int = 80) -> str:
       '甲方于收到货物后 90 日内付款，乙方不得拒绝...'（100 字）
       → '甲方于收到货物后 90 日内付款，乙方不得...[已脱敏]'
     """
+    text = redact_sensitive_text(text or '')
     if not text or len(text) <= max_len:
         return text
     return text[:max_len] + "…[已脱敏]"
@@ -106,6 +109,9 @@ def apply_risk_masking(risk: dict | object, role: str) -> dict:
             "support_relation_status": risk.support_relation_status,
             "support_validation_reason": risk.support_validation_reason,
             "support_validator_version": risk.support_validator_version,
+            "support_validation_mode": evidence_validation_mode(risk.decision_trace_json),
+            "support_validation_failed_stage": risk.support_validation_failed_stage,
+            "support_validation_reason_code": risk.support_validation_reason_code,
             "applicability_status": risk.applicability_status,
             "applicability_reason_codes": _json_list(risk.applicability_reason_codes_json),
             "rule_executions": _json_list(risk.rule_executions_json),
@@ -128,4 +134,4 @@ def apply_risk_masking(risk: dict | object, role: str) -> dict:
         d["retrieval_attempts"] = _public_retrieval_attempts(
             d.get("retrieval_attempts", [])
         )
-    return d
+    return redact_sensitive_values(d)

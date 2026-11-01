@@ -16,6 +16,7 @@ from app.services.report.renderers import export_report_docx, export_report_xlsx
 from app.services.report.payment_insights import analyze_payments
 from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
 from app.services.report.operations import operational_summary
+from app.services.audit.evidence_state import evidence_validation_mode, is_current_evidence_verified
 
 DepartmentScope = str | set[str] | None
 
@@ -172,6 +173,9 @@ def build_report_snapshot(
         "review_status": risk.review_status,
         "support_relation_status": risk.support_relation_status,
         "support_validator_version": risk.support_validator_version,
+        "support_validation_mode": evidence_validation_mode(risk.decision_trace_json),
+        "support_validation_failed_stage": risk.support_validation_failed_stage,
+        "support_validation_reason_code": risk.support_validation_reason_code,
         "evidence_ids": _json_value(risk.evidence_ids_json, []),
         "support_validation_reason": _clean_text(risk.support_validation_reason),
         "applicability_status": risk.applicability_status,
@@ -215,9 +219,7 @@ def build_report_snapshot(
         "high": sum(row["level"] == "high" for row in risk_rows),
         "medium": sum(row["level"] == "medium" for row in risk_rows),
         "low": sum(row["level"] == "low" for row in risk_rows),
-        "supported": sum(row["evidence_status"] == "supported" and row["original_text_verified"] is True
-                         and row["support_relation_status"] == "supported" and row["support_validator_version"] == "support-v4"
-                         and bool(row["evidence_ids"]) and bool(row["rag_sources"]) for row in risk_rows),
+        "supported": sum(is_current_evidence_verified(row) for row in risk_rows),
     }
     content = {
         "contract_ids": ids, "summary": summary, "contracts": contract_rows,

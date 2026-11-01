@@ -27,7 +27,8 @@ def _probe_once() -> dict[str, Any]:
             configured_models_url(),
             headers=headers,
             timeout=min(float(settings.LLM_TIMEOUT), 10.0),
-            **({"trust_env": False, "follow_redirects": False} if settings.MODEL_PROCESSING_MODE == "private_model" else {}),
+            trust_env=False,
+            follow_redirects=False,
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:

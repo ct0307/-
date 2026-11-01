@@ -14,7 +14,15 @@ from .word_decision import export_decision_docx
 STATUS = {"done": "处理完成", "review_required": "待人工复核", "failed": "审查失败", "audit_failed": "审查失败", "queued": "排队中", "reviewing": "审查中", "parsing": "解析中", "validating": "校验中"}
 LEVEL = {"high": "高风险", "medium": "中风险", "low": "低风险"}
 REVIEW = {"pending": "待复核", "confirmed": "已确认", "ignored": "已忽略", "to_modify": "待修改"}
-EVIDENCE = {"supported": "依据支持", "partially_supported": "部分支持", "unsupported": "缺少支持", "contradicted": "依据矛盾", "unclear": "待核实"}
+EVIDENCE = {"supported": "依据与原文已核验", "partially_supported": "已检索可信来源 · 待核验", "unsupported": "证据不足 · 待复核", "contradicted": "依据存在矛盾 · 待人工裁决", "unclear": "核验不确定 · 待人工复核"}
+
+
+def evidence_label(risk):
+    from app.services.audit.evidence_state import is_current_evidence_verified
+    status = risk.get("evidence_status")
+    if status == "supported" and not is_current_evidence_verified(risk):
+        status = "unclear"
+    return EVIDENCE.get(status, "证据状态未知 · 待复核")
 AGENT = {"legal": "法务专家", "finance": "财务会计", "system": "规则校验"}
 
 
@@ -110,7 +118,7 @@ def export_report_xlsx(snapshot):
         [c["id"], c["filename"], c["contract_type"], c["department"], c["party_a"], c["subject"], c["payment_terms"], c["amount"], c["job_id"], STATUS.get(c["job_status"], "未审查"), c["risk_high"], c["risk_medium"], c["risk_low"], c["coverage"], c["review_reason"], (c.get("elements") or {}).get("party_b") or "待补充", (c.get("elements") or {}).get("duration") or "待补充"] for c in snapshot["contracts"]
     ], [12, 36, 18, 18, 30, 36, 65, 24, 12, 18, 12, 12, 12, 25, 55, 30, 36])
     _sheet(wb, "风险台账", ["合同", "风险ID", "负责智能体", "类别", "等级", "原文", "风险原因", "依据", "修改建议", "复核状态", "证据状态", "原文定位"], [
-        [r["filename"], r["id"], AGENT.get(r["agent"], r["agent"]), r["category"], LEVEL.get(r["level"], r["level"]), r["original_text"], r["risk_reason"], r["basis"], r["suggestion"], REVIEW.get(r["review_status"], r["review_status"]), EVIDENCE.get(r["evidence_status"], r["evidence_status"]), location(r)] for r in snapshot["risks"]
+        [r["filename"], r["id"], AGENT.get(r["agent"], r["agent"]), r["category"], LEVEL.get(r["level"], r["level"]), r["original_text"], r["risk_reason"], r["basis"], r["suggestion"], REVIEW.get(r["review_status"], r["review_status"]), evidence_label(r), location(r)] for r in snapshot["risks"]
     ], [36, 12, 18, 20, 14, 70, 55, 55, 55, 16, 18, 36])
     _sheet(wb, "证据索引", ["风险ID", "合同", "原文定位", "原文核验", "检索来源与正文", "依据支持关系"], [
         [r["id"], r["filename"], location(r), "已核验" if r["original_text_verified"] else "未核验", sources(r), r.get("support_validation_reason")] for r in snapshot["risks"]

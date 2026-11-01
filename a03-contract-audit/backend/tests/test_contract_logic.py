@@ -1,4 +1,5 @@
 from decimal import Decimal
+import pytest
 
 from app.services.audit import auditor
 
@@ -112,3 +113,36 @@ def test_deterministic_fact_validation_rejects_false_amount_mismatch_and_invente
     assert validate_candidate_facts(false_mismatch, text).valid is False
     assert validate_candidate_facts(invented_date, text).valid is False
     assert validate_candidate_facts(invented_amount, text).valid is False
+
+
+@pytest.mark.parametrize('amount,valid', [('504000元', True), ('50.4万元', True), ('604000元', False)])
+def test_fact_validation_accepts_only_exact_quantity_times_unit_price(amount, valid):
+    from app.services.audit.contract_logic import validate_candidate_facts
+    text = '事项｜数量｜单价\n备货排产｜4｜人民币126,000元\n部门负责人不超过20万元'
+    risk = {'risk_reason': f'模板行金额为{amount}，需核对超限审批路径。'}
+    assert validate_candidate_facts(risk, text).valid is valid
+
+
+@pytest.mark.parametrize('text', [
+    '事项｜库存｜单价\n备货排产｜4｜人民币126,000元',
+    '事项｜数量｜单价\n备货排产｜4或5｜人民币126,000元',
+    '事项｜数量｜单价\n备货排产｜4｜USD126000元',
+    '事项｜数量｜单价\n备货排产｜4｜人民币126000元起',
+    '事项｜数量｜单价｜币种\n备货排产｜4｜126000元｜美元',
+    '事项｜数量｜单价｜折扣\n备货排产｜4｜人民币126000元｜50%',
+    '事项｜数量｜单价｜税率\n备货排产｜4｜人民币126000元｜13%',
+    '事项｜数量｜单价\n备货排产｜4｜人民币126000元\n其他说明\n另一个表｜6｜人民币84000元',
+])
+def test_ambiguous_tables_do_not_authorize_derived_amounts(text):
+    from app.services.audit.contract_logic import validate_candidate_facts
+    amount = '504000元' if '另一个表' not in text else '2016000元'
+    assert validate_candidate_facts({'risk_reason': f'总额为{amount}。'}, text).valid is False
+
+
+def test_derived_amount_is_exact_beyond_default_decimal_precision():
+    from app.services.audit.contract_logic import validate_candidate_facts
+    text = '事项｜数量｜单价\n备货｜999999999999.999999｜人民币999999999999999999.999999元'
+    exact = '999999999999999998999999000000.000000000001'
+    rounded = '999999999999999998999999000000'
+    assert validate_candidate_facts({'risk_reason': f'行金额为{exact}元。'}, text).valid is True
+    assert validate_candidate_facts({'risk_reason': f'行金额为{rounded}元。'}, text).valid is False

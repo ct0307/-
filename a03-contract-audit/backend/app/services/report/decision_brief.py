@@ -1,6 +1,7 @@
 """供Excel和Word共用的阅读模型；只整理已有事实，不自动批准合同。"""
 import re
 from datetime import datetime, timezone, timedelta
+from app.services.audit.evidence_state import is_current_evidence_verified
 
 LEVEL = {"high": "高风险", "medium": "中风险", "low": "低风险"}
 REVIEW = {"pending": "待复核", "confirmed": "已确认风险", "ignored": "已忽略", "to_modify": "待修改"}
@@ -30,11 +31,21 @@ def local_time(value):
 
 
 def evidence_verified(risk):
-    return (risk.get("evidence_status") == "supported"
-            and risk.get("original_text_verified") is True
-            and risk.get("support_relation_status") == "supported"
-            and risk.get("support_validator_version") == "support-v4"
-            and bool(risk.get("evidence_ids")) and bool(risk.get("rag_sources")))
+    return is_current_evidence_verified(risk)
+
+
+def validation_text(risk):
+    mode = {"deterministic": "有限规则核验", "manual_only": "人工核验", "semantic": "语义核验"}.get(risk.get("support_validation_mode"), "方式未记录")
+    return " / ".join([mode, value_text(risk.get("support_validator_version"), "版本未记录"),
+                       value_text(risk.get("support_validation_failed_stage"), "阶段未记录"),
+                       value_text(risk.get("support_validation_reason_code"), "原因码未记录")])
+
+
+def human_review_text(risk):
+    review = (risk.get("decision_trace") or {}).get("human_review")
+    if not isinstance(review, dict):
+        return "暂无人工复核记录；人工确认独立于机器证据核验。"
+    return f"操作人ID {review.get('operator_id')} / {value_text(review.get('reviewed_at'))} / {REVIEW.get(review.get('status'), '待复核')} / {value_text(review.get('reason'), '已重置为待复核')}"
 
 
 def contract_facts(contract):

@@ -4,7 +4,7 @@ from docx import Document
 from docx.shared import Cm, Pt, RGBColor
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from .decision_brief import decision_brief, contract_facts, excerpt, value_text
+from .decision_brief import decision_brief, contract_facts, excerpt, value_text, validation_text, human_review_text
 
 
 def export_decision_docx(snapshot):
@@ -157,6 +157,7 @@ def export_decision_docx(snapshot):
                              ("业务影响（审查原文）", r.get("risk_reason")), ("处理建议（待专业复核）", r.get("suggestion")),
                              ("依据（适用性待核验）", r.get("basis")), ("检索来源", "、".join(source_refs) + "（完整来源见文末索引）" if source_refs else "尚无可回读的检索来源"),
                              ("依据支持说明", r.get("support_validation_reason")),
+                             ("证据核验记录", validation_text(r)), ("人工复核记录", human_review_text(r)),
                              ("责任 / 期限 / 整改", i["owner"] + " / " + i["due"] + " / " + i["action_status"])]:
             paragraph(label,value_text(value))
 

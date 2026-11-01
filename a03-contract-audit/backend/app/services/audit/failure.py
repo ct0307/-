@@ -12,6 +12,8 @@ QUALITY_REASON_MESSAGES = {
     "MODEL_TIMEOUT": "模型调用超时",
     "MODEL_UNAVAILABLE": "模型服务不可用",
     "MODEL_REJECTED": "模型供应商拒绝了审查请求",
+    "MODEL_DISABLED": "当前配置已禁用模型，尚未完成模型审查",
+    "MODEL_OUTBOUND_BLOCKED": "模型调用被数据出站策略阻止",
     "PAGINATION_EXHAUSTED": "模型分页审查未完成",
     "EVIDENCE_UNRESOLVED": "风险依据尚未核验",
     "ORIGINAL_TEXT_UNRESOLVED": "风险原文尚未核验",
@@ -21,6 +23,7 @@ QUALITY_REASON_MESSAGES = {
     "SECONDARY_REVIEW_PENDING": "二次复核尚未完成",
     "UNBOUND_CONFLICT": "冲突项无法关联到具体风险，需人工复核",
     "AUDIT_DEADLINE_EXCEEDED": "审查达到整体时限，需人工复核",
+    "AUDIT_BUDGET_EXHAUSTED": "整单审查调用或令牌预算已用尽，需人工复核",
     "DIMENSION_MISMATCH": "模型返回了本次范围外的风险",
     "FACT_VALIDATION_FAILED": "候选风险的结构化事实校验失败",
 }
@@ -35,6 +38,8 @@ _RETRYABLE = frozenset({
     "AUDIT_DEADLINE_EXCEEDED",
 })
 _SERVICE_CODES = (
+    "AUDIT_BUDGET_EXHAUSTED",
+    "MODEL_DISABLED", "MODEL_OUTBOUND_BLOCKED",
     "MODEL_TIMEOUT", "MODEL_UNAVAILABLE", "AUDIT_PERSISTENCE_UNAVAILABLE",
     "MODEL_REJECTED", "OUTPUT_TRUNCATED", "INVALID_MODEL_OUTPUT",
     "PAGINATION_EXHAUSTED", "AUDIT_DEADLINE_EXCEEDED",
@@ -79,7 +84,13 @@ def audit_failure(item: object) -> AuditFailure | None:
     ordered = list(dict.fromkeys([primary, *codes]))
     message = "；".join(_ERROR_MESSAGES[code] for code in ordered)
     retryable = primary in _RETRYABLE
-    if primary == "MODEL_REJECTED":
+    if primary == "MODEL_DISABLED":
+        action = "请联系管理员启用模型并检查配置后重新审查，当前结果需人工核对"
+    elif primary == "AUDIT_BUDGET_EXHAUSTED":
+        action = "请交由人工复核；如需重新审查，请联系管理员核对调用与令牌预算后再提交"
+    elif primary == "MODEL_OUTBOUND_BLOCKED":
+        action = "请联系管理员检查出站策略中的模型地址授权及敏感字段脱敏；处理后从待审合同重新提交，或使用私有模型审查"
+    elif primary == "MODEL_REJECTED":
         action = "请联系管理员检查模型凭据、额度或服务策略后再提交审查"
     elif primary in {"PARSE_QUALITY_LOW", "CONTRACT_TEXT_INCOMPLETE"}:
         action = "请人工核对原文件，修正文件后重新解析"

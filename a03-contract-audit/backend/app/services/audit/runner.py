@@ -461,7 +461,7 @@ def _locked_item(
             AuditBatchItem.id == batch_item_id,
             AuditBatchItem.contract_id == contract_id,
         )
-        .with_for_update()
+        .with_for_update(of=AuditBatchItem)
         .one()
     )
 

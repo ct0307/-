@@ -144,7 +144,7 @@ def recover_orphaned_batch_items(
                 )
             )
             .order_by(AuditBatchItem.id)
-            .with_for_update(skip_locked=True)
+            .with_for_update(of=AuditBatchItem, skip_locked=True)
             .limit(500)
             .all()
         )
@@ -212,7 +212,7 @@ def run_contract_audit(
         item = (
             db.query(AuditBatchItem)
             .filter(AuditBatchItem.id == batch_item_id)
-            .with_for_update()
+            .with_for_update(of=AuditBatchItem)
             .first()
             if batch_item_id
             else None

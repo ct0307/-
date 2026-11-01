@@ -49,6 +49,79 @@ def _contract(db: Session, name: str) -> Contract:
     return contract
 
 
+def test_disabled_real_review_pipeline_persists_actionable_failure(monkeypatch, db: Session):
+    from app.core.config import settings
+    from app.api.v1.endpoints.contracts import list_contracts_history
+    from app.llm.adapters import openai_compatible
+    from app.services.audit import auditor
+
+    owner = User(id=1, username="disabled-owner", password_hash="x", role="admin")
+    db.add(owner)
+    contract = _contract(db, "disabled-synthetic.txt")
+    batch = AuditBatch(owner_id=owner.id, department="法务部", idempotency_key="disabled-model")
+    db.add(batch)
+    db.flush()
+    item = AuditBatchItem(
+        batch_id=batch.id, contract_id=contract.id, filename=contract.filename,
+        status="reviewing", audit_generation=1, execution_token="disabled-token",
+    )
+    db.add(item)
+    db.commit()
+    monkeypatch.setattr(settings, "MODEL_PROCESSING_MODE", "rules_fallback")
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "none")
+    monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(openai_compatible.httpx, "post", lambda *a, **k: pytest.fail("禁用模型不得联网"))
+    monkeypatch.setattr(runner, "extract_document", lambda _path: DocumentParseResult(
+        text="第一条 甲方按约付款，乙方按约交付。" * 30, source="native",
+    ))
+
+    result = run_audit(db, contract, batch_item_id=item.id, execution_token="disabled-token")
+
+    db.refresh(item)
+    assert result["status"] == "audit_failed"
+    assert result["risk_count"] == 0
+    assert item.status == "failed"
+    assert item.error_code == "MODEL_DISABLED"
+    assert all(issue["code"] == "MODEL_DISABLED" for issue in result["issues"])
+    assert "INVALID_MODEL_OUTPUT" not in item.result_json
+    row = list_contracts_history(db=db, user=owner)[0]
+    assert row.level == "尚无法判断"
+    assert row.assessmentComplete is False
+
+
+def test_external_real_review_pipeline_redacts_sensitive_contract_before_http(monkeypatch, db: Session):
+    import json
+    import httpx
+    from app.core.config import settings
+    from app.llm.adapters import openai_compatible
+    from app.services.audit import auditor
+    from app.services.sensitive_data import contains_sensitive_data
+
+    calls = []
+    def post(url, **kwargs):
+        payload = kwargs['json']
+        assert not contains_sensitive_data(payload)
+        assert '演示采购公司' not in str(payload)
+        assert '13812345678' not in str(payload)
+        calls.append(payload)
+        return httpx.Response(200, request=httpx.Request('POST', url), json={
+            'model': 'fake', 'choices': [{'message': {'content': json.dumps({'risks': [], 'has_more': False})}, 'finish_reason': 'stop'}],
+        })
+
+    monkeypatch.setattr(settings, 'MODEL_PROCESSING_MODE', 'external_model')
+    monkeypatch.setattr(settings, 'MODEL_EXTERNAL_ALLOWED_BASE_URLS', ['https://approved.example/v1'])
+    monkeypatch.setattr(settings, 'LLM_BASE_URL', 'https://approved.example/v1')
+    monkeypatch.setattr(settings, 'AUDIT_BATCH_SECONDARY_ENABLED', False)
+    monkeypatch.setattr(auditor, 'retrieve', lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(openai_compatible.httpx, 'post', post)
+    text = '甲方：演示采购公司\n乙方：演示供货公司\n联系人：张测试\n电话13812345678\n第一条 付款\n' + '演示采购公司按约付款，乙方按约交付。' * 30
+    monkeypatch.setattr(runner, 'extract_document', lambda _path: DocumentParseResult(text=text, source='native'))
+    result = run_audit(db, _contract(db, 'privacy-synthetic.txt'))
+    assert calls
+    assert 'MODEL_OUTBOUND_BLOCKED' not in result.get('quality_reasons', [])
+    assert not any(issue['code'] == 'MODEL_OUTBOUND_BLOCKED' for issue in result.get('issues', []))
+
+
 def test_low_confidence_ocr_requires_review_without_publishing_quality_risk(
     monkeypatch, db: Session
 ):
@@ -951,9 +1024,15 @@ def test_window_calls_have_one_log_each_and_only_jobs_persist_checkpoints(
     if windows:
         assert windows[0].audit_generation == 7
     assert result["coverage"] == {"planned": 1, "completed": 1}
+    uncached_progress = [
+        (15, "reviewing"), (15, "discovering"),
+        (75, "reviewing"), (82, "verifying"), (90, "verifying"),
+    ]
+    cached_progress = [
+        (15, "reviewing"), (75, "reviewing"), (82, "verifying"), (90, "verifying"),
+    ]
     assert progress_runs == [
-        [(75, "reviewing"), (82, "verifying"), (90, "verifying")],
-        [(75, "reviewing"), (82, "verifying"), (90, "verifying")],
+        uncached_progress, uncached_progress if audit_job_id is None else cached_progress,
     ]
 
 

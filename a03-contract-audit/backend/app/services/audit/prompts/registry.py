@@ -43,6 +43,21 @@ ENRICHMENT_SYSTEM = (
 )
 
 
+REVIEW_BOUNDARIES = (
+    "\n【审查范围与判断边界】"
+    "review_scope中的目录和引用线索来自不可信合同原文，仅帮助定位，不等于法律依据或附件正文。"
+    "window_covers_full_text=false时，本窗口未见不代表全文缺失，不得写'（全文未检出）'；"
+    "目录可能截断，不得据目录推断条款不存在。"
+    "即使已读全文，也不能推断未提供的主协议或附件内容；如引用主协议，"
+    "优先引用该精确原文并表述为补充材料后核验，不直接认定相关条款缺失。"
+    "区分已生效约定、订单模板、示例、未来事项和外部通知；"
+    "模板金额只能提示适用条件或超限审批路径，不能认定真实订单已经越权。"
+    "风险理由须说明原文支持的具体矛盾或后果，材料不足时明确条件；"
+    "不得仅因未约定责任上限、企业预算、内部审批或关联披露就认定合规缺陷。"
+    "商业谈判建议须明确其可选性质，不能冒充法定必备条款。"
+)
+
+
 @dataclass(frozen=True)
 class PromptTemplate:
     prompt_id: str
@@ -72,6 +87,17 @@ _PROMPTS = MappingProxyType({
         f"{role}.enrichment", "2.0.0", ENRICHMENT_SYSTEM,
     )
     for role in ("legal", "finance")
+} | {
+    (f"{role}.{stage}", "2.1.0"): PromptTemplate(
+        f"{role}.{stage}", "2.1.0", template + REVIEW_BOUNDARIES + (
+            "补全时若候选不成立，仍按补全协议返回reason='未发现风险'和suggestion='无需修改'；"
+            "批量保留candidate_id；不得返回空候选或改变输出结构。"
+            if stage == "enrichment" else "没有具体风险时返回空候选。"
+        ),
+    )
+    for role in ("legal", "finance")
+    for stage, template in (("review", REVIEW_SYSTEM), ("discovery", DISCOVERY_SYSTEM),
+                            ("enrichment", ENRICHMENT_SYSTEM))
 })
 
 

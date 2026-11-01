@@ -19,11 +19,15 @@ from app.services.audit.protocol import (
     RiskEnvelope,
     RiskFinding,
     RiskFindingEnvelope,
+    RiskFindingEnvelope,
     parse_risk_enrichment,
     parse_risk_finding_envelope,
     parse_risk_envelope,
 )
 from app.services.rag.contract_structure import ContractWindow, split_contract_window
+
+
+WindowReviewStage = Literal["reviewing", "discovering", "enriching"]
 
 
 @dataclass(frozen=True)
@@ -210,6 +214,7 @@ class WindowReviewer:
         max_call_attempts: int = 3,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        stage_callback: Callable[[WindowReviewStage], None] | None = None,
     ) -> None:
         if max_split_depth < 0:
             raise ValueError("max_split_depth 不能小于 0")
@@ -224,6 +229,14 @@ class WindowReviewer:
         self._max_call_attempts = max_call_attempts
         self._sleep = sleep
         self._clock = clock
+        self._stage_callback = stage_callback
+        self._last_stage: WindowReviewStage | None = None
+
+    def _report_stage(self, stage: WindowReviewStage) -> None:
+        """仅投递真实调用阶段；工作线程注入方负责使用内存队列。"""
+        if self._stage_callback is not None and stage != self._last_stage:
+            self._stage_callback(stage)
+            self._last_stage = stage
 
     def review(self, request: WindowReviewRequest) -> AgentReviewResult:
         cached = self._checkpoint.load_valid(request)
@@ -441,6 +454,7 @@ class WindowReviewer:
                 ),
                 thinking="disabled",
             )
+            self._report_stage("discovering")
             try:
                 response = self._adapter.chat(
                     request.discovery_system_prompt, user_prompt, options=options
@@ -501,6 +515,14 @@ class WindowReviewer:
                         kind="issue",
                         issue=self._issue(request, "INVALID_MODEL_OUTPUT"),
                     )
+                schema = RiskFindingEnvelope.model_json_schema()
+                schema['properties']['risks']['maxItems'] = page_size
+                user_prompt += (
+                    "\n上次输出未通过结构校验。请仅修正输出结构和字段长度，"
+                    "category只写简短风险类别，分析留给补全阶段；不得截断原文或虚构候选。"
+                    "按以下JSON Schema重新返回同一页；没有候选时risks为空数组。\n"
+                    f"<output_schema>{json.dumps(schema, ensure_ascii=False)}</output_schema>"
+                )
                 continue
             self._checkpoint.record_call(
                 request, page=page, attempt=attempt, response=response,
@@ -540,6 +562,7 @@ class WindowReviewer:
                 ),
                 thinking="disabled",
             )
+            self._report_stage("enriching")
             try:
                 response = self._adapter.chat(
                     request.enrichment_system_prompt, user_prompt, options=options
@@ -630,6 +653,7 @@ class WindowReviewer:
             thinking="disabled",
         )
         response: LLMResponse | None = None
+        self._report_stage("enriching")
         try:
             response = self._adapter.chat(
                 request.enrichment_system_prompt, prompt, options=options
@@ -769,6 +793,7 @@ class WindowReviewer:
                 response_format=AUDIT_JSON_FORMAT,
                 request_id=self._request_id(request, page, call_attempt),
             )
+            self._report_stage("reviewing")
             try:
                 response = self._adapter.chat(
                     request.system_prompt,
@@ -894,7 +919,11 @@ class WindowReviewer:
 
     @staticmethod
     def _map_error_code(code: str) -> str:
-        if code in {"MODEL_TIMEOUT", "MODEL_UNAVAILABLE", "MODEL_REJECTED"}:
+        if code in {
+            "MODEL_TIMEOUT", "MODEL_UNAVAILABLE", "MODEL_REJECTED",
+            "MODEL_DISABLED", "MODEL_OUTBOUND_BLOCKED",
+            "AUDIT_BUDGET_EXHAUSTED",
+        }:
             return code
         return "INVALID_MODEL_OUTPUT"
 
@@ -906,8 +935,11 @@ class WindowReviewer:
             "MODEL_TIMEOUT": "模型调用超时且已达到重试上限",
             "MODEL_UNAVAILABLE": "模型暂时不可用且已达到重试上限",
             "MODEL_REJECTED": "模型供应商拒绝了审查请求",
+            "MODEL_DISABLED": "当前配置已禁用模型，请联系管理员启用模型后重新审查",
+            "MODEL_OUTBOUND_BLOCKED": "模型调用被数据出站策略阻止，请联系管理员检查处理模式和模型地址",
             "PAGINATION_EXHAUSTED": "模型仍有后续结果但已达到分页上限",
             "AUDIT_DEADLINE_EXCEEDED": "审查达到整体时限，未启动新的模型调用",
+            "AUDIT_BUDGET_EXHAUSTED": "整单审查调用或令牌预算已用尽，未启动新的模型调用",
         }
         return ReviewIssue(
             code=code,

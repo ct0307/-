@@ -10,9 +10,18 @@ def check_model_endpoint(endpoint: str, config) -> None:
     if mode == "rules_fallback":
         raise ValueError("规则模式禁止模型出站调用")
     parsed = urlsplit(endpoint)
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError('模型地址端口无效') from exc
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("模型地址必须为不含凭据的 HTTP(S) 地址")
     if mode != "private_model":
+        if parsed.scheme != 'https' or parsed.query or parsed.fragment:
+            raise ValueError('外部模型必须使用无查询参数的 HTTPS 地址')
+        allowed = getattr(config, 'MODEL_EXTERNAL_ALLOWED_BASE_URLS', [])
+        if endpoint.rstrip('/') not in {value.rstrip('/') for value in allowed}:
+            raise ValueError('外部模型地址尚未获得明确出站授权')
         return
     try:
         address = ip_address(parsed.hostname)

@@ -15,11 +15,12 @@ from app.services.parser.readiness import OCRReadiness
 client = TestClient(app)
 
 
-def test_default_llm_configuration_targets_verified_relay_without_a_secret():
+def test_default_llm_configuration_has_no_implicitly_authorized_relay():
     config = Settings(_env_file=None)
 
     assert config.LLM_PROVIDER == "deepseek"
-    assert config.LLM_BASE_URL == "https://yorhamc.com/v1"
+    assert config.LLM_BASE_URL == ""
+    assert config.MODEL_EXTERNAL_ALLOWED_BASE_URLS == []
     assert config.LLM_MODEL == "deepseek-v4-flash"
     assert config.LLM_MAX_OUTPUT_TOKENS == 3200
     assert config.LLM_API_KEY == ""
@@ -198,6 +199,7 @@ def test_deepseek_configuration_requires_api_key():
         _env_file=None,
         LLM_PROVIDER="deepseek",
         LLM_BASE_URL="https://api.deepseek.com/v1",
+        MODEL_EXTERNAL_ALLOWED_BASE_URLS=['https://api.deepseek.com/v1'],
         LLM_MODEL="deepseek-v4-pro",
         LLM_API_KEY="",
     )
@@ -210,7 +212,8 @@ def test_model_configuration_requires_model_name():
     config = Settings(
         _env_file=None,
         LLM_PROVIDER="qwen",
-        LLM_BASE_URL="http://localhost:11434/v1",
+        LLM_BASE_URL="http://127.0.0.1:11434/v1",
+        MODEL_PROCESSING_MODE='private_model',
         LLM_MODEL=" ",
     )
 
@@ -234,7 +237,8 @@ def test_model_configuration_metadata_is_stable_and_redacted():
     config = Settings(
         _env_file=None,
         LLM_PROVIDER="deepseek",
-        LLM_BASE_URL="https://api.deepseek.com/v1?token=private",
+        LLM_BASE_URL="https://api.deepseek.com/v1",
+        MODEL_EXTERNAL_ALLOWED_BASE_URLS=['https://api.deepseek.com/v1'],
         LLM_MODEL="deepseek-v4-pro",
         LLM_API_KEY="test-secret-key",
     )
@@ -257,6 +261,8 @@ def test_preflight_readiness_forces_a_fresh_runtime_probe(monkeypatch):
         return PublicRuntimeStatus(status="online", checked_at="2026-09-11T10:00:00Z")
 
     monkeypatch.setattr(main_module, "_get_cached_runtime_status", cached_status)
+    monkeypatch.setattr(main_module.settings, 'LLM_BASE_URL', 'https://approved.example/v1')
+    monkeypatch.setattr(main_module.settings, 'MODEL_EXTERNAL_ALLOWED_BASE_URLS', ['https://approved.example/v1'])
     monkeypatch.setattr(main_module.settings, "LLM_API_KEY", "test-key")
 
     checks = main_module.collect_readiness(strict_ocr=False)

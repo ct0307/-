@@ -129,8 +129,8 @@ _DURATION_PATTERNS = (
     re.compile(r"适用期间为([^。；;\n]{2,100})(?=[。；;])"),
     re.compile(
         r"(?:合同期限|合同有效期|履约期限|履行期限|有效期)\s*(?:为)?\s*[：:]?\s*自?\s*"
-        r"(\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?\s*"
-        r"(?:至|到|—|-)\s*\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?)"
+        r"(\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?\s*起?\s*"
+        r"(?:至|到|—|-)\s*\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?\s*止?)"
     ),
     re.compile(
         r"(?:合同期限|合同有效期|履约期限|履行期限|有效期)\s*(?:为)?\s*[：:]?\s*"
@@ -222,13 +222,27 @@ def _collect_section_parties(text: str) -> tuple[list[_Candidate], list[_Candida
 def _collect_amounts(text: str) -> list[_Candidate]:
     candidates: list[_Candidate] = []
     structured_spans: list[tuple[int, int]] = []
-    no_fixed_total = False
+    # 普通正文中的框架结算声明同样有效，后续明确的订单合同金额仍单独提取。
+    no_fixed_total = bool(re.search(r"(?:不设\s*(?:固定\s*)?|无\s*固定\s*)(?:总额|总价|金额)", text))
     for pattern in _STRUCTURED_AMOUNT_PATTERNS:
         for match in pattern.finditer(text):
             raw = match.group(1).strip()
             compact_raw = re.sub(r"\s+", "", raw)
             structured_spans.append(match.span(1))
-            if not raw or any(
+            clause_start = max(
+                (text.rfind(mark, 0, match.start()) for mark in "。！？\n；;"),
+                default=-1,
+            ) + 1
+            prefix = text[clause_start:match.start()]
+            contract_label = match.group(0).startswith("合同") or prefix.rstrip().endswith("合同")
+            fixed_order = bool(re.search(r"订单.*?固定(?:计价|总价|金额)", prefix))
+            # 通用“金额为”模板也可能描述保证金或预算，不能直接提升为合同总额。
+            if not contract_label and (
+                any(term in prefix for term in _EXCLUDED_AMOUNT_TERMS)
+                or (no_fixed_total and not fixed_order)
+            ):
+                continue
+            if not raw or re.search(r"无\s*固定\s*(?:总额|总价|金额)", raw) or any(
                 marker in raw
                 for marker in ("不设固定总额", "据实结算", "不设固定金额")
             ) or (
@@ -253,9 +267,18 @@ def _collect_amounts(text: str) -> list[_Candidate]:
             (text.rfind(mark, 0, match.start()) for mark in "。！？\n；;"),
             default=-1,
         ) + 1
+        clause_start = max(
+            sentence_start,
+            text.rfind("，", sentence_start, match.start()) + 1,
+            text.rfind(",", sentence_start, match.start()) + 1,
+        )
+        # 独立逗号分句单独判断；“其总金额”“该资本总金额”等才继承前文语义。
+        refers_to_previous = bool(re.search(r"(?:其|该[^，,；;。]{0,12})\s*$", text[clause_start:match.start()]))
+        if not refers_to_previous:
+            sentence_start = clause_start
         sentence_ends = [
             index
-            for mark in "。！？\n；;"
+            for mark in "。！？\n；;，,"
             if (index := text.find(mark, match.end())) >= 0
         ]
         sentence_end = min(sentence_ends, default=len(text))
@@ -288,12 +311,16 @@ def _collect_amounts(text: str) -> list[_Candidate]:
         confidence = 0.99 if explicit_contract_amount else 0.90
         candidate = _candidate(match, confidence, normalize=_normalize_amount)
         candidates.append(candidate)
+    has_total_candidate = bool(candidates)
     alias_pattern = re.compile("|".join(map(re.escape, _AMOUNT_ALIAS_LABELS)))
     for label_match in alias_pattern.finditer(text):
         if no_fixed_total or any(
             start <= label_match.start() < end
             for start, end in structured_spans
         ):
+            continue
+        # 总价仍参与冲突检查；已有明确总额时不再用分项服务费等别名补充总额。
+        if has_total_candidate and label_match.group(0) not in {"包干总价", "签约合同价", "成交含税价"}:
             continue
         segment_end = min(
             next((text.find(mark, label_match.end()) for mark in "。；;" if text.find(mark, label_match.end()) >= 0), len(text)),
@@ -316,6 +343,22 @@ def _collect_amounts(text: str) -> list[_Candidate]:
 
 def _collect_durations(text: str) -> list[_Candidate]:
     candidates: list[_Candidate] = []
+    # 真实合同常用服务期限与中文相对期限，保留原文区间供人工复核。
+    realistic_patterns = (
+        re.compile(
+            r"(?:服务期限|服务期|框架(?:合同|协议)有效期)\s*(?:为)?\s*[：:]?\s*"
+            r"(自?\s*\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?\s*起?\s*"
+            r"(?:至|到|—|-)\s*\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?\s*止?)"
+        ),
+        re.compile(
+            r"(?:服务期限|服务期|框架(?:合同|协议)有效期|合同期限|合同有效期|履约期限|履行期限)"
+            r"\s*(?:为)?\s*[：:]?\s*"
+            r"((?:自?\s*(?:本合同|合同)?\s*(?:生效|签订|签署)\s*(?:之日|日)?\s*起\s*)?"
+            r"[一二三四五六七八九十百两\d]+\s*(?:年|个月|月|日|天))(?!\s*\d)"
+        ),
+    )
+    for pattern in realistic_patterns:
+        candidates.extend(_collect_scalar(pattern, text, 0.97))
     for index, pattern in enumerate(_DURATION_PATTERNS):
         normalize = (lambda value: value) if index == 0 else _normalize_duration
         for candidate in _collect_scalar(pattern, text, 0.95, normalize=normalize):
@@ -412,6 +455,12 @@ def _collect_payment_terms(text: str) -> list[_Candidate]:
             normalized = _normalized(candidate.value)
             if normalized in seen:
                 continue
+            seen.add(normalized)
+            candidates.append(candidate)
+    for match in re.finditer(r"((?:验收|收票|收到发票|交付|签订|生效)后\s*\d+\s*(?:日|天|个月|月)内\s*(?:支付|付款|结算)[^。；;\n]*)", text):
+        candidate = _candidate(match, 0.90)
+        normalized = _normalized(candidate.value)
+        if normalized not in seen:
             seen.add(normalized)
             candidates.append(candidate)
     return candidates
@@ -539,17 +588,33 @@ def _normalized(value: str) -> str:
     return re.sub(r"[\s，,；;。]", "", value)
 
 
+def _duration_comparison_value(value: str) -> str:
+    """仅在冲突比较时统一完整日期区间，不改变展示值和原文证据。"""
+    compact = re.sub(r"\s+", "", value)
+    date_range = re.fullmatch(
+        r"自?(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?起?(?:至|到|—|-)"
+        r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?止?",
+        compact,
+    )
+    if date_range is None:
+        return _normalized(value)
+    parts = [str(int(part)) for part in date_range.groups()]
+    return "-".join(parts[:3]) + "至" + "-".join(parts[3:])
+
+
 def _scalar_result(
     candidates: list[_Candidate],
     spans: list[tuple[int, int, int | None]],
     parsed: DocumentParseResult,
+    *,
+    normalize=_normalized,
 ) -> tuple[str | None, ElementEvidence | None, bool]:
     if not candidates:
         return None, None, False
     selected = candidates[0]
     page = _page_for(selected, spans, parsed)
     ambiguous = (
-        len({_normalized(item.value) for item in candidates}) > 1
+        len({normalize(item.value) for item in candidates}) > 1
         or (any(block.anchor.page_number is not None for block in parsed.blocks) and page is None)
     )
     evidence = ElementEvidence(
@@ -580,7 +645,10 @@ def extract_element_result(parsed: DocumentParseResult) -> ElementResult:
     evidence: dict[str, ElementEvidence | list[ElementEvidence]] = {}
     review_fields: list[str] = []
     for field in ELEMENT_FIELDS[:-1]:
-        value, item_evidence, ambiguous = _scalar_result(candidates[field], spans, parsed)
+        value, item_evidence, ambiguous = _scalar_result(
+            candidates[field], spans, parsed,
+            normalize=_duration_comparison_value if field == "duration" else _normalized,
+        )
         values[field] = value
         if item_evidence is not None:
             evidence[field] = item_evidence

@@ -90,7 +90,7 @@ def recover_local_audit_items(
                     ("queued", "parsing", "reviewing", "validating", "auditing")
                 ),
             )
-            .with_for_update()
+            .with_for_update(of=AuditBatchItem)
             .all()
         )
         for item in stale_items:

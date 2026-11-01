@@ -11,6 +11,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from app.services.audit.evidence_state import evidence_validation_mode
 
 
 class RiskOut(BaseModel):
@@ -34,6 +35,7 @@ class RiskOut(BaseModel):
     support_validator_version: str = "unvalidated"
     support_validation_failed_stage: str = "none"
     support_validation_reason_code: str = ""
+    support_validation_mode: str = "manual_only"
     applicability_status: str = "unresolved"
     applicability_reason_codes: list[str] = Field(
         default_factory=list,
@@ -114,6 +116,11 @@ class RiskOut(BaseModel):
                 return {}
             return parsed if isinstance(parsed, dict) else {}
         return value if isinstance(value, dict) else {}
+
+    @model_validator(mode="after")
+    def _restore_validation_mode(self):
+        self.support_validation_mode = evidence_validation_mode(self.decision_trace)
+        return self
 
 
 class CrossCheckOut(BaseModel):
@@ -406,7 +413,7 @@ class RectificationStatusUpdate(BaseModel):
 
 
 class HistoryRow(BaseModel):
-    """审查记录行：前端 HistoryView 台账展示。8 字段，与前端 mock/history.ts 精确对齐。
+    """审查记录行：保留原台账字段，并提供整体结论完整度。
 
     level/status 用中文枚举，time 为带时区的 ISO 8601 导入时间，搜索/筛选在前端本地做。
     """
@@ -415,9 +422,11 @@ class HistoryRow(BaseModel):
     type: str          # 合同类型
     submitter: str     # 上传人用户名
     time: str          # ISO 8601，含时区
-    level: str         # 高风险/中风险/低风险
-    riskCount: int
-    status: str        # 合规/待整改/已整改
+    level: str         # 高风险/中风险/低风险/未发现风险/尚无法判断
+    riskCount: int     # 当前任务的候选数量；完整度为 false 时不代表完整审查结论
+    status: str        # 审查失败/未审查/审查中/待人工复核/未发现风险/待整改/已整改等
+    assessmentComplete: bool = False
+    coverage: AuditCoverageOut | None = None
 
 
 class LookupItemOut(BaseModel):

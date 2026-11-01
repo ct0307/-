@@ -45,7 +45,18 @@ class Settings(BaseSettings):
 
     # 文件存储（私有化本地存储）。相对路径按 backend 目录解析，避免依赖启动工作目录。
     STORAGE_DIR: str = "storage"
-    MAX_UPLOAD_MB: int = 50
+    MAX_UPLOAD_MB: int = Field(default=50, gt=0)
+    # 导入容量统一入口：新导入、旧兼容上传、前端提示和网关均以此为准。
+    MAX_BATCH_FILES: int = Field(default=200, gt=0)
+    MAX_BATCH_MB: int = Field(default=500, gt=0)
+
+    @property
+    def max_file_size_bytes(self) -> int:
+        return self.MAX_UPLOAD_MB * 1024 * 1024
+
+    @property
+    def max_batch_size_bytes(self) -> int:
+        return self.MAX_BATCH_MB * 1024 * 1024
 
     # 合同导入分类与草稿生命周期。
     CONTRACT_TYPE_CONFIRM_THRESHOLD: float = 0.60
@@ -69,10 +80,12 @@ class Settings(BaseSettings):
     DB_BACKEND: str = "sqlite"
     SQLITE_PATH: str = "storage/a03_dev.db"
 
-    # LLM Adapter：当前项目测试基线使用 DeepSeek 中转；生产环境需评估合同出公网风险
+    # LLM Adapter：外部端点必须由企业显式配置和授权。
     LLM_PROVIDER: str = "deepseek"  # qwen / deepseek / openclaw
     MODEL_PROCESSING_MODE: Literal["private_model", "external_model", "rules_fallback"] = "external_model"
-    LLM_BASE_URL: str = "https://yorhamc.com/v1"
+    LLM_BASE_URL: str = ""
+    # 外部模型需显式授权完整 HTTPS 基地址（环境变量使用 JSON 数组）。
+    MODEL_EXTERNAL_ALLOWED_BASE_URLS: list[str] = Field(default_factory=list)
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "deepseek-v4-flash"
     LLM_TIMEOUT: int = 120
@@ -85,6 +98,8 @@ class Settings(BaseSettings):
     AUDIT_MAX_MODEL_CALLS: int = Field(default=120, ge=1, le=1000)
     AUDIT_MAX_TOKEN_BUDGET: int = Field(default=3000000, ge=1000, le=10000000)
     AUDIT_DIRECTED_MAX_CALLS: int = Field(default=3, ge=0, le=10)
+    # 证据核验默认人工接管；仅在规则验证器经过评测后显式切换。
+    EVIDENCE_VALIDATION_MODE: Literal["manual_only", "deterministic"] = "manual_only"
 
     # Embedding 配置（RAG 向量化用）
     # EMBED_BACKEND=local（默认）：sentence-transformers 本地模型，合同数据不出企业

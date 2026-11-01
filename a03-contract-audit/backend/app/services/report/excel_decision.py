@@ -1,6 +1,6 @@
 """管理审批首页与可执行核对清单。"""
 from openpyxl.styles import Alignment, Font, PatternFill
-from .decision_brief import decision_brief, contract_facts, excerpt, value_text
+from .decision_brief import decision_brief, contract_facts, excerpt, value_text, validation_text, human_review_text
 
 INK, RED, PAPER, MUTED = "202622", "AD321B", "F7F4EC", "647067"
 
@@ -103,6 +103,7 @@ def add_review_sheets(wb, snapshot, sheet, location, sources):
             ("原文", risk.get("original_text")), ("业务影响（审查原文）", risk.get("risk_reason")),
             ("修改建议（待复核）", risk.get("suggestion")), ("依据（待核验）", risk.get("basis")),
             ("检索来源", sources(risk)), ("核验与复核", i["verification"] + " / " + i["review"]),
+            ("证据核验记录", validation_text(risk)), ("人工复核记录", human_review_text(risk)),
             ("责任与期限", i["owner"] + " / " + i["due"] + " / " + i["action_status"]),
         ]:
             text = value_text(value)

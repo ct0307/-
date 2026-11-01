@@ -8,13 +8,23 @@ from pathlib import Path
 from typing import Any
 
 
+_PHASE_FIELDS = ("parse_ms", "legal_agent_ms", "finance_agent_ms", "grounding_ms", "persist_ms")
+_TERMINAL_STATUSES = frozenset({"done", "review_required", "audit_failed", "failed"})
+
+
 @dataclass(frozen=True)
 class RunSpeedMetrics:
     sample_count: int
     total_ms: int | None
     total_latency_p50_ms: float | None
     total_latency_p95_ms: float | None
-    phase_ms: dict[str, float]
+    phase_ms: dict[str, float | None]
+    phase_p50_ms: dict[str, float | None]
+    phase_p95_ms: dict[str, float | None]
+    phase_sample_counts: dict[str, int]
+    success_count: int | None
+    success_rate: float | None
+    review_required_count: int | None
     llm_calls: int | None
     llm_latency_p50_ms: float | None
     llm_latency_p95_ms: float | None
@@ -72,7 +82,7 @@ def _samples(run: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _sum_if_complete(samples: list[dict], field: str) -> int | None:
-    values = [sample[field] for sample in samples if field in sample]
+    values = [sample[field] for sample in samples if sample.get(field) is not None]
     if not all(type(value) is int and value >= 0 for value in values):
         raise ValueError(f"{field} 必须为非负整数")
     if not samples or len(values) != len(samples):
@@ -97,31 +107,49 @@ def _speed_metrics(samples: list[dict]) -> RunSpeedMetrics:
     total_ms = _sum_if_complete(samples, "total_ms")
     total_latencies = [sample["total_ms"] for sample in samples] if total_ms is not None else []
     call_lists = [sample.get("llm_calls") for sample in samples]
+    if any(value is not None and not isinstance(value, list) for value in call_lists):
+        raise ValueError("llm_calls 必须为对象数组")
     calls_complete = bool(samples) and all(isinstance(value, list) for value in call_lists)
     calls = [call for value in call_lists if isinstance(value, list) for call in value]
-    if calls_complete and not all(isinstance(call, dict) for call in calls):
+    if not all(isinstance(call, dict) for call in calls):
         raise ValueError("llm_calls 必须为对象数组")
-    latencies = [
-        float(call["latency_ms"])
-        for call in calls
-        if isinstance(call.get("latency_ms"), (int, float))
-        and not isinstance(call.get("latency_ms"), bool)
-    ]
-    latency_complete = calls_complete and all("latency_ms" in call for call in calls)
+    latencies = []
+    for call in calls:
+        value = call.get("latency_ms")
+        if value is not None:
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise ValueError("latency_ms 必须为非负有限数值")
+            latencies.append(float(value))
+    latency_complete = calls_complete and len(latencies) == len(calls)
 
-    phase_values: dict[str, list[float]] = {}
+    phase_values: dict[str, list[float]] = {name: [] for name in _PHASE_FIELDS}
     for sample in samples:
         timings = sample.get("timings")
-        if not isinstance(timings, dict):
-            continue
-        for name, value in timings.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                phase_values.setdefault(str(name), []).append(float(value))
+        if timings is not None and not isinstance(timings, dict):
+            raise ValueError("timings 必须为对象")
+        for name in _PHASE_FIELDS:
+            value = (timings or {}).get(name, sample.get(name))
+            if value is not None:
+                if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                    raise ValueError(f"{name} 必须为非负有限数值")
+                phase_values[name].append(float(value))
     phase_means = {
-        name: round(sum(values) / len(values), 3)
-        for name, values in sorted(phase_values.items())
-        if len(values) == len(samples)
+        name: round(sum(values) / len(values), 3) if values and len(values) == len(samples) else None
+        for name, values in phase_values.items()
     }
+    phase_p50 = {
+        name: _percentile(values, 0.50) if phase_means[name] is not None else None
+        for name, values in phase_values.items()
+    }
+    phase_p95 = {
+        name: _percentile(values, 0.95) if phase_means[name] is not None else None
+        for name, values in phase_values.items()
+    }
+    statuses = [sample.get("status") for sample in samples]
+    statuses_complete = bool(samples) and all(
+        isinstance(status, str) and status in _TERMINAL_STATUSES for status in statuses
+    )
+    success_count = statuses.count("done") if statuses_complete else None
     cache_hits = None
     if samples and all(isinstance(sample.get("parse_cache_hit"), bool) for sample in samples):
         cache_hits = sum(1 for sample in samples if sample["parse_cache_hit"])
@@ -131,6 +159,12 @@ def _speed_metrics(samples: list[dict]) -> RunSpeedMetrics:
         total_latency_p50_ms=_percentile(total_latencies, 0.50),
         total_latency_p95_ms=_percentile(total_latencies, 0.95),
         phase_ms=phase_means,
+        phase_p50_ms=phase_p50,
+        phase_p95_ms=phase_p95,
+        phase_sample_counts={name: len(values) for name, values in phase_values.items()},
+        success_count=success_count,
+        success_rate=success_count / len(samples) if success_count is not None else None,
+        review_required_count=statuses.count("review_required") if statuses_complete else None,
         llm_calls=len(calls) if calls_complete else None,
         llm_latency_p50_ms=_percentile(latencies, 0.50) if latency_complete else None,
         llm_latency_p95_ms=_percentile(latencies, 0.95) if latency_complete else None,
@@ -209,7 +243,7 @@ def compare_runs(
     unsafe = candidate_quality.unauthorized_evidence_count
     unverified = candidate_quality.unverified_auto_publish_count
     safety_violation = any(
-        sample.get(field, 0) > 0
+        sample.get(field) is not None and sample[field] > 0
         for sample in candidate_samples
         for field in ("unauthorized_evidence_count", "unverified_auto_publish_count")
     )
@@ -284,6 +318,17 @@ def compare_runs(
     if safety_violation:
         reasons.append("候选存在越权证据或未复核自动发布")
     quality_gate = False if safety_violation else None if unavailable else not reasons
+    # 性能观测缺项只影响报告完整性，不改变既有质量门禁的判断条件。
+    for prefix, metrics in (("baseline", baseline_speed), ("candidate", candidate_speed)):
+        for field in (
+            "total_latency_p50_ms", "total_latency_p95_ms", "llm_latency_p50_ms",
+            "llm_latency_p95_ms", "success_rate", "parse_cache_hits", "fallback_count",
+        ):
+            if getattr(metrics, field) is None:
+                unavailable.append(f"{prefix}.{field}")
+        for name, value in metrics.phase_ms.items():
+            if value is None:
+                unavailable.append(f"{prefix}.phase_ms.{name}")
     return AuditPerformanceReport(
         baseline_name=str(baseline.get("name") or "baseline"),
         candidate_name=str(candidate.get("name") or "candidate"),
@@ -341,6 +386,32 @@ def render_markdown(report: AuditPerformanceReport) -> str:
         f"{_display(report.speed.candidate.total_latency_p95_ms)} |  |",
         f"| LLM 调用数 | {_display(report.speed.baseline.llm_calls)} | "
         f"{_display(report.speed.candidate.llm_calls)} | {_display(report.speed.llm_calls_delta)} |",
+        f"| 样本数 | {report.speed.baseline.sample_count} | {report.speed.candidate.sample_count} |  |",
+        f"| 自动成功数(done) | {_display(report.speed.baseline.success_count)} | "
+        f"{_display(report.speed.candidate.success_count)} |  |",
+        f"| 自动成功率 | {_display(report.speed.baseline.success_rate)} | "
+        f"{_display(report.speed.candidate.success_rate)} |  |",
+        f"| 待人工复核数 | {_display(report.speed.baseline.review_required_count)} | "
+        f"{_display(report.speed.candidate.review_required_count)} |  |",
+        f"| LLM 延迟 P50(ms) | {_display(report.speed.baseline.llm_latency_p50_ms)} | "
+        f"{_display(report.speed.candidate.llm_latency_p50_ms)} |  |",
+        f"| LLM 延迟 P95(ms) | {_display(report.speed.baseline.llm_latency_p95_ms)} | "
+        f"{_display(report.speed.candidate.llm_latency_p95_ms)} |  |",
+        "",
+        "## 阶段耗时",
+        "",
+        "| 运行 | 阶段 | 有效样本/全部样本 | 均值(ms) | P50(ms) | P95(ms) |",
+        "|---|---|---:|---:|---:|---:|",
+        *[
+            f"| {label} | {name} | {metrics.phase_sample_counts[name]}/{metrics.sample_count} | "
+            f"{_display(metrics.phase_ms[name])} | {_display(metrics.phase_p50_ms[name])} | "
+            f"{_display(metrics.phase_p95_ms[name])} |"
+            for label, metrics in (("基线", report.speed.baseline), ("候选", report.speed.candidate))
+            for name in _PHASE_FIELDS
+        ],
+        "",
+        "成功率仅覆盖输入样本，done 计为自动成功，review_required 单列；缺失或非终态状态时不可用。",
+        "阶段可能并行或相互包含，不应累加为总耗时；本报告不自动证明全链路或质量达标。",
         "",
         "## 质量",
         "",

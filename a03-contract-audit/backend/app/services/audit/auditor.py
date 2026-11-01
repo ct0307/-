@@ -24,12 +24,15 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
+from queue import Queue
 from typing import TYPE_CHECKING, Callable
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.llm.factory import get_llm_adapter
 from app.services.audit.workflow import AuditBudget, BudgetAdapter, directed_review, group_risks, runtime_identity
+from app.services.audit.review_context import ReviewContext
+from app.services.audit.privacy import AuditPrivacyAdapter
 from app.services.audit.evidence_validation import (
     SUPPORT_VALIDATOR_VERSION,
     verify_support,
@@ -66,6 +69,7 @@ from app.services.audit.review_pipeline import (
     ReviewWindow,
     WindowReviewer,
     WindowReviewRequest,
+    WindowReviewStage,
     enrichment_candidate_id,
 )
 from app.services.audit.secondary_review import (
@@ -126,7 +130,11 @@ def audit_contract(
     knowledge_revision = current_knowledge_revision(db) if db is not None else 0
     identity = runtime_identity(contract_text, knowledge_revision=knowledge_revision)
     budget = AuditBudget(max_calls=settings.AUDIT_MAX_MODEL_CALLS, max_tokens=settings.AUDIT_MAX_TOKEN_BUDGET)
-    adapter_factory = lambda: BudgetAdapter(get_llm_adapter(), budget)
+    def adapter_factory():
+        adapter = BudgetAdapter(get_llm_adapter(), budget)
+        if settings.MODEL_PROCESSING_MODE == 'external_model':
+            adapter = AuditPrivacyAdapter(adapter, context=contract_text, elements=elements)
+        return adapter
     payment_schedule = analyze_payment_schedule(contract_text)
     shared_context: dict = {
         "elements": elements,
@@ -156,14 +164,21 @@ def audit_contract(
     planned_units = len(active_roles) * len(top_level_windows)
     completed_units = 0
 
+    last_progress_report: tuple[int, WindowReviewStage] | None = None
+
+    def report_review_stage(stage: WindowReviewStage) -> None:
+        nonlocal last_progress_report
+        progress = 15 + (60 * completed_units // planned_units) if planned_units else 15
+        report = (progress, stage)
+        if progress_callback is not None and report != last_progress_report:
+            progress_callback(progress, stage)
+            last_progress_report = report
+
     def report_window_complete() -> None:
         nonlocal completed_units
         completed_units += 1
-        if progress_callback is not None and planned_units:
-            progress_callback(
-                15 + (60 * completed_units // planned_units),
-                "reviewing",
-            )
+        if planned_units:
+            report_review_stage("reviewing")
 
     for role in _AGENT_ORDER:
         if role not in active_roles:
@@ -181,11 +196,13 @@ def audit_contract(
             deadline=deadline,
             clock=clock,
             window_completed_callback=report_window_complete,
+            stage_callback=report_review_stage,
             legal_as_of=legal_as_of,
             adapter_factory=adapter_factory,
             run_fingerprint=identity['fingerprint'],
         )
 
+    report_review_stage("reviewing")
     first_pass_bundle = first_pass(run_first_pass, roles=active_roles)
     first_pass_results = dict(first_pass_bundle.items())
     for role, result in first_pass_bundle.items():
@@ -411,8 +428,9 @@ def _review_window_requests(
     max_workers: int | None = None,
     clock: Callable[[], float] = time.monotonic,
     window_completed_callback: Callable[[], None] | None = None,
+    stage_callback: Callable[[WindowReviewStage], None] | None = None,
 ) -> list[AgentReviewResult]:
-    """并行计算独立窗口，并在调用线程按原顺序发布数据库结果。"""
+    """工作线程仅计算和投递事件，调度线程发布阶段与结果；结果保持原顺序。"""
     if not requests:
         return []
     adapter_factory = adapter_factory or get_llm_adapter
@@ -423,41 +441,53 @@ def _review_window_requests(
     if workers < 1:
         raise ValueError("max_workers 必须为正整数")
 
-    cached: dict[int, AgentReviewResult] = {}
+    results_by_index: dict[int, AgentReviewResult] = {}
     pending: list[tuple[int, WindowReviewRequest]] = []
     for index, request in enumerate(requests):
         existing = checkpoint.load_valid(request)
         if existing is None:
             pending.append((index, request))
         else:
-            cached[index] = existing
+            results_by_index[index] = existing
+            if existing.complete and window_completed_callback is not None:
+                window_completed_callback()
+
+    events: Queue[Future[BufferedWindowExecution] | WindowReviewStage] = Queue()
 
     def execute(request: WindowReviewRequest) -> BufferedWindowExecution:
         buffer = BufferedWindowCheckpoint()
         result = WindowReviewer(
-            adapter_factory(), checkpoint=buffer, clock=clock
+            adapter_factory(), checkpoint=buffer, clock=clock,
+            stage_callback=events.put if stage_callback is not None else None,
         ).review(request)
         return buffer.execution(result)
 
-    futures: dict[int, Future[BufferedWindowExecution]] = {}
+    futures: dict[Future[BufferedWindowExecution], tuple[int, WindowReviewRequest]] = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
         for index, request in pending:
-            futures[index] = executor.submit(execute, request)
+            future = executor.submit(execute, request)
+            futures[future] = (index, request)
+            future.add_done_callback(events.put)
 
-        ordered: list[AgentReviewResult] = []
-        for index, request in enumerate(requests):
-            if index in cached:
-                result = cached[index]
-            else:
-                execution = futures[index].result()
-                flush = getattr(checkpoint, "flush_execution", None)
-                if flush is not None:
-                    flush(request, execution)
-                result = execution.result
+        last_stage: WindowReviewStage | None = None
+        while futures:
+            notification = events.get()
+            if isinstance(notification, str):
+                if stage_callback is not None and notification != last_stage:
+                    stage_callback(notification)
+                    last_stage = notification
+                continue
+            future = notification
+            index, request = futures.pop(future)
+            execution = future.result()
+            flush = getattr(checkpoint, "flush_execution", None)
+            if flush is not None:
+                flush(request, execution)
+            result = execution.result
+            results_by_index[index] = result
             if result.complete and window_completed_callback is not None:
                 window_completed_callback()
-            ordered.append(result)
-    return ordered
+    return [results_by_index[index] for index in range(len(requests))]
 
 
 def _agent_audit(
@@ -475,6 +505,7 @@ def _agent_audit(
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
     window_completed_callback: Callable[[], None] | None = None,
+    stage_callback: Callable[[WindowReviewStage], None] | None = None,
     legal_as_of: date | None = None,
     adapter_factory: Callable | None = None,
     run_fingerprint: str = '',
@@ -516,6 +547,7 @@ def _agent_audit(
         profile, focus=focus, dimension_instruction=dimension_instruction,
     )
     enrichment_system_prompt = build_enrichment_system_prompt(profile)
+    review_context = ReviewContext(contract_text)
 
     deterministic_facts = json.dumps(
         {"payment_schedule": shared_context.get("payment_schedule", {})},
@@ -527,6 +559,8 @@ def _agent_audit(
     ) -> str:
         window = review_window.window
         return (
+            review_context.render(window.text)
+            +
             f"<knowledge>\n{basis_block}\n</knowledge>\n"
             f"【确定性合同事实】\n{deterministic_facts}\n"
             f"【合同基本信息】\n合同类型：{contract_type or '未指定'}\n"
@@ -561,6 +595,8 @@ def _agent_audit(
             for finding in accepted
         ]
         return (
+            review_context.render(window.text)
+            +
             f"<knowledge>\n{basis_block}\n</knowledge>\n"
             f"【确定性合同事实】\n{deterministic_facts}\n"
             f"【合同基本信息】\n合同类型：{contract_type or '未指定'}\n"
@@ -588,6 +624,8 @@ def _agent_audit(
             "reason 和 suggestion 每个字段不超过300字。"
         )
         return (
+            review_context.render(window.text)
+            +
             f"<knowledge>\n{basis_block}\n</knowledge>\n"
             f"【合同类型】{contract_type or '未指定'}\n"
             f"【审查窗口】\n<contract>\n{window.text}\n</contract>\n"
@@ -617,6 +655,8 @@ def _agent_audit(
             for finding in findings
         ]
         return (
+            review_context.render(window.text)
+            +
             f"<knowledge>\n{basis_block}\n</knowledge>\n"
             f"【合同类型】{contract_type or '未指定'}\n"
             f"【审查窗口】\n<contract>\n{window.text}\n</contract>\n"
@@ -657,6 +697,7 @@ def _agent_audit(
         max_workers=settings.AUDIT_MODEL_CONCURRENCY,
         clock=clock,
         window_completed_callback=window_completed_callback,
+        stage_callback=stage_callback,
     )
     normalized: list[dict] = []
     issues: list[ReviewIssue] = []
@@ -917,7 +958,12 @@ def _ground_risks(
         # sources without an applicability field retain the historical default;
         # explicit unknown/expired applicability remains unresolved.
         v3_sources = selected_sources
-        validation = verify_support(risk, v3_sources)
+        validation = verify_support(
+            risk,
+            v3_sources,
+            mode=settings.EVIDENCE_VALIDATION_MODE,
+            contract_text=contract_text,
+        )
         supporting_sources = [
             relation["source"] for relation in validation.evidence_relations
             if relation["relation"] == "supporting"
@@ -934,6 +980,17 @@ def _ground_risks(
         risk["support_validator_version"] = validation.version
         risk["support_validation_failed_stage"] = validation.failed_stage
         risk["support_validation_reason_code"] = validation.reason_code
+        risk["support_validation_mode"] = validation.mode
+        trace = dict(risk.get("decision_trace") or {})
+        trace["evidence_validation"] = {
+            "mode": validation.mode,
+            "version": validation.version,
+            "failed_stage": validation.failed_stage,
+            "reason_code": validation.reason_code,
+            "rule_id": validation.rule_id,
+            "rule_version": validation.rule_version,
+        }
+        risk["decision_trace"] = trace
         if (
             supporting_sources
             and applicability_status == "applicable"

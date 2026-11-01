@@ -4,6 +4,13 @@ import pytest
 from evaluation import runtime_client
 
 
+@pytest.fixture(autouse=True)
+def authorize_synthetic_endpoint(monkeypatch):
+    monkeypatch.setattr(runtime_client.settings, 'MODEL_PROCESSING_MODE', 'external_model')
+    monkeypatch.setattr(runtime_client.settings, 'LLM_BASE_URL', 'https://api.deepseek.com/v1')
+    monkeypatch.setattr(runtime_client.settings, 'MODEL_EXTERNAL_ALLOWED_BASE_URLS', ['https://api.deepseek.com/v1'])
+
+
 def _response(status: int, payload: dict | None = None) -> httpx.Response:
     return httpx.Response(
         status,

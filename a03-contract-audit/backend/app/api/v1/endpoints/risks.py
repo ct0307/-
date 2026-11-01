@@ -1,4 +1,6 @@
 ﻿"""风险人工复核接口。"""
+import json
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -8,6 +10,7 @@ from app.models.models import User
 from app.schemas.contract import RiskStatusUpdate
 from app.services import audit_log
 from app.services.authorized_risks import load_authorized_risk
+from app.services.audit.evidence_state import trace_object
 
 router = APIRouter()
 _VALID_STATUS = {"pending", "confirmed", "ignored", "to_modify"}
@@ -27,13 +30,22 @@ def update_risk_status(
     if payload.review_status != "pending" and not comment:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "完成人工复核必须填写意见")
     old = risk.review_status
-    risk.review_status = payload.review_status
-    audit_log.record(
-        db,
-        user_id=user.id,
-        action="update_risk",
-        target=f"risk:{risk_id}",
-        detail=f"{old} -> {payload.review_status};comment={comment}",
-    )
-    db.commit()
-    return {"risk_id": risk_id, "review_status": risk.review_status}
+    review = {"operator_id": user.id, "reviewed_at": datetime.now(timezone.utc).isoformat(),
+              "status": payload.review_status, "reason": comment}
+    try:
+        risk.review_status = payload.review_status
+        trace = trace_object(risk.decision_trace_json)
+        trace["human_review"] = review
+        risk.decision_trace_json = json.dumps(trace, ensure_ascii=False)
+        audit_log.record(
+            db,
+            user_id=user.id,
+            action="update_risk",
+            target=f"risk:{risk_id}",
+            detail=f"{old} -> {payload.review_status};comment={comment}",
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"risk_id": risk_id, "review_status": risk.review_status, "human_review": review}

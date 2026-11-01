@@ -14,6 +14,13 @@ from app.llm.adapters.local_embedding import LocalEmbeddingAdapter
 from app.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 
 
+@pytest.fixture(autouse=True)
+def authorize_synthetic_endpoint(monkeypatch):
+    from app.llm.adapters.openai_compatible import settings
+    monkeypatch.setattr(settings, 'MODEL_PROCESSING_MODE', 'external_model')
+    monkeypatch.setattr(settings, 'MODEL_EXTERNAL_ALLOWED_BASE_URLS', ['https://llm.example/v1'])
+
+
 class _Response:
     def raise_for_status(self) -> None:
         return None
@@ -29,7 +36,8 @@ class _Response:
 def test_chat_request_enforces_output_token_budget(monkeypatch):
     captured: dict = {}
 
-    def fake_post(_url, *, json, headers, timeout):
+    def fake_post(_url, *, json, headers, timeout, trust_env, follow_redirects):
+        assert trust_env is False and follow_redirects is False
         captured.update({"json": json, "headers": headers, "timeout": timeout})
         return _Response()
 
@@ -138,7 +146,7 @@ def test_network_error_does_not_expose_provider_exception(monkeypatch):
 def test_chat_options_override_budget_and_add_structured_request_fields(monkeypatch):
     captured: dict = {}
 
-    def fake_post(_url, *, json, headers, timeout):
+    def fake_post(_url, *, json, headers, timeout, **_kwargs):
         captured.update({"json": json, "headers": headers, "timeout": timeout})
         return _Response()
 
@@ -349,7 +357,7 @@ def test_local_request_value_error_is_not_mapped_to_model_unavailable(monkeypatc
 def test_empty_optional_protocol_fields_are_not_sent(monkeypatch):
     captured: dict = {}
 
-    def fake_post(_url, *, json, headers, timeout):
+    def fake_post(_url, *, json, headers, timeout, **_kwargs):
         captured.update({"json": json, "headers": headers, "timeout": timeout})
         return _Response()
 

@@ -5,7 +5,7 @@ from app.services.audit.agent_profiles import AgentProfile
 from app.services.audit.prompts.registry import get_prompt
 
 
-PROMPT_VERSION = "2.0.0"
+PROMPT_VERSION = "2.1.0"
 
 
 def build_review_system_prompt(

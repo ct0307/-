@@ -43,13 +43,14 @@ def decide_risk(
 
 
 def apply_risk_decision(risk: dict, decision: RiskDecision) -> dict:
-    """Map the pure decision to legacy publication fields."""
+    """将决策映射到发布字段，同时保留证据与人工追踪。"""
     updated = dict(risk)
     updated["decision_status"] = decision.status
     updated["decision_reason_codes"] = list(decision.reason_codes)
     updated["claim_status"] = decision.status
     updated["requires_manual_review"] = decision.status == "manual_review"
     updated["decision_trace"] = {
+        **(risk.get("decision_trace") or {}),
         "status": decision.status,
         "reason_codes": list(decision.reason_codes),
     }

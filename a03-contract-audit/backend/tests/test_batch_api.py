@@ -272,7 +272,8 @@ def test_create_batch_rejects_more_than_two_hundred_files(tmp_path):
             user=user,
         )
 
-    assert exc_info.value.status_code == 400
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail["code"] == "BATCH_TOO_LARGE"
     assert list(tmp_path.iterdir()) == []
 
 
