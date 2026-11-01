@@ -41,6 +41,19 @@ const abnormalRuleRisk = {
   applicability_reason_codes: ['missing_effective_date'],
   rule_executions: [{ rule_id: 'RULE-UNKNOWN', rule_version: 'test-v1', status: 'unexpected_status' }],
   decision_trace: { status: 'manual_review', reason_codes: ['RULE_RESULT_UNRESOLVED'] },
+  support_validation_mode: 'deterministic',
+  support_validator_version: 'support-deterministic-v1',
+  support_validation_failed_stage: 'facts',
+  support_validation_reason_code: 'DETERMINISTIC_RULE_NOT_PROVEN',
+}
+
+const verifiedRuleRisk = {
+  ...legacyRisk, id: 903, category: 'verified-finite-rule-risk',
+  support_relation_status: 'supported', support_validator_version: 'support-deterministic-v1',
+  support_validation_mode: 'deterministic', support_validation_failed_stage: 'none',
+  support_validation_reason_code: 'EVIDENCE_SUPPORTS_CLAIM', evidence_ids: ['KC-1'],
+  rag_sources: [{ source: '民法典', content: '合成法条展示样例', reliable: true, applicability_status: 'applicable' }],
+  decision_trace: { status: 'accepted', human_review: { operator_id: 7, reviewed_at: '2026-10-08T08:00:00Z', status: 'confirmed', reason: '已核对该条原文与适用条件' } },
 }
 
 test('兼容旧风险字段并展示未知适用性与异常规则状态', async ({ page }) => {
@@ -67,12 +80,12 @@ test('兼容旧风险字段并展示未知适用性与异常规则状态', async
         contract_id: 901,
         job_id: 9901,
         status: 'done',
-        risk_count: 2,
+        risk_count: 3,
         cross_checks: [],
         requires_review: false,
       }
     } else if (path.endsWith('/contracts/901/risks')) {
-      body = [legacyRisk, abnormalRuleRisk]
+      body = [legacyRisk, abnormalRuleRisk, verifiedRuleRisk]
     }
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
   })
@@ -82,6 +95,8 @@ test('兼容旧风险字段并展示未知适用性与异常规则状态', async
 
   await page.getByText('legacy-risk-without-trace', { exact: true }).click()
   const drawer = page.locator('.el-drawer').last()
+  await expect(drawer.getByText('核验不确定 · 待人工复核', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('暂无人工复核记录。人工确认独立于机器证据核验。')).toBeVisible()
   await expect(drawer.locator('section').filter({ hasText: '法规适用性' }).getByText(applicabilityMeta(undefined).label, { exact: true })).toBeVisible()
   await expect(drawer.locator('section').filter({ hasText: '规则核验' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Close this dialog' }).click()
@@ -89,10 +104,20 @@ test('兼容旧风险字段并展示未知适用性与异常规则状态', async
   await page.getByText('risk-with-abnormal-rule-status', { exact: true }).click()
   await expect(drawer.locator('section').filter({ hasText: '法规适用性' }).getByText(applicabilityMeta('unknown_as_of').label, { exact: true })).toBeVisible()
   await expect(drawer.locator('section').filter({ hasText: '规则核验' }).getByText(ruleStatusMeta('unexpected_status').label, { exact: true })).toBeVisible()
+  await expect(drawer.getByText('核验方式：有限规则核验')).toBeVisible()
+  await expect(drawer.getByText(/原因码：DETERMINISTIC_RULE_NOT_PROVEN/)).toBeVisible()
+  await page.getByRole('button', { name: 'Close this dialog' }).click()
+
+  await page.getByText('verified-finite-rule-risk', { exact: true }).click()
+  await expect(drawer.getByText('依据与原文已核验', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('已核对该条原文与适用条件', { exact: true })).toBeVisible()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await expect(drawer.getByText('已核对该条原文与适用条件', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Close this dialog' }).click()
 
   await page.goto(`${baseUrl}/collaboration`)
   await expect(page.getByText('决策：人工复核', { exact: true })).toBeVisible()
 
-  await page.setViewportSize({ width: 390, height: 844 })
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })

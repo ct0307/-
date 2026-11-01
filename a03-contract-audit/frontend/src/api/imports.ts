@@ -1,5 +1,10 @@
 import client from './client'
 import type { ContractQualityFields } from './types'
+import { parseUploadLimits, type UploadLimits } from '@/config/upload-limits'
+
+export async function getImportLimits(): Promise<UploadLimits> {
+  return parseUploadLimits(await client.get<unknown>('/imports/limits'))
+}
 
 export type ImportItemStatus =
   | 'queued'

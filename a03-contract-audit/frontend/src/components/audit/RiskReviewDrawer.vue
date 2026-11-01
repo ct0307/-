@@ -1,12 +1,13 @@
 <script setup lang="ts">
 // 风险复核抽屉：命中原文 / 依据 / 建议 + 底部操作 + AI 追问对话。
-// 追问上下文绑定当前风险条款，历史在抽屉内保留，关闭/切换风险自动清空。
+// 每次独立解释当前风险；显示记录在关闭/切换风险后清空。
 import { computed, ref, watch, nextTick } from 'vue'
 import { ChatDotRound, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { RiskOut } from '@/api/types'
-import { chatWithRisk, type ChatMessage } from '@/api/chat'
-import { evidenceMeta } from '@/utils/risk-evidence'
+import { chatWithRisk } from '@/api/chat'
+import { useRiskChat } from '@/composables/useRiskChat'
+import { relationEvidenceMeta, riskEvidenceMeta, validationModeLabel } from '@/utils/risk-evidence'
 import { applicabilityMeta, ruleStatusMeta } from '@/utils/audit-trace'
 
 const props = defineProps<{
@@ -31,36 +32,20 @@ const levelMeta: Record<string, { label: string; type: 'danger' | 'warning' | 'i
 }
 
 // —— 追问对话 ——
-const messages = ref<ChatMessage[]>([])
-const userInput = ref('')
-const chatLoading = ref(false)
+const { messages, userInput, chatLoading, sendMessage: send } = useRiskChat(
+  () => props.risk, () => props.modelValue, chatWithRisk,
+  () => ElMessage.error('AI 暂时不可用，请稍后重试'),
+)
 const chatListRef = ref<HTMLElement | null>(null)
 
-// 风险切换时清空对话历史
-watch(() => props.risk?.id, () => {
-  messages.value = []
-  userInput.value = ''
-})
+// 消息变化后滚动到最新回答。
+watch(() => messages.value.length, scrollToBottom)
 
 async function sendMessage() {
-  const text = userInput.value.trim()
-  if (!text || !props.risk || chatLoading.value) return
-
-  messages.value.push({ role: 'user', content: text })
-  userInput.value = ''
-  chatLoading.value = true
+  const pending = send()
   scrollToBottom()
-
-  try {
-    const res = await chatWithRisk(props.risk, text, messages.value.slice(0, -1))
-    messages.value.push({ role: 'assistant', content: res.reply })
-  } catch {
-    ElMessage.error('AI 暂时不可用，请稍后重试')
-    messages.value.pop() // 移除刚推入的用户消息，避免假历史
-  } finally {
-    chatLoading.value = false
-    scrollToBottom()
-  }
+  await pending
+  scrollToBottom()
 }
 
 function scrollToBottom() {
@@ -86,16 +71,16 @@ function onEnter(e: KeyboardEvent) {
       <div class="rd-head">
         <el-tag :type="levelMeta[risk.level].type" size="small">{{ levelMeta[risk.level].label }}</el-tag>
         <span class="rd-cat">{{ risk.category }}</span>
-        <span class="rd-confidence mono">{{ evidenceMeta(risk.evidence_status).label }}</span>
+        <span class="rd-confidence mono">{{ riskEvidenceMeta(risk).label }}</span>
       </div>
 
       <section v-if="risk.retrieval_attempts?.some(a => a.evidence_relations?.length)" class="rd-block evidence-step candidate-evidence">
         <span class="step-index mono">03A</span>
         <div class="step-content">
-          <h4>候选资料（未核验）</h4>
-          <p class="rd-validation-note">以下内容仅表示检索命中，未通过支持关系核验，不能直接作为正式依据。</p>
+          <h4>检索候选与核验记录</h4>
+          <p class="rd-validation-note">检索命中需逐条核验。只有通过当前验证规则的资料可作为已核验依据，其余资料需人工复核。</p>
           <div v-for="(relation, i) in (risk.retrieval_attempts?.flatMap(a => a.evidence_relations || []) || []).slice(0, 8)" :key="i" class="rag-source-card">
-            <div class="rag-source-head"><span class="rag-tag">{{ relation.source?.source || '候选来源' }} · {{ relation.source?.evidence_id || relation.source?.chunk_id || relation.source?.id || '未编号' }}</span><el-tag size="small" type="warning">{{ relation.status || 'unclear' }}</el-tag></div>
+            <div class="rag-source-head"><span class="rag-tag">{{ relation.source?.source || '候选来源' }} · {{ relation.source?.evidence_id || relation.source?.chunk_id || relation.source?.id || '未编号' }}</span><el-tag size="small" :type="relationEvidenceMeta(relation, risk).type">{{ relationEvidenceMeta(relation, risk).label }}</el-tag></div>
             <p v-if="relation.source?.content" class="rag-content">{{ relation.source.content }}</p>
             <p class="rag-content">{{ relation.reason || '尚未完成支持关系核验' }}</p>
           </div>
@@ -116,6 +101,10 @@ function onEnter(e: KeyboardEvent) {
           <p class="rd-text">{{ risk.basis }}</p>
           <p v-if="risk.support_validation_reason" class="rd-validation-note">
             支持关系校验：{{ risk.support_validation_reason }}（{{ risk.support_validator_version }}）
+          </p>
+          <p class="rd-validation-note">核验方式：{{ validationModeLabel(risk.support_validation_mode) }}</p>
+          <p v-if="risk.support_validation_reason_code" class="rd-validation-note">
+            核验阶段：{{ risk.support_validation_failed_stage || '未记录' }} · 原因码：{{ risk.support_validation_reason_code }}
           </p>
         </div>
       </section>
@@ -187,12 +176,24 @@ function onEnter(e: KeyboardEvent) {
         class="rd-disclaimer"
       />
 
+      <section class="rd-block evidence-step human-review">
+        <span class="step-index mono">07</span>
+        <div class="step-content">
+          <h4>人工复核记录</h4>
+          <template v-if="risk.decision_trace?.human_review">
+            <p class="rd-text">操作人ID {{ risk.decision_trace.human_review.operator_id }} · {{ risk.decision_trace.human_review.reviewed_at }}</p>
+            <p class="rd-text">{{ risk.decision_trace.human_review.reason || '已重置为待复核' }}</p>
+          </template>
+          <p v-else class="rd-validation-note">暂无人工复核记录。人工确认独立于机器证据核验。</p>
+        </div>
+      </section>
+
       <!-- 追问区域 -->
       <div class="chat-section">
         <div class="chat-header">
           <el-icon><ChatDotRound /></el-icon>
           <span>向 AI 追问</span>
-          <span class="chat-hint">基于上方条款上下文作答</span>
+          <span class="chat-hint">每次独立解释当前风险，不记忆前文</span>
         </div>
 
         <!-- 消息列表 -->
@@ -200,9 +201,8 @@ function onEnter(e: KeyboardEvent) {
           <div v-if="messages.length === 0" class="chat-empty">
             <p>可以就这条风险向 AI 追问，例如：</p>
             <ul>
-              <li>「这个违约上限在行业里正常吗？」</li>
-              <li>「我方有哪些谈判空间？」</li>
-              <li>「类似条款的常见改写方式是什么？」</li>
+              <li>「请解释这条风险对应的已核验依据。」</li>
+              <li>「这些资料有哪些无法判断的事项？」</li>
             </ul>
           </div>
           <template v-else>
@@ -213,7 +213,11 @@ function onEnter(e: KeyboardEvent) {
               :class="m.role"
             >
               <span class="msg-role">{{ m.role === 'user' ? '你' : 'AI' }}</span>
-              <p class="msg-text">{{ m.content }}</p>
+              <div class="msg-body">
+                <p class="msg-text">{{ m.content }}</p>
+                <p v-if="m.state && m.state !== 'ANSWERED'" class="rd-validation-note">需人工复核，未形成可采纳结论</p>
+                <p v-if="m.references?.length" class="rd-validation-note">引用资料：{{ m.references.map(r => r.evidence_id).join('、') }}（引用编号校验不代表法律结论正确）</p>
+              </div>
             </div>
             <div v-if="chatLoading" class="chat-msg assistant loading">
               <span class="msg-role">AI</span>
@@ -228,6 +232,7 @@ function onEnter(e: KeyboardEvent) {
             v-model="userInput"
             type="textarea"
             :rows="2"
+            :maxlength="1000"
             placeholder="输入问题，Enter 发送，Shift+Enter 换行"
             :disabled="chatLoading"
             resize="none"
@@ -458,6 +463,11 @@ function onEnter(e: KeyboardEvent) {
   color: var(--ivory);
   white-space: pre-wrap;
   word-break: break-word;
+}
+.msg-body {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
 }
 .user .msg-text {
   text-align: right;

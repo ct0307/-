@@ -72,6 +72,15 @@ test('batch item displays each persisted progress stage with the backend percent
   })
 })
 
+test('discovery and enrichment change the real stage without inventing completed work', () => {
+  expect(batchItemProgressDisplay(15, 'discovering')).toEqual({
+    label: '正在发现风险', percentage: 15, indeterminate: false,
+  })
+  expect(batchItemProgressDisplay(15, 'enriching')).toEqual({
+    label: '正在补充理由与建议', percentage: 15, indeterminate: false,
+  })
+})
+
 test('review-required completion describes processing state without claiming audit completion', () => {
   expect(batchItemProgressDisplay(100, 'completed', 'review_required')).toEqual({
     label: '处理完成，待人工复核',

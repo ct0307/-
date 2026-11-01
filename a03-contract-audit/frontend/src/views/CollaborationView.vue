@@ -14,7 +14,7 @@ import {
   type TierKey,
 } from '@/mock/collaboration'
 import type { RiskOut } from '@/api/types'
-import { evidenceMeta } from '@/utils/risk-evidence'
+import { riskEvidenceMeta, isEvidenceVerified } from '@/utils/risk-evidence'
 import { decisionMeta } from '@/utils/audit-trace'
 import { finalizeWorkflow, getWorkflow, type WorkflowView } from '@/api/workflow'
 
@@ -80,10 +80,7 @@ function risksOf(agent: AgentKey) {
 function statsOf(agent: AgentKey) {
   const list = risksOf(agent)
   const high = list.filter((r) => r.level === 'high').length
-  const supported = list.filter((r) =>
-    'evidence_status' in r && r.evidence_status === 'supported'
-    && 'original_text_verified' in r && r.original_text_verified === true,
-  ).length
+  const supported = list.filter(isEvidenceVerified).length
   return { count: list.length, high, supported }
 }
 
@@ -92,10 +89,7 @@ const overview = computed(() => {
   const total = risks.value.length
   const high = risks.value.filter((r) => r.level === 'high').length
   const confirmed = risks.value.filter((r) => r.review_status === 'confirmed').length
-  const supported = risks.value.filter((r) =>
-    'evidence_status' in r && r.evidence_status === 'supported'
-    && 'original_text_verified' in r && r.original_text_verified === true,
-  ).length
+  const supported = risks.value.filter(isEvidenceVerified).length
   return { total, high, confirmed, supported }
 })
 
@@ -149,8 +143,7 @@ function tierOf(r: RiskOut): TierKey {
   if (r.level === 'high' || sensitive) return 'red'
   if (
     r.level === 'low'
-    && 'evidence_status' in r && r.evidence_status === 'supported'
-    && 'original_text_verified' in r && r.original_text_verified === true
+    && isEvidenceVerified(r)
   ) return 'green'
   return 'yellow'
 }
@@ -354,7 +347,7 @@ function goAudit() {
           <ul v-if="t.items.length" class="tier-items">
             <li v-for="r in t.items" :key="r.id">
               <span class="ti-cat">{{ r.category }}</span>
-              <span class="ti-conf mono">{{ evidenceMeta('evidence_status' in r ? r.evidence_status : null).label }}</span>
+              <span class="ti-conf mono">{{ riskEvidenceMeta(r).label }}</span>
             </li>
             <li v-if="t.meta.key === 'red' && conflictCount" class="ti-extra">
               + {{ conflictCount }} 项跨 Agent 冲突
@@ -433,7 +426,7 @@ function goAudit() {
             <p class="risk-line">{{ r.suggestion }}</p>
             <div class="risk-foot">
               <span class="basis mono">{{ r.basis }}</span>
-              <span class="conf mono">{{ evidenceMeta('evidence_status' in r ? r.evidence_status : null).label }}</span>
+              <span class="conf mono">{{ riskEvidenceMeta(r).label }}</span>
               <span class="trace mono">决策：{{ decisionMeta(r.decision_trace?.status).label }}</span>
             </div>
           </article>

@@ -6,6 +6,7 @@ import { ArrowRight, RefreshRight, View, WarningFilled } from '@element-plus/ico
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getLookups } from '@/api/admin'
+import { getAuditStatus } from '@/api/contract'
 
 import type { RiskOut } from '@/api/types'
 import type { Handoff } from '@/api/handoffs'
@@ -26,13 +27,25 @@ import {
   type AuditUiState,
 } from '@/utils/audit-progress'
 import { formatOcrConfidence, reviewStatusLabel } from '@/utils/ocr-quality'
-import { evidenceMeta } from '@/utils/risk-evidence'
+import { riskEvidenceMeta, isEvidenceVerified } from '@/utils/risk-evidence'
 
 const session = useAuditSessionStore()
 const rectify = useRectifyStore()
 const notify = useNotifyStore()
 const auth = useAuthStore()
 const batchStore = useBatchStore()
+const auditSetup = ref<HTMLElement | null>(null)
+const auditResults = ref<HTMLElement | null>(null)
+
+async function focusAuditSection(target: 'setup' | 'results') {
+  await nextTick()
+  const element = target === 'setup' ? auditSetup.value : auditResults.value
+  element?.focus({ preventScroll: true })
+  element?.scrollIntoView({
+    behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+    block: 'start',
+  })
+}
 const inbox = useImportInboxStore()
 const route = useRoute()
 const router = useRouter()
@@ -78,6 +91,7 @@ onMounted(async () => {
 })
 
 onMounted(async () => {
+  if (route.query.contractId && !session.hasActiveAudit) return
   if (!session.hasActiveAudit) {
     try { await session.restoreCompletedAudit() }
     catch { ElMessage.error('上次审查结果恢复失败，请从审查历史重新选择') }
@@ -137,6 +151,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  session.cancelCompletedAuditLoad()
   inbox.stopPolling()
   batchStore.stopPolling()
 })
@@ -216,6 +231,7 @@ async function auditReadyItems() {
     )
     await router.replace({ query: { ...route.query, batch: String(created.id) } })
     ElMessage.success(`已提交 ${created.total} 份合同`)
+    await focusAuditSection('results')
     await inbox.startPolling()
   } catch {
     ElMessage.error(batchStore.error || '审查批次提交失败')
@@ -318,6 +334,7 @@ async function retryAuditBatch() {
       dimensions.value.filter((item) => item.on).map((item) => item.key),
     )
     ElMessage.success(`已重新提交 ${result?.retried ?? 0} 个失败项`)
+    await focusAuditSection('results')
     await inbox.startPolling()
   } catch {
     ElMessage.error(batchStore.error || '失败项重试失败')
@@ -386,6 +403,42 @@ const sortedRisks = computed(() => {
 // —— 复核抽屉 ——
 const drawerOpen = ref(false)
 const annotationOpen = ref(false)
+const selectedContext = ref<{ id: number; filename: string; message: string } | null>(null)
+
+watch(() => [route.query.contractId, route.query.jobId] as const, async ([rawId, rawJobId], _, onCleanup) => {
+  const id = Number(rawId)
+  if (!Number.isInteger(id) || id <= 0) { selectedContext.value = null; return }
+  if (session.busy || session.hasActiveAudit) {
+    ElMessage.warning('请先完成当前审查任务，再切换合同')
+    return
+  }
+  const request = new AbortController()
+  onCleanup(() => {
+    request.abort()
+    session.cancelCompletedAuditLoad()
+  })
+  const filename = typeof route.query.filename === 'string' ? route.query.filename : `合同 ${id}`
+  selectedContext.value = { id, filename, message: '正在读取所选合同的审查状态…' }
+  session.reset()
+  session.contractId = id
+  session.filename = filename
+  const requestedJob = Number(rawJobId)
+  try {
+    const result = await getAuditStatus(id, Number.isInteger(requestedJob) && requestedJob > 0 ? requestedJob : undefined, request.signal)
+    if (request.signal.aborted) return
+    if (result.job_id && ['done', 'review_required'].includes(result.status)) {
+      await session.loadCompletedAudit(id, filename, result.job_id)
+      if (!request.signal.aborted) selectedContext.value = null
+    } else if (result.batch_id) {
+      await router.replace({ path: '/audit', query: { batch: String(result.batch_id) } })
+    } else {
+      selectedContext.value = { id, filename, message: '该合同尚无完整审查结果，可先核对原文。' }
+    }
+  } catch (error) {
+    if (!request.signal.aborted) selectedContext.value = { id, filename,
+      message: error instanceof Error ? `状态读取失败：${error.message}` : '状态读取失败，请从历史记录重试。' }
+  }
+}, { immediate: true })
 const activeRisk = ref<RiskOut | null>(null)
 function openReview(risk: RiskOut) {
   activeRisk.value = risk
@@ -454,32 +507,38 @@ const onboardSteps = [
 
 <template>
   <div class="audit-page">
-    <HandoffQueue @review="reviewHandoff" />
-    <ContractInbox
-      :items="inbox.batch?.items ?? []"
-      :contract-types="contractTypeOptions"
-      :departments="availableDepartments"
-      :selected-ids="inbox.selectedIds"
-      :ready-ids="inbox.readyIds"
-      :all-ready-selected="inbox.allReadySelected"
-      :some-ready-selected="inbox.someReadySelected"
-      :can-change-department="canChangeDepartment"
-      :can-review="['legal', 'finance', 'admin'].includes(auth.role)"
-      :loading="inbox.loading || batchStore.loading"
-      @upload="uploadFiles"
-      @confirm="confirmImportItem"
-      @retry="retryImportItem"
-      @remove-record="removeImportRecord"
-      @delete-draft="deleteImportDraft"
-      @toggle-selected="inbox.toggleSelected"
-      @toggle-all-ready="inbox.toggleAllReady"
-      @audit-ready="auditReadyItems"
-    />
+    <section ref="auditSetup" class="audit-setup" tabindex="-1" aria-label="审查设置">
+      <ContractInbox
+        :items="inbox.batch?.items ?? []"
+        :contract-types="contractTypeOptions"
+        :departments="availableDepartments"
+        :selected-ids="inbox.selectedIds"
+        :ready-ids="inbox.readyIds"
+        :all-ready-selected="inbox.allReadySelected"
+        :some-ready-selected="inbox.someReadySelected"
+        :can-change-department="canChangeDepartment"
+        :can-review="['legal', 'finance', 'admin'].includes(auth.role)"
+        :loading="inbox.loading || batchStore.loading"
+        @upload="uploadFiles"
+        @confirm="confirmImportItem"
+        @retry="retryImportItem"
+        @remove-record="removeImportRecord"
+        @delete-draft="deleteImportDraft"
+        @toggle-selected="inbox.toggleSelected"
+        @toggle-all-ready="inbox.toggleAllReady"
+        @audit-ready="auditReadyItems"
+      />
+    </section>
 
     <!-- 既有单份审查结果继续保留，历史会话恢复后仍可复核和生成整改。 -->
-    <div class="right-stack">
+    <section ref="auditResults" class="right-stack" tabindex="-1" aria-label="智能审查结果">
       <el-card shadow="never" class="result-panel">
-        <template #header><span class="panel-title">智能审查结果</span></template>
+        <template #header>
+          <div class="result-panel-header">
+            <span class="panel-title">智能审查结果</span>
+            <el-button v-if="batchStore.batch" text @click="focusAuditSection('setup')">返回审查设置</el-button>
+          </div>
+        </template>
         <section
           v-if="batchStore.batch"
           class="batch-result"
@@ -503,9 +562,16 @@ const onboardSteps = [
             :percentage="batchStore.progress"
             :status="batchProgressStatus"
           />
-          <p class="batch-summary mono">
+          <p class="batch-summary mono" role="status" aria-live="polite">
             已处理 {{ batchStore.batch.completed }} / {{ batchStore.batch.total }}，失败 {{ batchStore.batch.failed }}
           </p>
+          <p v-if="['queued', 'running'].includes(batchStore.batch.status)" class="batch-feedback">
+            任务已提交，进度将自动更新。可以离开页面，稍后返回查看。
+          </p>
+          <p v-else-if="batchStore.batch.failed > 0" class="batch-feedback">
+            失败合同尚未完成有效审查，请按下方原因处理后重新提交。
+          </p>
+          <p v-else class="batch-feedback">请选择下方合同查看结果，并核对需人工复核的内容。</p>
           <div class="batch-result-items">
             <div
               v-for="item in batchStore.batch.items"
@@ -571,7 +637,7 @@ const onboardSteps = [
           </div>
         </section>
         <!-- 3 步引导：未上传 / 已上传未审查时显示，代替纯文字空状态 -->
-        <div v-if="session.step < 2" class="onboard">
+        <div v-if="session.step < 2 && !batchStore.batch" class="onboard">
           <div
             v-for="(step, i) in onboardSteps"
             :key="step.num"
@@ -587,13 +653,13 @@ const onboardSteps = [
           </div>
         </div>
 
-        <template v-else>
+        <template v-if="session.step >= 2">
           <div class="result-head" data-audit-detail>
             <div>
               <span class="eyebrow mono">当前查看</span>
               <h2>{{ session.filename }}</h2>
             </div>
-            <el-button :icon="'Document'" @click="annotationOpen = true">查看合同全文批注</el-button>
+            <el-button v-if="['legal', 'finance', 'admin'].includes(auth.role)" :icon="'Document'" @click="annotationOpen = true">查看合同原文与批注</el-button>
           </div>
 
           <div v-if="session.requiresReview" class="ocr-review-alert" role="alert">
@@ -630,7 +696,7 @@ const onboardSteps = [
                 <el-empty
                   v-if="session.risks.length === 0"
                   :image-size="72"
-                  description="该合同未检出风险"
+                  :description="session.requiresReview ? '审查结果不完整，暂不能据此判断合同无风险' : '该合同未检出风险'"
                 />
                 <article
                   v-for="r in sortedRisks"
@@ -642,6 +708,11 @@ const onboardSteps = [
                     { 'dim-focus': _isDimFocused(r) }
                   ]"
                   @click="openReview(r)"
+                  role="button"
+                  tabindex="0"
+                  :aria-label="`复核风险：${r.category}`"
+                  @keydown.enter.prevent="openReview(r)"
+                  @keydown.space.prevent="openReview(r)"
                 >
                   <div class="risk-head">
                     <el-tag :type="levelMeta[r.level].type" size="small">{{ levelMeta[r.level].label }}风险</el-tag>
@@ -649,10 +720,10 @@ const onboardSteps = [
                     <el-tag size="small" effect="plain" class="status-tag">{{ statusLabel[r.review_status] }}</el-tag>
                   </div>
                   <p class="risk-line">{{ r.suggestion }}</p>
-                  <div class="risk-evidence" :class="{ 'is-missing': r.evidence_status !== 'supported' }">
+                  <div class="risk-evidence" :class="{ 'is-missing': !isEvidenceVerified(r) }">
                     <span class="evidence-dot" />
                     <span>
-                      {{ evidenceMeta(r.evidence_status).label }}
+                      {{ riskEvidenceMeta(r).label }}
                       <template v-if="r.rag_sources?.length">· {{ r.rag_sources.length }} 条来源</template>
                     </span>
                   </div>
@@ -676,7 +747,13 @@ const onboardSteps = [
           </div>
         </template>
       </el-card>
-    </div>
+    </section>
+
+    <section v-if="selectedContext" class="selected-context" role="region" aria-label="所选合同">
+      <div><strong>{{ selectedContext.filename }}</strong><p>{{ selectedContext.message }}</p></div>
+      <el-button v-if="['legal', 'finance', 'admin'].includes(auth.role)" @click="annotationOpen = true">查看所选合同原文</el-button>
+    </section>
+    <HandoffQueue @review="reviewHandoff" />
 
     <RiskReviewDrawer
       v-model="drawerOpen"
@@ -684,12 +761,15 @@ const onboardSteps = [
       @confirm="confirmRisk"
       @ignore="ignoreRisk"
     />
-    <AnnotationModal v-model="annotationOpen" :risks="session.risks" :filename="session.filename" />
+    <AnnotationModal v-model="annotationOpen" :risks="session.risks" :filename="session.filename" :contract-id="session.contractId" />
 
   </div>
 </template>
 
 <style scoped>
+.selected-context { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 16px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--ink-2); }
+.selected-context p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.risk-card:focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; }
 .audit-page {
   display: flex;
   flex-direction: column;
@@ -714,8 +794,12 @@ const onboardSteps = [
   min-width: 0;
 }
 .result-panel {
-  min-height: calc(100vh - 124px);
+  min-height: 0;
 }
+.audit-setup, .right-stack { scroll-margin-top: 20px; }
+.audit-setup:focus-visible, .right-stack:focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; }
+.result-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.batch-feedback { color: var(--muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .batch-result {
   margin: -4px 0 20px;
   padding: 14px 0 18px;

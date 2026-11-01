@@ -5,6 +5,8 @@ import type { RiskOut } from './types'
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+  state?: string
+  references?: { evidence_id: string; kind: string }[]
 }
 
 export interface ChatRequest {
@@ -22,7 +24,6 @@ export interface ChatResponse {
 export async function chatWithRisk(
   risk: Pick<RiskOut, 'id'>,
   message: string,
-  _history: ChatMessage[],
 ): Promise<ChatResponse> {
   return client.post('/chat', {
     risk_id: risk.id,

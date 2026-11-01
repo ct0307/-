@@ -115,6 +115,9 @@ async function prepare(page: Page, itemStatus: ItemStatus, options: PrepareOptio
     if (path.endsWith('/runtime/status')) {
       return fulfillJson(route, { status: 'online', checked_at: '2026-09-13T10:00:00Z' })
     }
+    if (path.endsWith('/imports/limits') && method === 'GET') {
+      return fulfillJson(route, { max_file_mb: 50, max_batch_files: 200, max_batch_mb: 500 })
+    }
     if (path.includes('/admin/lookups/')) return fulfillJson(route, [])
     if (path.endsWith('/handoffs') && method === 'GET') {
       return fulfillJson(route, { state: 'NO_DATA', items: [] })

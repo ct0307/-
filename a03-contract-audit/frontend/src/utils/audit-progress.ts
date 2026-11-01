@@ -35,6 +35,8 @@ const BATCH_ITEM_PROGRESS_LABELS: Record<AuditProgressStage, string> = {
   claimed: '已领取任务',
   parsing: '正在解析',
   reviewing: '正在审查',
+  discovering: '正在发现风险',
+  enriching: '正在补充理由与建议',
   verifying: '正在校验',
   persisting: '正在保存',
   completed: '审查完成',

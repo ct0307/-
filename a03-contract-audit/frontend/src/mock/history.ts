@@ -5,9 +5,11 @@ export interface HistoryRow {
   type: string
   submitter: string
   time: string
-  level: '高风险' | '中风险' | '低风险'
+  level: '高风险' | '中风险' | '低风险' | '尚无法判断' | '未发现风险'
   riskCount: number
-  status: '合规' | '待整改' | '已整改' | '待人工复核' | '解析失败' | '未审查' | '审查中' | '审查失败'
+  status: '合规' | '待整改' | '已整改' | '待人工复核' | '解析失败' | '未审查' | '审查中' | '审查失败' | '未发现风险'
+  assessmentComplete?: boolean
+  coverage?: { planned: number; completed: number } | null
 }
 
 export const HISTORY_ROWS: HistoryRow[] = [

@@ -41,6 +41,8 @@ export interface PaymentAnalysis {
   issues: { kind: string; message: string; quotes: string[]; clause_ids: string[] }[]
 }
 
+import type { DecisionTrace } from '@/utils/risk-evidence'
+
 export interface ReportRisk {
   id: number
   contract_id: number
@@ -56,8 +58,14 @@ export interface ReportRisk {
   original_text_verified: boolean | null
   review_status: string
   contract_evidence: { clause_id?: string; match_type?: string; anchors?: { page?: number; page_number?: number }[] }[]
-  rag_sources: { source?: string; title?: string; content?: string; quote?: string }[]
+  rag_sources: { source?: string; title?: string; content?: string; quote?: string; reliable?: boolean; applicability_status?: string }[]
   support_validation_reason?: string
+  support_relation_status?: string
+  support_validator_version?: string
+  support_validation_mode?: string
+  support_validation_failed_stage?: string
+  support_validation_reason_code?: string
+  evidence_ids?: string[]
   applicability_status?: string
   applicability_reason_codes?: string[]
   rule_executions?: Array<{
@@ -66,10 +74,7 @@ export interface ReportRisk {
     status?: string
     reason?: string
   }>
-  decision_trace?: {
-    status?: string
-    reason_codes?: string[]
-  }
+  decision_trace?: DecisionTrace
 }
 
 export interface ReportSnapshot {

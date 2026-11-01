@@ -1,6 +1,6 @@
 // 合同相关接口封装
 import client from './client'
-import type { AuditResult, ContractOut, LoginResult, ParseResult, RiskOut } from './types'
+import type { AuditResult, ContractDocument, ContractOut, LoginResult, ParseResult, RiskOut } from './types'
 
 export const PARSE_TIMEOUT_MS = 150_000
 
@@ -32,6 +32,10 @@ export function parseContract(id: number): Promise<ParseResult> {
   return client.post(`/contracts/${id}/parse`, undefined, { timeout: PARSE_TIMEOUT_MS })
 }
 
+export function getContractDocument(id: number, signal?: AbortSignal): Promise<ContractDocument> {
+  return client.get(`/contracts/${id}/document`, { signal })
+}
+
 export function auditContract(
   id: number,
   contractType: string,
@@ -58,9 +62,10 @@ export function getAuditStatus(
   })
 }
 
-export function getRisks(id: number, jobId?: number): Promise<RiskOut[]> {
+export function getRisks(id: number, jobId?: number, signal?: AbortSignal): Promise<RiskOut[]> {
   return client.get(`/contracts/${id}/risks`, {
     params: jobId ? { job_id: jobId } : undefined,
+    signal,
   })
 }
 
@@ -79,6 +84,6 @@ export function batchUploadContracts(files: File[], contractType = ''): Promise<
   return client.post('/contracts/batch-upload', fd, { params, timeout: 300_000 })
 }
 
-export function updateRiskStatus(riskId: number, riskStatus: RiskOut['review_status'], reviewComment = ''): Promise<unknown> {
+export function updateRiskStatus(riskId: number, riskStatus: RiskOut['review_status'], reviewComment = ''): Promise<{ risk_id: number; review_status: RiskOut['review_status']; human_review?: import('@/utils/risk-evidence').HumanReview }> {
   return client.patch(`/risks/${riskId}/status`, { review_status: riskStatus, review_comment: reviewComment })
 }

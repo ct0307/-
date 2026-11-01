@@ -51,7 +51,7 @@ test('交接列表区分空数据、无授权和加载失败并可重试', async
     ? route.fulfill({ status: 500, json: { detail: '测试故障' } })
     : route.fulfill({ json: malformed ? {} : { state, items: [] } }))
   await page.goto('/audit')
-  await expect(page.getByText('暂无可交接合同，请先上传并确认类型')).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: '暂无待交接合同。上传并确认后，可在此提交或接收。' })).toBeVisible()
   state = 'NO_AUTH_SCOPE'
   await page.getByRole('button', { name: '刷新交接列表' }).click()
   await expect(page.getByText('暂无授权部门，请联系管理员配置')).toBeVisible()

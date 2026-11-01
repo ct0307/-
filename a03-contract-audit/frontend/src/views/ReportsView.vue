@@ -9,6 +9,7 @@ import RiskDonut from '@/components/charts/RiskDonut.vue'
 import DeptBar from '@/components/charts/DeptBar.vue'
 import TopRiskBar from '@/components/charts/TopRiskBar.vue'
 import { applicabilityMeta, decisionMeta, ruleStatusMeta } from '@/utils/audit-trace'
+import { riskEvidenceMeta, validationModeLabel } from '@/utils/risk-evidence'
 
 const router = useRouter()
 const session = useAuditSessionStore()
@@ -44,7 +45,6 @@ function drilldown(ids: number[]) {
   pickerOpen.value = true
   if (ids.length > 200) ElMessage.info('已选择前 200 份，请通过部门和时间继续缩小范围')
 }
-const evidenceNames: Record<string, string> = { supported: '依据支持', partially_supported: '部分支持', unsupported: '缺少支持', contradicted: '依据矛盾', unclear: '待核实' }
 const types = computed(() => [...new Set(contracts.value.map(c => c.contract_type).filter(Boolean))])
 const departments = computed(() => [...new Set(contracts.value.map(c => c.department).filter(Boolean))])
 const filtered = computed(() => contracts.value.filter(c =>
@@ -313,7 +313,18 @@ onBeforeUnmount(() => {
         <div class="section-heading"><h3>R{{ risk.id }} · {{ risk.category }}</h3><el-tag :type="risk.level === 'high' ? 'danger' : 'warning'">{{ levelNames[risk.level] || risk.level }}</el-tag></div>
         <p class="muted">{{ risk.filename }} · {{ risk.agent === 'finance' ? '财务会计' : risk.agent === 'legal' ? '法务专家' : '规则校验' }}</p>
         <p>{{ location(risk) }}</p><blockquote>{{ risk.original_text }}</blockquote>
-        <dl><dt>风险原因</dt><dd>{{ risk.risk_reason || '未提供' }}</dd><dt>依据</dt><dd>{{ risk.basis || '未提供' }}</dd><dt>核验状态</dt><dd>{{ evidenceNames[risk.evidence_status || 'unclear'] || '待核实' }} · 原文{{ risk.original_text_verified ? '已核验' : '未核验' }}</dd><dt>法规适用性</dt><dd><el-tag size="small" :type="applicabilityMeta(risk.applicability_status).type">{{ applicabilityMeta(risk.applicability_status).label }}</el-tag><span v-if="risk.applicability_reason_codes?.length"> · {{ risk.applicability_reason_codes.join('、') }}</span></dd><dt>规则核验</dt><dd><template v-if="risk.rule_executions?.length"><span v-for="(rule, index) in risk.rule_executions" :key="index"><el-tag size="small" :type="ruleStatusMeta(rule.status).type">{{ ruleStatusMeta(rule.status).label }}</el-tag><span v-if="rule.rule_id"> {{ rule.rule_id }}</span><span v-if="index < risk.rule_executions.length - 1">；</span></span></template><span v-else>待核验</span></dd><dt>决策结果</dt><dd><el-tag size="small" :type="decisionMeta(risk.decision_trace?.status).type">{{ decisionMeta(risk.decision_trace?.status).label }}</el-tag><span v-if="risk.decision_trace?.reason_codes?.length"> · {{ risk.decision_trace.reason_codes.join('、') }}</span></dd><dt>检索来源</dt><dd><p v-for="(source, index) in risk.rag_sources" :key="index">{{ source.source || source.title || '来源待核实' }}：{{ source.content || source.quote || '正文待核实' }}</p><span v-if="!risk.rag_sources.length">尚无可回读的检索来源</span></dd><dt>修改建议</dt><dd>{{ risk.suggestion }}</dd></dl>
+        <dl>
+          <dt>风险原因</dt><dd>{{ risk.risk_reason || '未提供' }}</dd>
+          <dt>依据</dt><dd>{{ risk.basis || '未提供' }}</dd>
+          <dt>核验状态</dt><dd>{{ riskEvidenceMeta(risk).label }} · 原文{{ risk.original_text_verified ? '已核验' : '未核验' }}</dd>
+          <dt>核验记录</dt><dd>{{ validationModeLabel(risk.support_validation_mode) }} · {{ risk.support_validator_version || '版本未记录' }} · {{ risk.support_validation_failed_stage || '阶段未记录' }} · {{ risk.support_validation_reason_code || '原因码未记录' }}</dd>
+          <dt>人工复核记录</dt><dd v-if="risk.decision_trace?.human_review">操作人ID {{ risk.decision_trace.human_review.operator_id }} · {{ risk.decision_trace.human_review.reviewed_at }}<p>{{ risk.decision_trace.human_review.reason || '已重置为待复核' }}</p></dd><dd v-else>暂无人工复核记录，人工确认独立于机器证据核验。</dd>
+          <dt>法规适用性</dt><dd><el-tag size="small" :type="applicabilityMeta(risk.applicability_status).type">{{ applicabilityMeta(risk.applicability_status).label }}</el-tag><span v-if="risk.applicability_reason_codes?.length"> · {{ risk.applicability_reason_codes.join('、') }}</span></dd>
+          <dt>规则核验</dt><dd><template v-if="risk.rule_executions?.length"><span v-for="(rule, index) in risk.rule_executions" :key="index"><el-tag size="small" :type="ruleStatusMeta(rule.status).type">{{ ruleStatusMeta(rule.status).label }}</el-tag><span v-if="rule.rule_id"> {{ rule.rule_id }}</span><span v-if="index < risk.rule_executions.length - 1">；</span></span></template><span v-else>待核验</span></dd>
+          <dt>决策结果</dt><dd><el-tag size="small" :type="decisionMeta(risk.decision_trace?.status).type">{{ decisionMeta(risk.decision_trace?.status).label }}</el-tag><span v-if="risk.decision_trace?.reason_codes?.length"> · {{ risk.decision_trace.reason_codes.join('、') }}</span></dd>
+          <dt>检索来源</dt><dd><p v-for="(source, index) in risk.rag_sources" :key="index">{{ source.source || source.title || '来源待核实' }}：{{ source.content || source.quote || '正文待核实' }}</p><span v-if="!risk.rag_sources.length">尚无可回读的检索来源</span></dd>
+          <dt>修改建议</dt><dd>{{ risk.suggestion }}</dd>
+        </dl>
       </article>
     </el-drawer>
   </div>

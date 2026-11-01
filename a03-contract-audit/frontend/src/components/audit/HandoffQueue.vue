@@ -40,9 +40,9 @@ onMounted(load)
 <template>
   <el-card class="handoff-queue" shadow="never" v-loading="loading">
     <template #header><div class="queue-heading"><strong>合同交接</strong><el-button size="small" @click="load">刷新交接列表</el-button></div></template>
-    <p class="hint">业务提交后，由已获该部门授权的法务接收。接收不改变合同解析和审查结果；管理员可配置法务部门范围。</p>
+    <p v-if="rows.length" class="hint">业务提交后，由已获该部门授权的法务接收。接收不改变合同解析和审查结果。</p>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
-    <el-empty v-else-if="!rows.length && !loading" :description="state === 'NO_AUTH_SCOPE' ? '暂无授权部门，请联系管理员配置' : '暂无可交接合同，请先上传并确认类型'" />
+    <p v-else-if="!rows.length && !loading" class="queue-empty" role="status">{{ state === 'NO_AUTH_SCOPE' ? '暂无授权部门，请联系管理员配置' : '暂无待交接合同。上传并确认后，可在此提交或接收。' }}</p>
     <template v-else>
       <el-input v-model="keyword" placeholder="搜索交接合同" clearable aria-label="搜索交接合同" />
       <div class="queue-rows">
@@ -68,4 +68,5 @@ onMounted(load)
 .queue-row b { overflow-wrap:anywhere; }
 .queue-row p,.hint { color:var(--muted); font-size:12px; line-height:1.6; }
 .queue-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.queue-empty { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
 </style>
