@@ -60,7 +60,9 @@ def test_rectification_create_rejects_foreign_risk(data):
 
 def test_rectification_create_uses_server_labels(data):
     db, user, risks = data
-    result = rectifications.create_rectification(RectificationCreate(contract="伪造", risk="伪造", risk_id=risks[0].id), db, user)
+    result = rectifications.create_rectification(RectificationCreate(contract="伪造", risk="伪造", risk_id=risks[0].id,
+        owner="legal", due="2027-01-01", note="补齐验收条款", acceptance_criteria="核对签章材料",
+        contract_stage="unsigned", handling_method="revision"), db, user)
     assert result.contract == "采购.txt"
     assert result.risk == "付款风险"
 

@@ -309,6 +309,24 @@ class ContractTemplateCreate(BaseModel):
     clauses: list[str] = Field(default_factory=list)
 
 
+class RectificationEvidence(BaseModel):
+    contract_id: int
+    filename: str
+    content_sha256: str | None = None
+    description: str
+
+
+class RectificationEventOut(BaseModel):
+    id: int
+    action: str
+    actor_id: int
+    actor: str
+    occurred_at: datetime
+    from_status: str | None = None
+    to_status: str
+    snapshot: dict = Field(default_factory=dict)
+
+
 class RectificationOut(BaseModel):
     """整改项输出：id 序列化成前端约定的 RC001 形态字符串。"""
     id: str
@@ -325,10 +343,37 @@ class RectificationOut(BaseModel):
     review_comment: str = ""
     submitted_at: datetime | None = None
     closed_at: datetime | None = None
+    contract_id: int | None = None
+    department: str = ""
+    before_text: str = ""
+    original_text_verified: bool | None = None
+    acceptance_criteria: str = ""
+    contract_stage: str = "unknown"
+    handling_method: str = ""
+    collaborators: list[str] = Field(default_factory=list)
+    evidence: list[RectificationEvidence] = Field(default_factory=list)
+    after_text: str = ""
+    submitted_by: int | None = None
+    reviewed_by: int | None = None
+    reviewed_at: datetime | None = None
+    acceptance_reason: str = ""
+    residual_risk: str = ""
+    accepted_at: datetime | None = None
+    escalation_reason: str = ""
+    escalated_at: datetime | None = None
+    escalated_by: int | None = None
+    version: int = 1
+    events: list[RectificationEventOut] = Field(default_factory=list)
+    can_manage: bool = False
+    can_execute: bool = False
+    can_review: bool = False
+    can_accept: bool = False
+    can_escalate: bool = False
+    can_reopen: bool = False
 
     @classmethod
     def from_orm_row(cls, row) -> "RectificationOut":
-        return cls(
+        result = cls(
             id=f"RC{row.id:03d}",
             contract=row.contract,
             risk=row.risk,
@@ -344,12 +389,20 @@ class RectificationOut(BaseModel):
             submitted_at=row.submitted_at,
             closed_at=row.closed_at,
         )
+        for name in ("acceptance_criteria", "contract_stage", "handling_method", "after_text", "submitted_by", "reviewed_by", "reviewed_at", "acceptance_reason", "residual_risk", "accepted_at", "escalation_reason", "escalated_at", "escalated_by", "version"):
+            value = getattr(row, name, None)
+            if value is not None:
+                setattr(result, name, value)
+        result.collaborators = json.loads(getattr(row, "collaborators_json", "[]") or "[]")
+        result.evidence = [RectificationEvidence(**item) for item in json.loads(getattr(row, "evidence_json", "[]") or "[]")]
+        return result
 
 
 class RectificationCreate(BaseModel):
-    """新建整改项：AuditView 复核确认风险时生成。due 省略则默认创建日 +7 天。"""
-    contract: str
-    risk: str
+    """先验证来源权限，再由服务校验必填计划，避免越权信息泄露。"""
+    model_config = ConfigDict(extra="forbid")
+    contract: str = ""
+    risk: str = ""
     level: str = "medium"
     owner: str = ""
     status: str = "待处理"
@@ -357,6 +410,28 @@ class RectificationCreate(BaseModel):
     due: str | None = None
     note: str = ""
     risk_id: int | None = None
+    acceptance_criteria: str = ""
+    contract_stage: str = "unknown"
+    handling_method: str = ""
+    collaborators: list[str] = Field(default_factory=list)
+
+
+class RectificationPlanUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int | None = None
+    owner: str | None = None
+    due: str | None = None
+    note: str | None = None
+    acceptance_criteria: str | None = None
+    contract_stage: str | None = None
+    handling_method: str | None = None
+    collaborators: list[str] | None = None
+
+
+class RectificationEscalate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int | None = None
+    reason: str
 
 
 class LLMCallLogOut(BaseModel):
@@ -407,9 +482,15 @@ class AuditLogRowOut(BaseModel):
 
 
 class RectificationStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     status: str  # 待处理/处理中/待复核/已闭环
+    version: int | None = None
     resolution: str | None = None
     review_comment: str | None = None
+    evidence_contract_ids: list[int] | None = None
+    after_text: str | None = None
+    acceptance_reason: str | None = None
+    residual_risk: str | None = None
 
 
 class HistoryRow(BaseModel):

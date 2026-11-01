@@ -5,6 +5,7 @@ from docx.shared import Cm, Pt, RGBColor
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from .decision_brief import decision_brief, contract_facts, excerpt, value_text, validation_text, human_review_text
+from .rectification_details import rectification_details
 
 
 def export_decision_docx(snapshot):
@@ -168,6 +169,10 @@ def export_decision_docx(snapshot):
         table(["风险 / 任务", "责任人", "截止日", "实际状态"], [
             [f"R{t['risk_id']} / {t['id']}", value_text(t.get("owner"),"待分派"), value_text(t.get("due"),"待约定"), value_text(t.get("status"))] for t in snapshot["rectifications"]
         ],[5.2,4,4,4.2])
+        for task in snapshot["rectifications"]:
+            doc.add_heading(f"整改 {task['id']} · {value_text(task.get('status'))}", 2)
+            for label, content in rectification_details(task):
+                paragraph(label, content)
     else:
         doc.add_paragraph("尚未建立关联整改任务。请专业人员确认风险后，在系统分派责任人、约定期限并留存复核记录。")
     paragraph("待分派", f"{brief['unassigned']}条未忽略风险尚无完整责任分派。具体风险编号见Excel“审批重点”。")

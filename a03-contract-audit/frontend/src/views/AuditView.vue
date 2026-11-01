@@ -20,6 +20,8 @@ import { useImportInboxStore } from '@/stores/import-inbox'
 import ContractInbox from '@/components/audit/ContractInbox.vue'
 import HandoffQueue from '@/components/audit/HandoffQueue.vue'
 import RiskReviewDrawer from '@/components/audit/RiskReviewDrawer.vue'
+import RectificationPlanDialog from '@/components/rectify/RectificationPlanDialog.vue'
+import type { RectificationPlan } from '@/mock/rectify'
 import AnnotationModal from '@/components/audit/AnnotationModal.vue'
 import {
   auditProgressDisplay,
@@ -441,6 +443,11 @@ watch(() => [route.query.contractId, route.query.jobId] as const, async ([rawId,
   }
 }, { immediate: true })
 const activeRisk = ref<RiskOut | null>(null)
+const planRisk = ref<RiskOut | null>(null)
+const planOpen = ref(false)
+const planSaving = ref(false)
+const planError = ref('')
+const planInitial = ref<Partial<RectificationPlan>>({})
 function openReview(risk: RiskOut) {
   activeRisk.value = risk
   drawerOpen.value = true
@@ -448,19 +455,44 @@ function openReview(risk: RiskOut) {
 
 async function confirmRisk(risk: RiskOut) {
   try {
-    const { value: comment } = await ElMessageBox.prompt('请记录确认该风险的依据、处置判断或复核范围', '填写人工复核意见', {
-      inputType: 'textarea', inputPlaceholder: '至少说明你核对了什么以及为何确认', inputValidator: value => !!value?.trim() || '复核意见不能为空',
-      confirmButtonText: '提交确认', cancelButtonText: '取消',
-    })
-    await session.setRiskStatus(risk, 'confirmed', comment)
-    // 跨模块联动：生成整改项 + 推通知
-    await rectify.addFromRisk(risk, session.filename || '当前合同', auth.username)
-    notify.push('rectify', '生成整改项', `已就"${risk.category}"生成整改项，进入整改跟踪。`)
-    ElMessage.success('已确认并生成整改项')
+    if (risk.review_status !== 'confirmed') {
+      const { value: comment } = await ElMessageBox.prompt('请记录确认该风险的依据、处置判断或复核范围', '填写人工复核意见', {
+        inputType: 'textarea', inputPlaceholder: '至少说明你核对了什么以及为何确认', inputValidator: value => !!value?.trim() || '复核意见不能为空',
+        confirmButtonText: '提交确认', cancelButtonText: '取消',
+      })
+      await session.setRiskStatus(risk, 'confirmed', comment)
+    }
+    await rectify.load(true)
+    if (rectify.items.some(item => item.risk_id === risk.id)) {
+      ElMessage.info('风险已确认，已有整改任务，可在整改跟踪中查看。')
+      drawerOpen.value = false
+      return
+    }
+    if (planRisk.value?.id !== risk.id) planInitial.value = { note: risk.suggestion, contract_stage: 'unknown', handling_method: 'revision' }
+    planRisk.value = risk
+    planError.value = ''
     drawerOpen.value = false
+    planOpen.value = true
   } catch (error) {
-    if (error !== 'cancel' && error !== 'close') ElMessage.error('操作失败')
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '风险确认失败，请重试')
   }
+}
+
+async function createPlan(plan: RectificationPlan) {
+  const risk = planRisk.value
+  if (!risk || planSaving.value) return
+  planSaving.value = true
+  planError.value = ''
+  planInitial.value = { ...plan, collaborators: [...plan.collaborators] }
+  try {
+    await rectify.addFromRisk(risk, session.filename || '当前合同', plan)
+    notify.push('rectify', '生成整改项', `已就“${risk.category}”生成整改任务，责任人：${plan.owner}。`)
+    ElMessage.success('整改任务已生成')
+    planOpen.value = false
+    planRisk.value = null
+  } catch (error) {
+    planError.value = `风险已确认，但整改任务未生成：${error instanceof Error ? error.message : '创建失败，请重试'}。表单已保留，可重试。`
+  } finally { planSaving.value = false }
 }
 
 async function ignoreRisk(risk: RiskOut) {
@@ -502,7 +534,7 @@ const elementLabels: Record<string, string> = {
 const onboardSteps = [
   { num: '1', title: '上传合同', desc: '支持 PDF / Word / TXT，文件存入当前部署环境' },
   { num: '2', title: '确认信息', desc: '逐份核对合同类型与归属部门' },
-  { num: '3', title: '人工复核 / 生成整改', desc: '确认风险条款，自动生成整改跟踪项' },
+  { num: '3', title: '人工复核 / 生成整改', desc: '确认风险条款，明确计划后生成整改任务' },
 ]
 </script>
 
@@ -762,6 +794,8 @@ const onboardSteps = [
     </section>
     <HandoffQueue @review="reviewHandoff" />
 
+    <el-alert v-if="planRisk && !planOpen" type="warning" :closable="false" title="风险已确认，整改任务尚未生成。"><el-button link type="primary" @click="planOpen = true">继续填写整改计划</el-button></el-alert>
+    <RectificationPlanDialog v-model="planOpen" :risk-id="planRisk?.id ?? null" :initial="planInitial" :saving="planSaving" :error="planError" confirmed @save="createPlan" />
     <RiskReviewDrawer
       v-model="drawerOpen"
       :risk="activeRisk"

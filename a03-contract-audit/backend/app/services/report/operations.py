@@ -15,7 +15,7 @@ def operational_summary(snapshot: dict, *, today: date | None = None) -> dict:
                             "contract_ids": [c["id"] for c in rows], "high_risk_contract_ids": high_ids})
     overdue, unknown_due = [], 0
     for task in snapshot["rectifications"]:
-        if task["status"] == "已闭环":
+        if task["status"] in {"已闭环", "已接受风险"}:
             continue
         try:
             due = date.fromisoformat(task["due"])
@@ -24,7 +24,12 @@ def operational_summary(snapshot: dict, *, today: date | None = None) -> dict:
             continue
         if due < today:
             overdue.append({**task, "overdue_days": (today - due).days})
-    return {"metric_version": "operations-v1", "as_of_date": today.isoformat(),
+    accepted = [task for task in snapshot["rectifications"] if task["status"] == "已接受风险"]
+    return {"metric_version": "operations-v2", "as_of_date": today.isoformat(),
+            "closed_rectification_count": sum(task["status"] == "已闭环" for task in snapshot["rectifications"]),
+            "accepted_risk_count": len(accepted), "accepted_risk_actions": accepted,
+            "risk_acceptance_pending_count": sum(task["status"] == "待风险接受" for task in snapshot["rectifications"]),
+            "risk_acceptance_note": "风险接受属于授权处置，剩余风险仍保留，不计作整改消除。",
             "high_risk_contracts": sum(c["risk_high"] > 0 for c in contracts),
             "pending_risk_count": sum(r["review_status"] in {"pending", "to_modify"} for r in risks),
             "overdue_count": len(overdue), "unknown_due_count": unknown_due,

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile,
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import allowed_departments, get_current_user, require_roles
+from app.api.deps import allowed_departments, get_current_user, require_roles, require_department_access
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_db
@@ -382,7 +382,10 @@ def upload_contract(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    department: str = "",
 ) -> Contract:
+    target_department = department.strip() or user.department
+    require_department_access(user, target_department)
     filename = os.path.basename(file.filename or "unknown")
     ext = os.path.splitext(filename)[1].lower()
     if ext not in _ALLOWED_EXT:
@@ -407,8 +410,8 @@ def upload_contract(
         Contract.upload_idempotency_key == key,
     ).first()
     if existing:
-        if existing.deleted_at is None and existing.content_sha256 != content_sha256:
-            raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键与文件内容不一致")
+        if existing.deleted_at is None and (existing.content_sha256 != content_sha256 or existing.department != target_department):
+            raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键与文件内容或归属部门不一致")
         if existing.deleted_at is None:
             return existing
 
@@ -440,7 +443,7 @@ def upload_contract(
             filename=filename,
             storage_path=stored_path,
             contract_type=contract_type,
-            department=user.department,
+            department=target_department,
             status="uploaded",
             uploaded_by=user.id,
             upload_idempotency_key=key,
@@ -465,7 +468,7 @@ def upload_contract(
             Contract.uploaded_by == user.id,
             Contract.upload_idempotency_key == key,
         ).first()
-        if duplicate and duplicate.content_sha256 == content_sha256:
+        if duplicate and duplicate.content_sha256 == content_sha256 and duplicate.department == target_department:
             return duplicate
         raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键冲突") from exc
     except HTTPException:

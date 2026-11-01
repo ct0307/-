@@ -27,4 +27,7 @@ def test_overview_explains_scope_and_preserves_snapshot(total, unreviewed, risks
     assert f'共{risks}条风险记录' in text
     assert ws['E40'].hyperlink.target == "#'风险详情'!A1"
     assert not ws._charts  # 无全零空图或“系列1”默认标签。
-    assert len(wb.sheetnames) == 10
+    assert wb.sheetnames == [
+        '摘要', '审批重点', '合同清单', '风险台账', '风险详情', '证据索引',
+        '整改跟踪', '整改验收记录', '风险矩阵', '付款节点', '口径说明',
+    ]

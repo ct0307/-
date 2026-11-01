@@ -16,10 +16,11 @@ export function uploadContract(
   file: File,
   contractType: string,
   idempotencyKey: string,
+  department = '',
 ): Promise<ContractOut> {
   const fd = new FormData()
   fd.append('file', file)
-  const params = contractType ? { contract_type: contractType } : {}
+  const params = { ...(contractType ? { contract_type: contractType } : {}), ...(department ? { department } : {}) }
   // 上传接口单独设 120s 超时：大文件需经过加密存储 + 文本解析，30s 默认值不够
   return client.post('/contracts/upload', fd, {
     params,

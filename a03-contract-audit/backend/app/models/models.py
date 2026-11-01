@@ -643,4 +643,35 @@ class Rectification(Base):
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     risk_id: Mapped[int | None] = mapped_column(ForeignKey("risks.id"), nullable=True)  # 溯源风险，可空
+    acceptance_criteria: Mapped[str] = mapped_column(Text, default="", server_default="")
+    contract_stage: Mapped[str] = mapped_column(String(16), default="unknown", server_default="unknown")
+    handling_method: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    collaborators_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    after_text: Mapped[str] = mapped_column(Text, default="", server_default="")
+    submitted_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acceptance_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    residual_risk: Mapped[str] = mapped_column(Text, default="", server_default="")
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    escalation_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    escalated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    __mapper_args__ = {"version_id_col": version}
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RectificationEvent(Base):
+    """不可经 API 修改的整改操作及完整快照。"""
+    __tablename__ = "rectification_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rectification_id: Mapped[int] = mapped_column(ForeignKey("rectifications.id"), index=True)
+    action: Mapped[str] = mapped_column(String(32))
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    actor: Mapped[str] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    from_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(16))
+    snapshot_json: Mapped[str] = mapped_column(Text)

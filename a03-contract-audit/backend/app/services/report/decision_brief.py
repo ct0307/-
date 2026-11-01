@@ -76,13 +76,16 @@ def decision_brief(snapshot):
             "verification": "原文与依据已核验" if evidence_verified(risk) else "证据尚未核验完整",
             "owner": "；".join(value_text(t.get("owner"), "待分派") for t in tasks) or "待分派",
             "due": "；".join(value_text(t.get("due"), "待约定") for t in tasks) or "待约定",
-            "action_status": "；".join(value_text(t.get("status"), "待确认") for t in tasks) or "尚未建立整改任务",
+            "action_status": "；".join("已接受风险（保留剩余风险）" if t.get("status") == "已接受风险" else value_text(t.get("status"), "待确认") for t in tasks) or "尚未建立整改任务",
             "tasks": tasks})
     s = snapshot["summary"]
     pending = sum(r.get("review_status") not in {"confirmed", "ignored"} for r in risks)
     unverified = sum(not evidence_verified(r) for r in risks)
     missing = sum(any(v == "待补充" for k, v in contract_facts(c) if k in {"甲方", "乙方", "合同标的", "金额（原文）", "履行期限", "付款安排"}) for c in snapshot["contracts"])
     reasons = []
+    accepted_count = sum(task.get("status") == "已接受风险" for task in snapshot["rectifications"])
+    if accepted_count:
+        reasons.append(f"{accepted_count}项风险已经接受但仍保留剩余风险")
     for key, label in [("unreviewed", "份合同尚未审查"), ("running", "份合同仍在处理"), ("failed", "份合同审查失败")]:
         if s.get(key):
             reasons.append(f"{s[key]}{label}")
