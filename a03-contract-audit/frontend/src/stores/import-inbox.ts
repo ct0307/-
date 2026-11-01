@@ -54,6 +54,8 @@ export function createImportInboxStore(
     const lastAddedCount = ref(0)
     let pendingUpload: PendingUpload | null = null
     let timer: ReturnType<typeof setTimeout> | null = null
+    let pollingVersion = 0
+    let inboxVersion = 0
 
     const readyIds = computed(() => (
       batch.value?.items.filter((item) => item.status === 'ready').map((item) => item.id) ?? []
@@ -79,6 +81,7 @@ export function createImportInboxStore(
     })
 
     function stopPolling() {
+      pollingVersion++
       polling.value = false
       if (timer) {
         clearTimeout(timer)
@@ -107,16 +110,18 @@ export function createImportInboxStore(
       error.value = importRequests.importErrorMessage(cause)
     }
 
-    async function pollOnce(batchId = batch.value?.id): Promise<ImportBatch | null> {
+    async function pollOnce(batchId = batch.value?.id, expectedVersion = pollingVersion): Promise<ImportBatch | null> {
       if (!batchId) return null
       try {
         const next = await api.getImport(batchId)
+        if (expectedVersion !== pollingVersion) return null
         batch.value = next
         error.value = ''
         updateSelection()
         if (!hasActiveItems(next)) stopPolling()
         return next
       } catch (cause) {
+        if (expectedVersion !== pollingVersion) return null
         stopPolling()
         recordError(cause)
         throw cause
@@ -126,12 +131,16 @@ export function createImportInboxStore(
     async function startPolling(batchId = batch.value?.id) {
       if (!batchId) return
       stopPolling()
+      const expectedVersion = pollingVersion
       polling.value = true
       const tick = async () => {
         try {
-          await pollOnce(batchId)
+          await pollOnce(batchId, expectedVersion)
         } finally {
-          if (polling.value) timer = setTimeout(tick, 1500)
+          if (polling.value && expectedVersion === pollingVersion) timer = setTimeout(() => {
+            // pollOnce 已记录错误并停止轮询；首次调用仍向调用者报告失败。
+            void tick().catch(() => {})
+          }, 1500)
         }
       }
       await tick()
@@ -143,6 +152,8 @@ export function createImportInboxStore(
         error.value = message
         throw new Error(message)
       }
+      const expectedVersion = ++inboxVersion
+      stopPolling()
       loading.value = true
       error.value = ''
       const currentBatch = batch.value
@@ -156,6 +167,7 @@ export function createImportInboxStore(
         const next = currentBatch
           ? await api.appendImport(currentBatch.id, files, actionKey)
           : await api.createImport(files, department, actionKey)
+        if (expectedVersion !== inboxVersion) return next
         const previousIds = new Set(currentBatch?.items.map((item) => item.id) ?? [])
         lastAddedCount.value = next.items.filter((item) => !previousIds.has(item.id)).length
         batch.value = next
@@ -166,19 +178,20 @@ export function createImportInboxStore(
         if (hasActiveItems(next)) await startPolling(next.id)
         return next
       } catch (cause) {
-        recordError(cause)
+        if (expectedVersion === inboxVersion) recordError(cause)
         throw cause
       } finally {
-        loading.value = false
+        if (expectedVersion === inboxVersion) loading.value = false
       }
     }
 
     async function resume(batchId: number) {
+      const expectedVersion = ++inboxVersion
       loading.value = true
       try {
         return await startPolling(batchId)
       } finally {
-        loading.value = false
+        if (expectedVersion === inboxVersion) loading.value = false
       }
     }
 
@@ -239,6 +252,7 @@ export function createImportInboxStore(
     }
 
     function reset() {
+      inboxVersion++
       stopPolling()
       batch.value = null
       selectedIds.value = []

@@ -409,10 +409,11 @@ def apply_secondary_decisions(
             continue
         risk["secondary_review_status"] = outcome.status
         risk["secondary_review_reason"] = outcome.reason
+        # 保留二次复核 API 的历史发布语义；最终审查编排会再次执行硬门禁。
         if outcome.status == "confirmed":
             risk["claim_status"] = "accepted"
             risk["requires_manual_review"] = False
-        if outcome.status in {"conflict", "manual_required"}:
+        elif outcome.status in {"conflict", "manual_required"}:
             risk["claim_status"] = "manual_review"
             risk["requires_manual_review"] = True
         if outcome.status == "conflict":

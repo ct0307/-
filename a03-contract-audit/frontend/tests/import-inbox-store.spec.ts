@@ -75,6 +75,60 @@ function api(overrides: Partial<ImportApi> = {}): ImportApi {
 
 test.beforeEach(() => setActivePinia(createPinia()))
 
+test('重置后旧轮询结果不得恢复已清空的批次', async () => {
+  let resolve!: (batch: ImportBatch) => void
+  const store = createImportInboxStore(api({
+    getImport: () => new Promise<ImportBatch>((done) => { resolve = done }),
+  }))()
+  const pending = store.resume(12)
+  store.reset()
+  resolve(batchFixture)
+  await pending
+  expect(store.batch).toBeNull()
+  expect(store.polling).toBe(false)
+})
+
+test('旧批次失败不得停止新批次轮询或覆盖错误状态', async () => {
+  let reject!: (reason: Error) => void
+  const store = createImportInboxStore(api({
+    getImport: (id) => id === 12
+      ? new Promise<ImportBatch>((_done, fail) => { reject = fail })
+      : Promise.resolve({ ...batchFixture, id, items: [{ ...readyItem, status: 'parsing' }] }),
+  }))()
+  const old = store.resume(12)
+  await store.resume(13)
+  reject(new Error('旧请求失败'))
+  await old.catch(() => {})
+  expect(store.batch?.id).toBe(13)
+  expect(store.error).toBe('')
+  expect(store.polling).toBe(true)
+  store.stopPolling()
+})
+
+test('新批次已恢复时，旧批次成功响应不得覆盖它', async () => {
+  let resolve!: (batch: ImportBatch) => void
+  const store = createImportInboxStore(api({ getImport: (id) => id === 12
+    ? new Promise<ImportBatch>((done) => { resolve = done })
+    : Promise.resolve({ ...batchFixture, id }),
+  }))()
+  const old = store.resume(12)
+  await store.resume(13)
+  resolve(batchFixture)
+  await old
+  expect(store.batch?.id).toBe(13)
+})
+
+test('重置后未完成的上传不得恢复批次', async () => {
+  let resolve!: (batch: ImportBatch) => void
+  const store = createImportInboxStore(api({ createImport: () => new Promise<ImportBatch>((done) => { resolve = done }) }))()
+  const pending = store.create([])
+  store.reset()
+  resolve(batchFixture)
+  await pending
+  expect(store.batch).toBeNull()
+  expect(store.lastAddedCount).toBe(0)
+})
+
 test('uses server error actions and conservative retry fallbacks', () => {
   expect(importErrorMeta({
     ...failedItem,

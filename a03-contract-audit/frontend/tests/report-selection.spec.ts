@@ -12,7 +12,7 @@ function snapshot(ids: number[]) {
   return {
     report_id: `snapshot-${ids.join('-')}`, generated_at: '2026-09-17T09:00:00Z', contract_ids: ids, contracts: rows,
     summary: { total: ids.length, completed: ids.length, review_required: 0, failed: 0, unreviewed: 0, running: 0, risks: ids.length, high: ids.length, medium: 0, low: 0, supported: 0 },
-    risks: rows.map(c => ({ id: c.id, contract_id: c.id, filename: c.filename, category: '付款风险', level: 'high', original_text: '验收前支付全部尾款', risk_reason: '付款先于验收', basis: '依据待复核', suggestion: '增加验收条件', evidence_status: 'unclear', original_text_verified: false, contract_evidence: [], rag_sources: [], agent: 'finance', review_status: 'pending' })),
+    risks: rows.map(c => ({ id: c.id, contract_id: c.id, filename: c.filename, category: '付款风险', level: 'high', original_text: '验收前支付全部尾款', risk_reason: '付款先于验收', basis: '依据待复核', suggestion: '增加验收条件', evidence_status: 'unclear', original_text_verified: false, contract_evidence: [], rag_sources: [], agent: 'finance', review_status: 'pending', applicability_status: 'unknown_as_of', rule_executions: [{ rule_id: 'PAY-001', status: 'hit' }], decision_trace: { status: 'manual_review', reason_codes: ['RULE_RESULT_UNRESOLVED'] } })),
     matrix: { categories: ['付款风险'], rows: rows.map(c => ({ contract_id: c.id, filename: c.filename, counts: [1] })) }, rectifications: [], notes: ['无高风险不等于合规'],
   }
 }
@@ -59,6 +59,11 @@ test('默认显示全量看板，勾选单合同自动联动且导出一致，�
   expect(url.searchParams.get('report_id')).toBe('snapshot-1')
   await page.getByRole('button', { name: '查看证据' }).first().click()
   await expect(page.getByText('验收前支付全部尾款', { exact: true })).toBeVisible()
+  await expect(page.getByText('法规适用性', { exact: true })).toBeVisible()
+  await expect(page.getByText('待核验', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('规则核验', { exact: true })).toBeVisible()
+  await expect(page.getByText('决策结果', { exact: true })).toBeVisible()
+  await expect(page.getByText('人工复核', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Close this dialog' }).click()
   await page.getByRole('button', { name: '查看协作' }).first().click()
   await expect(page.getByText('真实审查会话', { exact: true })).toBeVisible()

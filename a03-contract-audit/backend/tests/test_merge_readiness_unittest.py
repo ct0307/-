@@ -345,7 +345,7 @@ class MergeReadinessTests(unittest.TestCase):
         finally:
             engine.dispose()
 
-    def test_finishing_last_pending_risk_completes_manual_review(self):
+    def test_finishing_last_pending_risk_preserves_parse_quality_review(self):
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)
         try:
@@ -390,7 +390,7 @@ class MergeReadinessTests(unittest.TestCase):
                 with patch("app.api.v1.endpoints.risks.audit_log.record"):
                     risks.update_risk_status(
                         risk_id,
-                        RiskStatusUpdate(review_status="confirmed"),
+                        RiskStatusUpdate(review_status="confirmed", review_comment="风险已核对，解析质量待独立复核"),
                         db=db,
                         user=user,
                     )
@@ -398,9 +398,9 @@ class MergeReadinessTests(unittest.TestCase):
                 db.expire_all()
                 saved = db.get(Contract, contract_id)
                 self.assertIsNotNone(saved)
-                self.assertFalse(saved.requires_review)
-                self.assertIsNone(saved.review_reason)
-                self.assertEqual(saved.status, "done")
+                self.assertTrue(saved.requires_review)
+                self.assertEqual(saved.review_reason, "OCR result requires review")
+                self.assertEqual(saved.status, "review_required")
         finally:
             engine.dispose()
 

@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.models import AuditBatchItem, Contract, Risk
 from app.services.audit.auditor import audit_contract
+from app.services.audit.finalization import save_workflow
 from app.services.audit.evidence_persistence import (
     build_contract_evidence,
     replace_contract_clauses,
@@ -21,6 +22,8 @@ from app.services.audit.evidence_persistence import (
 from app.services.audit.protocol import ReviewIssue
 from app.services.audit.progress import ProgressCallback
 from app.services.audit.result_quality import AuditCoverage, decide_audit_status
+from app.services.rag.applicability import resolve_legal_as_of
+from app.services.audit.failure import QUALITY_REASON_MESSAGES, audit_failure
 from app.services.parser.extractor import (
     DocumentParseResult,
     extract_document,
@@ -30,25 +33,7 @@ from app.services.parser.cache import get_cached_parse, save_parse_cache
 
 log = get_logger("audit_runner")
 
-_QUALITY_REASON_MESSAGES = {
-    "INCOMPLETE_COVERAGE": "审查覆盖不完整",
-    "OUTPUT_TRUNCATED": "模型输出被截断",
-    "INVALID_MODEL_OUTPUT": "模型输出格式无效",
-    "MODEL_TIMEOUT": "模型调用超时",
-    "MODEL_UNAVAILABLE": "模型服务不可用",
-    "MODEL_REJECTED": "模型供应商拒绝了审查请求",
-    "PAGINATION_EXHAUSTED": "模型分页审查未完成",
-    "EVIDENCE_UNRESOLVED": "风险依据尚未核验",
-    "ORIGINAL_TEXT_UNRESOLVED": "风险原文尚未核验",
-    "PARSE_QUALITY_LOW": "文档解析质量不足，需人工复核",
-    "CONTRACT_TEXT_INCOMPLETE": "合同文本不完整，需人工复核",
-    "SECONDARY_REVIEW_CONFLICT": "二次复核存在冲突",
-    "SECONDARY_REVIEW_PENDING": "二次复核尚未完成",
-    "UNBOUND_CONFLICT": "冲突项无法关联到具体风险，需人工复核",
-    "AUDIT_DEADLINE_EXCEEDED": "审查达到整体时限，需人工复核",
-    "DIMENSION_MISMATCH": "模型返回了本次范围外的风险",
-    "FACT_VALIDATION_FAILED": "候选风险的结构化事实校验失败",
-}
+_QUALITY_REASON_MESSAGES = QUALITY_REASON_MESSAGES
 
 
 class StaleAuditRun(RuntimeError):
@@ -168,7 +153,10 @@ def run_audit(
         quality_reasons = list(decision.reasons)
         review_reason = _review_reason(quality_reasons)
         if prior_requires_review:
-            reasons = [prior_review_reason, review_reason]
+            # 清理旧审查质量摘要，保留独立的要素人工复核要求。
+            prior_parts = (prior_review_reason or "").split("；")
+            prior_parts = [part for part in prior_parts if part and part not in QUALITY_REASON_MESSAGES.values()]
+            reasons = [*prior_parts, *(review_reason or "").split("；")]
             review_reason = "；".join(dict.fromkeys(reason for reason in reasons if reason)) or None
         final_requires_review = decision.requires_review or prior_requires_review
         final_status = (
@@ -257,9 +245,15 @@ def run_audit(
                 },
                 ensure_ascii=False,
             )
+            failure = audit_failure(item)
+            if failure is not None:
+                item.error = failure.message
+                item.error_code = failure.code
             item.finished_at = datetime.now(timezone.utc)
             item.lease_expires_at = None
             item.execution_token = None
+        if final_status in {'done','review_required'}:
+            save_workflow(db,publishing,batch_item_id,result.get('workflow',{}),result.get('cross_checks',[]))
         db.commit()
         persist_ms = round((time.perf_counter() - persist_started) * 1000)
         log.info(
@@ -355,6 +349,7 @@ def _compute_audit(
     text = parsed.text
     cross_checks: list[dict] = []
     risk_payloads: list[dict] = []
+    workflow = {}
     issues: list[ReviewIssue] = []
     coverage = AuditCoverage(1, 1)
     audit_timings = {
@@ -362,6 +357,8 @@ def _compute_audit(
         "finance_agent_ms": 0,
         "grounding_ms": 0,
     }
+    legal_as_of: str | None = None
+    legal_as_of_source = "unknown"
 
     if len(text) < 200:
         log.warning("audit_runner.text_too_short", contract_id=contract_id,
@@ -374,12 +371,15 @@ def _compute_audit(
     else:
         # 避免审查时重复调 LLM，同时保留 has_*/text_length 等正则信号。
         elements = extract_elements(text)  # 先跑正则（信号字段）
+        saved: dict = {}
         try:
-            saved = json.loads(elements_json)
+            decoded = json.loads(elements_json)
+            saved = decoded if isinstance(decoded, dict) else {}
             if any(saved.get(k) for k in ("party_a", "subject", "payment_terms")):
                 elements.update({k: v for k, v in saved.items() if v and isinstance(v, str)})
         except (ValueError, AttributeError):
             pass  # elements_json 损坏时静默降级
+        legal_as_of_context = resolve_legal_as_of(saved)
         result = audit_contract(
             elements, text,
             db=db, contract_id=contract_id,
@@ -390,9 +390,19 @@ def _compute_audit(
             deadline=deadline,
             clock=clock,
             progress_callback=progress_callback,
+            legal_as_of=legal_as_of_context.as_of,
         )
+        result["legal_as_of"] = (
+            legal_as_of_context.as_of.isoformat()
+            if legal_as_of_context.as_of is not None
+            else None
+        )
+        result["legal_as_of_source"] = legal_as_of_context.source
+        legal_as_of = result["legal_as_of"]
+        legal_as_of_source = legal_as_of_context.source
         risk_payloads.extend(result["risks"])
         cross_checks = result["cross_checks"]
+        workflow = result.get('workflow', {})
         issues.extend(_review_issues(result.get("issues", [])))
         coverage = _audit_coverage(result.get("coverage"), issues)
         audit_timings.update(result.get("timings", {}))
@@ -414,7 +424,10 @@ def _compute_audit(
     return {
         "risk_count": risk_count,
         "cross_checks": cross_checks,
+        "workflow": workflow,
         "ocr_confidence": parsed.ocr_confidence,
+        "legal_as_of": legal_as_of,
+        "legal_as_of_source": legal_as_of_source,
         "_parsed": parsed,
         "_risks": risk_payloads,
         "_issues": issues,
@@ -448,7 +461,7 @@ def _locked_item(
             AuditBatchItem.id == batch_item_id,
             AuditBatchItem.contract_id == contract_id,
         )
-        .with_for_update()
+        .with_for_update(of=AuditBatchItem)
         .one()
     )
 
@@ -550,6 +563,18 @@ def _risk_model(
         support_relation_status=risk.get("support_relation_status", "unclear"),
         support_validation_reason=risk.get("support_validation_reason", ""),
         support_validator_version=risk.get("support_validator_version", "unvalidated"),
+        support_validation_failed_stage=risk.get("support_validation_failed_stage", "none"),
+        support_validation_reason_code=risk.get("support_validation_reason_code", ""),
+        applicability_status=risk.get("applicability_status", "unresolved"),
+        applicability_reason_codes_json=json.dumps(
+            risk.get("applicability_reason_codes", []), ensure_ascii=False
+        ),
+        rule_executions_json=json.dumps(
+            risk.get("rule_executions", []), ensure_ascii=False
+        ),
+        decision_trace_json=json.dumps(
+            risk.get("decision_trace", {}), ensure_ascii=False
+        ),
         secondary_review_status=risk.get("secondary_review_status", "not_required"),
         secondary_review_reason=risk.get("secondary_review_reason", ""),
         claim_id=risk.get("claim_id"),

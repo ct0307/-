@@ -1,4 +1,6 @@
 import json
+from datetime import date
+from functools import partial
 
 import pytest
 from sqlalchemy import create_engine
@@ -13,9 +15,22 @@ from app.services.parser.extractor import DocumentBlock, DocumentParseResult, So
 
 
 @pytest.fixture
-def db():
-    engine = create_engine("sqlite:///:memory:")
+def db(tmp_path, monkeypatch):
+    from app.services.audit import auditor
+    from app.services.audit.secondary_review import SqlAlchemySecondaryCallRecorder
+    from app.services.audit.window_repository import SqlAlchemyWindowCheckpoint
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'runner-quality.db'}")
     Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(
+        auditor, "SqlAlchemyWindowCheckpoint",
+        partial(SqlAlchemyWindowCheckpoint, session_factory=factory),
+    )
+    monkeypatch.setattr(
+        auditor, "SqlAlchemySecondaryCallRecorder",
+        partial(SqlAlchemySecondaryCallRecorder, session_factory=factory),
+    )
     with Session(engine) as session:
         yield session
     engine.dispose()
@@ -32,6 +47,79 @@ def _contract(db: Session, name: str) -> Contract:
     db.commit()
     db.refresh(contract)
     return contract
+
+
+def test_disabled_real_review_pipeline_persists_actionable_failure(monkeypatch, db: Session):
+    from app.core.config import settings
+    from app.api.v1.endpoints.contracts import list_contracts_history
+    from app.llm.adapters import openai_compatible
+    from app.services.audit import auditor
+
+    owner = User(id=1, username="disabled-owner", password_hash="x", role="admin")
+    db.add(owner)
+    contract = _contract(db, "disabled-synthetic.txt")
+    batch = AuditBatch(owner_id=owner.id, department="法务部", idempotency_key="disabled-model")
+    db.add(batch)
+    db.flush()
+    item = AuditBatchItem(
+        batch_id=batch.id, contract_id=contract.id, filename=contract.filename,
+        status="reviewing", audit_generation=1, execution_token="disabled-token",
+    )
+    db.add(item)
+    db.commit()
+    monkeypatch.setattr(settings, "MODEL_PROCESSING_MODE", "rules_fallback")
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "none")
+    monkeypatch.setattr(auditor, "retrieve", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(openai_compatible.httpx, "post", lambda *a, **k: pytest.fail("禁用模型不得联网"))
+    monkeypatch.setattr(runner, "extract_document", lambda _path: DocumentParseResult(
+        text="第一条 甲方按约付款，乙方按约交付。" * 30, source="native",
+    ))
+
+    result = run_audit(db, contract, batch_item_id=item.id, execution_token="disabled-token")
+
+    db.refresh(item)
+    assert result["status"] == "audit_failed"
+    assert result["risk_count"] == 0
+    assert item.status == "failed"
+    assert item.error_code == "MODEL_DISABLED"
+    assert all(issue["code"] == "MODEL_DISABLED" for issue in result["issues"])
+    assert "INVALID_MODEL_OUTPUT" not in item.result_json
+    row = list_contracts_history(db=db, user=owner)[0]
+    assert row.level == "尚无法判断"
+    assert row.assessmentComplete is False
+
+
+def test_external_real_review_pipeline_redacts_sensitive_contract_before_http(monkeypatch, db: Session):
+    import json
+    import httpx
+    from app.core.config import settings
+    from app.llm.adapters import openai_compatible
+    from app.services.audit import auditor
+    from app.services.sensitive_data import contains_sensitive_data
+
+    calls = []
+    def post(url, **kwargs):
+        payload = kwargs['json']
+        assert not contains_sensitive_data(payload)
+        assert '演示采购公司' not in str(payload)
+        assert '13812345678' not in str(payload)
+        calls.append(payload)
+        return httpx.Response(200, request=httpx.Request('POST', url), json={
+            'model': 'fake', 'choices': [{'message': {'content': json.dumps({'risks': [], 'has_more': False})}, 'finish_reason': 'stop'}],
+        })
+
+    monkeypatch.setattr(settings, 'MODEL_PROCESSING_MODE', 'external_model')
+    monkeypatch.setattr(settings, 'MODEL_EXTERNAL_ALLOWED_BASE_URLS', ['https://approved.example/v1'])
+    monkeypatch.setattr(settings, 'LLM_BASE_URL', 'https://approved.example/v1')
+    monkeypatch.setattr(settings, 'AUDIT_BATCH_SECONDARY_ENABLED', False)
+    monkeypatch.setattr(auditor, 'retrieve', lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(openai_compatible.httpx, 'post', post)
+    text = '甲方：演示采购公司\n乙方：演示供货公司\n联系人：张测试\n电话13812345678\n第一条 付款\n' + '演示采购公司按约付款，乙方按约交付。' * 30
+    monkeypatch.setattr(runner, 'extract_document', lambda _path: DocumentParseResult(text=text, source='native'))
+    result = run_audit(db, _contract(db, 'privacy-synthetic.txt'))
+    assert calls
+    assert 'MODEL_OUTBOUND_BLOCKED' not in result.get('quality_reasons', [])
+    assert not any(issue['code'] == 'MODEL_OUTBOUND_BLOCKED' for issue in result.get('issues', []))
 
 
 def test_low_confidence_ocr_requires_review_without_publishing_quality_risk(
@@ -122,6 +210,70 @@ def test_native_high_quality_contract_finishes_without_quality_risk(
     assert result["status"] == "done"
     assert result["coverage"] == {"planned": 1, "completed": 1}
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 0
+
+
+def test_runner_passes_only_confirmed_contract_date_as_legal_as_of(
+    monkeypatch, db: Session
+):
+    contract = _contract(db, "confirmed-date.txt")
+    contract.elements_json = json.dumps({
+        "sign_date": "2026-01-15",
+        "sign_date_confirmed": True,
+    })
+    db.commit()
+    parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
+    monkeypatch.setattr(runner, "extract_document", lambda _path: parsed)
+    captured = {}
+
+    def fake_audit(*_args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "risks": [],
+            "cross_checks": [],
+            "issues": [],
+            "coverage": {"planned": 1, "completed": 1},
+        }
+
+    monkeypatch.setattr(runner, "audit_contract", fake_audit)
+
+    result = run_audit(db, contract)
+
+    assert captured["legal_as_of"] == date(2026, 1, 15)
+    assert result["legal_as_of"] == "2026-01-15"
+    assert result["legal_as_of_source"] == "confirmed_sign_date"
+
+
+def test_runner_treats_non_object_elements_as_unknown_legal_as_of(
+    monkeypatch, db: Session
+):
+    contract = _contract(db, "legacy-elements.txt")
+    contract.elements_json = "[]"
+    db.commit()
+    monkeypatch.setattr(
+        runner,
+        "extract_document",
+        lambda _path: DocumentParseResult(
+            text="有效合同正文" * 60,
+            source="native",
+        ),
+    )
+    captured = {}
+
+    def fake_audit(*_args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "risks": [],
+            "cross_checks": [],
+            "issues": [],
+            "coverage": {"planned": 1, "completed": 1},
+        }
+
+    monkeypatch.setattr(runner, "audit_contract", fake_audit)
+
+    result = run_audit(db, contract)
+
+    assert captured["legal_as_of"] is None
+    assert result["legal_as_of_source"] == "unknown"
 
 
 def test_run_audit_reports_parse_and_persists_terminal_progress(
@@ -283,9 +435,10 @@ def test_nonexistent_amount_claim_requires_review_instead_of_done(
 
     assert contract.status == "review_required"
     assert result["status"] == "review_required"
-    assert result["quality_reasons"] == ["FACT_VALIDATION_FAILED"]
+    assert "FACT_VALIDATION_FAILED" in result["quality_reasons"]
+    assert "EVIDENCE_UNRESOLVED" in result["quality_reasons"]
     assert [issue["code"] for issue in result["issues"]] == [
-        "FACT_VALIDATION_FAILED"
+        "FACT_VALIDATION_FAILED", "EVIDENCE_UNRESOLVED"
     ]
     assert db.query(Risk).filter(Risk.contract_id == contract.id).count() == 1
 
@@ -605,6 +758,33 @@ def test_partial_failure_publishes_verified_risk_and_quality_snapshot(monkeypatc
     assert "供应商返回" not in saved_item.result_json
 
 
+def test_quality_failure_persists_safe_reason_and_deduplicates_repeated_review(monkeypatch, db):
+    contract = _contract(db, "timeout.txt")
+    contract.requires_review = True
+    contract.review_reason = "关键要素冲突，请人工确认；审查覆盖不完整；模型调用超时"
+    batch = AuditBatch(owner_id=1, department="法务部", idempotency_key="quality-timeout")
+    db.add(batch)
+    db.flush()
+    item = AuditBatchItem(batch_id=batch.id, contract_id=contract.id,
+                          filename=contract.filename, status="reviewing",
+                          audit_generation=1, execution_token="quality-token")
+    db.add(item)
+    db.commit()
+    monkeypatch.setattr(runner, "extract_document", lambda path: DocumentParseResult(
+        text="有效合同正文" * 60, source="native"))
+    monkeypatch.setattr(runner, "audit_contract", lambda *args, **kwargs: {
+        "risks": [], "cross_checks": [], "coverage": {"planned": 1, "completed": 0},
+        "issues": [{"code": "MODEL_TIMEOUT", "agent": "legal", "detail": "token=private"}],
+    })
+    result = run_audit(db, contract, batch_item_id=item.id, execution_token="quality-token")
+    db.refresh(item)
+    assert result["status"] == "audit_failed"
+    assert item.error_code == "MODEL_TIMEOUT"
+    assert "超时" in item.error
+    assert "private" not in item.error
+    assert contract.review_reason.count("模型调用超时") == 1
+
+
 def test_run_audit_releases_claim_transaction_before_external_work(monkeypatch, db: Session):
     contract = _contract(db, "atomic.txt")
     parsed = DocumentParseResult(text="有效合同正文" * 60, source="native")
@@ -844,9 +1024,15 @@ def test_window_calls_have_one_log_each_and_only_jobs_persist_checkpoints(
     if windows:
         assert windows[0].audit_generation == 7
     assert result["coverage"] == {"planned": 1, "completed": 1}
+    uncached_progress = [
+        (15, "reviewing"), (15, "discovering"),
+        (75, "reviewing"), (82, "verifying"), (90, "verifying"),
+    ]
+    cached_progress = [
+        (15, "reviewing"), (75, "reviewing"), (82, "verifying"), (90, "verifying"),
+    ]
     assert progress_runs == [
-        [(75, "reviewing"), (82, "verifying"), (90, "verifying")],
-        [(75, "reviewing"), (82, "verifying"), (90, "verifying")],
+        uncached_progress, uncached_progress if audit_job_id is None else cached_progress,
     ]
 
 

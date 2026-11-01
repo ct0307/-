@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 import re
 
 from app.services.rag.contract_structure import build_contract_chunks
@@ -79,7 +79,7 @@ def candidate_dimensions(risk: dict) -> set[str]:
 
 
 def validate_candidate_facts(risk: dict, contract_text: str) -> FactValidationResult:
-    """仅核验可确定的日期、金额字面量与大小写金额一致性。"""
+    """核验日期、金额及明确表格行乘积；不判断金额的法律或商业含义。"""
     reason = str(risk.get("risk_reason", ""))
     original = str(risk.get("original_text", ""))
     contract_dates = {_normalize_date(value) for value in _DATE_RE.findall(contract_text)}
@@ -87,7 +87,7 @@ def validate_candidate_facts(risk: dict, contract_text: str) -> FactValidationRe
         if _normalize_date(value) not in contract_dates:
             return FactValidationResult(False, "风险原因包含合同中不存在的日期")
 
-    contract_amounts = set(_arabic_amounts(contract_text))
+    contract_amounts = set(_arabic_amounts(contract_text)) | _table_line_amounts(contract_text)
     for value in _arabic_amounts(reason):
         if value not in contract_amounts:
             return FactValidationResult(False, "风险原因包含合同中不存在的金额")
@@ -103,6 +103,39 @@ def validate_candidate_facts(risk: dict, contract_text: str) -> FactValidationRe
     return FactValidationResult(True)
 
 
+def _table_line_amounts(text: str) -> set[Decimal]:
+    """只接受连续表格中明确的数量×人民币单价，不猜列、单位或折扣。"""
+    amounts: set[Decimal] = set()
+    columns: list[str] = []
+    separator = ''
+    for line in text.splitlines():
+        delimiter = next((value for value in ('｜', '|', '\t') if value in line), '')
+        if not delimiter:
+            columns = []
+            continue
+        cells = [value.strip() for value in line.strip().strip('|｜').split(delimiter)]
+        if cells.count('数量') == cells.count('单价') == 1:
+            if any(re.search(r'折|扣|税|币种|汇率|单位|系数', value) for value in cells):
+                columns = []
+                continue
+            columns, separator = cells, delimiter
+            continue
+        if not columns or delimiter != separator or len(cells) != len(columns):
+            columns = []
+            continue
+        quantity = cells[columns.index('数量')]
+        price = re.fullmatch(r'人民币\s*(\d{1,18}(?:\.\d{1,6})?|\d{1,3}(?:,\d{3}){1,5}(?:\.\d{1,6})?)\s*(万元|元)',
+                             cells[columns.index('单价')])
+        if not re.fullmatch(r'\d{1,12}(?:\.\d{1,6})?', quantity) or not price:
+            columns = []
+            continue
+        unit = Decimal('10000') if price.group(2) == '万元' else Decimal('1')
+        with localcontext() as context:
+            context.prec = 64
+            amounts.add(Decimal(quantity) * Decimal(price.group(1).replace(',', '')) * unit)
+    return amounts
+
+
 def _normalize_date(value: str) -> str:
     parts = re.findall(r"\d+", value)
     return "-".join((parts[0], parts[1].zfill(2), parts[2].zfill(2)))
@@ -111,8 +144,10 @@ def _normalize_date(value: str) -> str:
 def _arabic_amounts(text: str) -> list[Decimal]:
     values: list[Decimal] = []
     for raw, unit in _ARABIC_MONEY_RE.findall(text):
-        value = Decimal(raw.replace(",", ""))
-        values.append(value * (Decimal("10000") if unit == "万元" else Decimal("1")))
+        with localcontext() as context:
+            context.prec = max(28, len(raw) + 8)
+            value = Decimal(raw.replace(",", ""))
+            values.append(value * (Decimal("10000") if unit == "万元" else Decimal("1")))
     return values
 
 

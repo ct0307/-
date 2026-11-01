@@ -15,7 +15,7 @@ from app.llm.base import LLMAdapter
 def get_llm_adapter() -> LLMAdapter:
     """返回 chat 用的 LLM 适配器（DeepSeek / Qwen / OpenClaw）。"""
     provider = settings.LLM_PROVIDER.lower()
-    if provider in {"qwen", "deepseek", "openclaw"}:
+    if settings.MODEL_PROCESSING_MODE == "rules_fallback" or provider in {"qwen", "deepseek", "openclaw"}:
         return OpenAICompatibleAdapter()
     raise ValueError(f"未知 LLM_PROVIDER: {provider}")
 

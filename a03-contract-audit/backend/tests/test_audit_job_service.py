@@ -950,10 +950,11 @@ def test_database_failure_after_claim_requeues_owned_item(monkeypatch):
         engine.dispose()
 
 
-@pytest.mark.parametrize("operation", ["flush", "commit"])
+@pytest.mark.parametrize("operation", ["execute", "commit"])
 def test_database_failure_during_claim_retries_without_publishing_failure(monkeypatch, operation):
     from celery.exceptions import Retry
     from sqlalchemy.exc import OperationalError
+    from sqlalchemy.sql.dml import Update
     from app.tasks import audit_tasks
 
     engine, contract_id, item_id = _task_fixture()
@@ -963,8 +964,9 @@ def test_database_failure_during_claim_retries_without_publishing_failure(monkey
 
     def fail_claim(*args, **kwargs):
         nonlocal failed
-        changing_item = any(isinstance(value, AuditBatchItem) for value in db.dirty)
-        if not failed and (operation == "commit" or changing_item):
+        # 领取现为条件UPDATE，故障注入应覆盖真正的原子写入而非旧ORM脏对象flush。
+        claiming_item = bool(args) and isinstance(args[0], Update) and args[0].table.name == "audit_batch_items"
+        if not failed and (operation == "commit" or claiming_item):
             failed = True
             raise OperationalError("query", {}, Exception("deadlock detected"))
         return original(*args, **kwargs)

@@ -13,6 +13,7 @@ export interface RuntimeStatus {
   error_code?: string | null
   latency_ms?: number | null
   last_success_at?: string | null
+  processing_mode?: 'private_model' | 'external_model' | 'rules_fallback'
 }
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
@@ -34,6 +35,7 @@ function runtimeErrorLabel(runtime: RuntimeStatus): string {
 }
 
 export function runtimeStatusText(runtime: RuntimeStatus): string {
+  if (runtime.processing_mode === 'rules_fallback') return '模型调用已禁用，使用规则降级'
   if (runtime.status === 'online') {
     const provider = runtime.provider?.toUpperCase() || '本地模型'
     return runtime.model ? `${provider} · ${runtime.model}` : `${provider} · 运行中`

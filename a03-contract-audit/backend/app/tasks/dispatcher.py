@@ -8,9 +8,20 @@ from celery.exceptions import Retry
 
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.models.models import AuditBatchItem
+from app.models.models import AuditBatchItem, ImportBatchItem
 
-_local_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audit-local")
+def _create_local_audit_executor() -> ThreadPoolExecutor:
+    """用显式限额创建合同执行器；每份合同仍自行持有独立数据库会话。"""
+    return ThreadPoolExecutor(
+        max_workers=settings.AUDIT_LOCAL_CONCURRENCY,
+        thread_name_prefix="audit-local",
+    )
+
+
+_local_executor = _create_local_audit_executor()
+# 导入解析与审查任务解耦：解析走独立线程池，避免上一轮审查占满线程时
+# 新上传的合同一直卡在"等待解析"队列里。
+_import_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="import-parse")
 _sleep = time.sleep
 
 
@@ -67,7 +78,7 @@ def dispatch_import_item(item_id: int) -> str:
 
         parse_import_item.run(item_id)
 
-    _local_executor.submit(run)
+    _import_executor.submit(run)
     return task_id
 
 
@@ -87,7 +98,7 @@ def recover_local_audit_items(
                     ("queued", "parsing", "reviewing", "validating", "auditing")
                 ),
             )
-            .with_for_update()
+            .with_for_update(of=AuditBatchItem)
             .all()
         )
         for item in stale_items:
@@ -112,3 +123,44 @@ def recover_local_audit_items(
 
 def shutdown_local_dispatcher() -> None:
     _local_executor.shutdown(wait=False, cancel_futures=False)
+    _import_executor.shutdown(wait=False, cancel_futures=False)
+
+
+def recover_local_import_items(
+    *,
+    session_factory: Callable = SessionLocal,
+    dispatch: Callable[[int], str] = dispatch_import_item,
+) -> int:
+    """仅在本地单进程启动时恢复旧队列；不可用于运行中的定时扫描。"""
+    db = session_factory()
+    recovered = 0
+    try:
+        # 重启后旧线程已不存在，即使刚开始解析也必须恢复。
+        # 固定待恢复 ID 快照，不截断为 500 项，也不反复扫描仍为 queued 的项。
+        candidates = (
+            db.query(ImportBatchItem.id)
+            .filter(ImportBatchItem.status.in_(("queued", "parsing")))
+            .order_by(ImportBatchItem.id)
+            .all()
+        )
+        for (item_id,) in candidates:
+            item = db.get(ImportBatchItem, item_id)
+            if item is None or item.status not in {"queued", "parsing"}:
+                continue
+            item.status = "queued"
+            item.attempts = max(item.attempts, 0)
+            db.commit()
+            try:
+                dispatch(item.id)
+                recovered += 1
+            except Exception:
+                item.status = "queued"
+                item.error_code = "DISPATCH_PENDING"
+                item.error_message = "文件已保存，正在等待重新解析"
+                db.commit()
+        return recovered
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()

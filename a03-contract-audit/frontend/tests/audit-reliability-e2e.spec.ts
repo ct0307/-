@@ -195,6 +195,38 @@ test('renders an active batch progress in the neutral state without failed items
   await expect(batchProgress).not.toHaveClass(/is-exception/)
 })
 
+for (const [stage, label] of [
+  ['discovering', '正在发现风险'],
+  ['enriching', '正在补充理由与建议'],
+] as const) {
+  for (const width of [375, 1280]) {
+    test(`renders ${stage} at ${width}px with the unchanged completed-work percentage`, async ({ page }) => {
+      await page.route('**/api/v1/**', async (route) => {
+        const path = new URL(route.request().url()).pathname
+        if (path.endsWith('/runtime/status')) {
+          return fulfillJson(route, { status: 'online', checked_at: '2026-11-01T08:00:00Z' })
+        }
+        if (isLookup(path)) return fulfillJson(route, [])
+        if (path.endsWith('/batches/77')) {
+          return fulfillJson(route, auditBatch({
+            total: 1, progress: 15,
+            items: [{ ...auditBatch().items[0], progress: 15, progress_stage: stage }],
+          }))
+        }
+        return fulfillJson(route, [])
+      })
+
+      await page.setViewportSize({ width, height: 800 })
+      await openAudit(page, '/audit?batch=77')
+      const row = page.locator('.batch-result-item-progress-row')
+      await expect(row.getByText(label, { exact: true })).toBeVisible()
+      await expect(row.locator('.el-progress')).toHaveAttribute('aria-valuenow', '15')
+      await expect(row.locator('.el-progress')).not.toHaveClass(/is-success/)
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    })
+  }
+}
+
 test('advances persisted progress through polling without reloading the page', async ({ page }) => {
   let batchGetCalls = 0
   const reviewingItem = auditBatch().items[0]
@@ -288,9 +320,82 @@ test('keeps a failed item percentage and persisted failure detail visible', asyn
   await expect(failedProgressRow.getByText('68%', { exact: true })).toBeVisible()
 })
 
+test('budget exhaustion shows the persisted machine code and does not offer automatic retry', async ({ page }) => {
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/runtime/status')) {
+      return fulfillJson(route, { status: 'online', checked_at: '2026-11-01T08:00:00Z' })
+    }
+    if (isLookup(path)) return fulfillJson(route, [])
+    if (path.endsWith('/batches/77')) {
+      return fulfillJson(route, auditBatch({
+        status: 'failed', total: 1, failed: 1, progress: 15,
+        items: [{
+          ...auditBatch().items[1], progress: 15,
+          error_code: 'AUDIT_BUDGET_EXHAUSTED',
+          error: '整单审查调用预算已用尽，请人工复核已有结果',
+          retryable: false,
+          error_action: '人工复核已有结果，或调整预算后创建新任务',
+        }],
+      }))
+    }
+    return fulfillJson(route, [])
+  })
+
+  await openAudit(page, '/audit?batch=77')
+  await expect(page.getByText('错误码：AUDIT_BUDGET_EXHAUSTED', { exact: true })).toBeVisible()
+  await expect(page.getByText('整单审查调用预算已用尽，请人工复核已有结果', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '重试失败项', exact: true })).toHaveCount(0)
+})
+
 function isLookup(path: string) {
   return path.includes('/admin/lookups/')
 }
+
+for (const width of [375, 1280]) {
+test(`提交后定位结果，结果紧接审查操作且轮询不抢焦点 ${width}px`, async ({ page }) => {
+  const imported = importBatch('ready')
+  imported.items = Array.from({ length: 16 }, (_, i) => importItem('ready', { id: i + 1, filename: `反馈测试合同${i + 1}.pdf` }))
+  imported.total = imported.ready = 16
+  await page.route('**/api/v1/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/runtime/status')) return fulfillJson(route, { status: 'online' })
+    if (path.endsWith('/imports/42')) return fulfillJson(route, imported)
+    if (path.includes('/batches')) return fulfillJson(route, auditBatch({ failed: 0, items: [auditBatch().items[0]] }), route.request().method() === 'POST' ? 202 : 200)
+    return fulfillJson(route, [])
+  })
+  await page.setViewportSize({ width, height: 800 })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await openAudit(page, '/audit?import=42')
+  await page.locator('.action-bar .el-button').click()
+  const results = page.getByRole('region', { name: '智能审查结果', exact: true })
+  await expect(results).toBeFocused()
+  await expect(page.locator('.onboard')).toHaveCount(0)
+  expect(await results.evaluate(el => el.previousElementSibling?.querySelector('.contract-inbox') !== null)).toBe(true)
+  await expect(results.locator('.batch-result-head')).toBeInViewport()
+  await expect(results.locator('.batch-result-item-progress-row')).toBeInViewport()
+  await page.getByRole('button', { name: '返回审查设置', exact: true }).click()
+  const setup = page.getByRole('region', { name: '审查设置', exact: true })
+  await expect(setup).toBeFocused()
+  await page.waitForTimeout(1800)
+  await expect(setup).toBeFocused()
+  expect(await setup.evaluate(el => Math.abs(el.getBoundingClientRect().top) < 160)).toBe(true)
+})
+}
+
+test('失败批次隐藏上传引导并提供返回设置操作', async ({ page }) => {
+  await page.route('**/api/v1/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/runtime/status')) return fulfillJson(route, { status: 'online' })
+    if (path.endsWith('/batches/77')) return fulfillJson(route, auditBatch({ status: 'failed', failed: 2 }))
+    return fulfillJson(route, [])
+  })
+  await page.setViewportSize({ width: 375, height: 800 })
+  await openAudit(page, '/audit?batch=77')
+  await expect(page.locator('.onboard')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '返回审查设置', exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
 
 async function uploadContract(page: Page, name = '可靠性测试合同.pdf') {
   await page.locator('input[type="file"]').setInputFiles({

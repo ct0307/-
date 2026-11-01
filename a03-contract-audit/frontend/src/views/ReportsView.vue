@@ -8,6 +8,8 @@ import TrendLine from '@/components/charts/TrendLine.vue'
 import RiskDonut from '@/components/charts/RiskDonut.vue'
 import DeptBar from '@/components/charts/DeptBar.vue'
 import TopRiskBar from '@/components/charts/TopRiskBar.vue'
+import { applicabilityMeta, decisionMeta, ruleStatusMeta } from '@/utils/audit-trace'
+import { riskEvidenceMeta, validationModeLabel } from '@/utils/risk-evidence'
 
 const router = useRouter()
 const session = useAuditSessionStore()
@@ -27,14 +29,26 @@ const endDate = ref('')
 const selected = ref<number[]>([])
 const range = ref<'selected' | 'filtered' | 'all'>('selected')
 const pickerOpen = ref(false)
+const drilldownIds = ref<number[] | null>(null)
 const page = ref(1)
 const pageSize = 10
 const statuses: Record<string, string> = { done: '处理完成', review_required: '待人工复核', failed: '审查失败', queued: '排队中', parsing: '解析中', reviewing: '审查中', validating: '校验中', unreviewed: '未审查' }
 const levelNames: Record<string, string> = { high: '高风险', medium: '中风险', low: '低风险' }
-const evidenceNames: Record<string, string> = { supported: '依据支持', partially_supported: '部分支持', unsupported: '缺少支持', contradicted: '依据矛盾', unclear: '待核实' }
+
+function drilldown(ids: number[]) {
+  if (!ids.length) { ElMessage.info('当前指标没有匹配合同'); return }
+  selected.value = ids.slice(0, 200)
+  drilldownIds.value = [...selected.value]
+  search.value = ''; type.value = ''; department.value = ''; status.value = ''; startDate.value = ''; endDate.value = ''
+  page.value = 1
+  range.value = 'selected'
+  pickerOpen.value = true
+  if (ids.length > 200) ElMessage.info('已选择前 200 份，请通过部门和时间继续缩小范围')
+}
 const types = computed(() => [...new Set(contracts.value.map(c => c.contract_type).filter(Boolean))])
 const departments = computed(() => [...new Set(contracts.value.map(c => c.department).filter(Boolean))])
 const filtered = computed(() => contracts.value.filter(c =>
+  (!drilldownIds.value || drilldownIds.value.includes(c.id)) &&
   (!search.value || (c.filename + c.party_a + c.subject).toLowerCase().includes(search.value.toLowerCase())) &&
   (!type.value || c.contract_type === type.value) &&
   (!department.value || c.department === department.value) &&
@@ -212,6 +226,7 @@ onBeforeUnmount(() => {
       <p v-if="invalidDates" class="risk-high">导入起日不能晚于止日。</p>
       <el-empty v-if="!contracts.length && !loading" description="暂无合同，请先导入真实测试合同"><el-button type="primary" @click="router.push('/audit')">导入合同</el-button></el-empty>
       <div id="contract-selection" v-show="pickerOpen">
+      <p v-if="drilldownIds" class="scope-hint">当前仅展示指标下钻合同（{{ drilldownIds.length }} 份）。<el-button link @click="drilldownIds = null">返回全部候选合同</el-button></p>
       <div class="filters">
         <label class="search-label">搜索合同<el-input v-model="search" aria-label="搜索合同" placeholder="合同名称、甲方或标的" clearable /></label>
         <label>合同类型<select v-model="type" aria-label="合同类型"><option value="">全部类型</option><option v-for="value in types" :key="value">{{ value }}</option></select></label>
@@ -248,6 +263,23 @@ onBeforeUnmount(() => {
           <article><span>待人工复核合同</span><strong>{{ snapshot.summary.review_required }}</strong><small>失败 {{ snapshot.summary.failed }} · 进行中 {{ snapshot.summary.running }}</small></article>
           <article><span>原文与依据已核验</span><strong>{{ snapshot.summary.supported }}<em> / {{ snapshot.summary.risks }}</em></strong><small>原文定位与依据支持同时满足</small></article>
         </section>
+        <section v-if="snapshot.operations" class="evidence-panel">
+          <h3>当前风险与整改</h3>
+          <p class="muted">统计日 {{ snapshot.operations.as_of_date }} · {{ snapshot.operations.metric_version }} · 历史数据不足，暂不显示环比。</p>
+          <div class="selection-actions">
+            <el-button @click="drilldown(snapshot.contracts.filter(c => c.risk_high > 0).map(c => c.id))">高风险合同 {{ snapshot.operations.high_risk_contracts }} 份</el-button>
+            <el-button @click="router.push('/rectify')">逾期整改 {{ snapshot.operations.overdue_count }} 项</el-button>
+            <span>待复核风险 {{ snapshot.operations.pending_risk_count }} 条 · 日期待确认 {{ snapshot.operations.unknown_due_count }} 项</span>
+          </div>
+          <p class="muted">{{ snapshot.operations.amount_note }}</p>
+          <p class="muted">{{ snapshot.operations.risk_count_basis }}</p>
+          <el-table :data="snapshot.operations.departments">
+            <el-table-column prop="department" label="部门" min-width="100" />
+            <el-table-column prop="contract_count" label="合同数" width="90" />
+            <el-table-column label="高风险合同占比" min-width="145"><template #default="{ row }">{{ row.high_risk_contracts }} / {{ row.contract_count }}（{{ (row.high_risk_rate * 100).toFixed(1) }}%）</template></el-table-column>
+            <el-table-column label="下钻" width="100"><template #default="{ row }"><el-button link @click="drilldown(row.contract_ids)">查看合同</el-button></template></el-table-column>
+          </el-table>
+        </section>
         <section class="chart-grid">
           <el-card shadow="never"><template #header>导入日期分布（累计）</template><TrendLine :data="trend" :labels="['导入合同', '当前已完成', '含高风险合同']" /><p class="muted">按导入日期分组展示当前状态，不表示历史审查效果。</p></el-card>
           <el-card shadow="never"><template #header>风险等级分布</template><RiskDonut :data="donut" /></el-card>
@@ -281,7 +313,18 @@ onBeforeUnmount(() => {
         <div class="section-heading"><h3>R{{ risk.id }} · {{ risk.category }}</h3><el-tag :type="risk.level === 'high' ? 'danger' : 'warning'">{{ levelNames[risk.level] || risk.level }}</el-tag></div>
         <p class="muted">{{ risk.filename }} · {{ risk.agent === 'finance' ? '财务会计' : risk.agent === 'legal' ? '法务专家' : '规则校验' }}</p>
         <p>{{ location(risk) }}</p><blockquote>{{ risk.original_text }}</blockquote>
-        <dl><dt>风险原因</dt><dd>{{ risk.risk_reason || '未提供' }}</dd><dt>依据</dt><dd>{{ risk.basis || '未提供' }}</dd><dt>核验状态</dt><dd>{{ evidenceNames[risk.evidence_status || 'unclear'] || '待核实' }} · 原文{{ risk.original_text_verified ? '已核验' : '未核验' }}</dd><dt>检索来源</dt><dd><p v-for="(source, index) in risk.rag_sources" :key="index">{{ source.source || source.title || '来源待核实' }}：{{ source.content || source.quote || '正文待核实' }}</p><span v-if="!risk.rag_sources.length">尚无可回读的检索来源</span></dd><dt>修改建议</dt><dd>{{ risk.suggestion }}</dd></dl>
+        <dl>
+          <dt>风险原因</dt><dd>{{ risk.risk_reason || '未提供' }}</dd>
+          <dt>依据</dt><dd>{{ risk.basis || '未提供' }}</dd>
+          <dt>核验状态</dt><dd>{{ riskEvidenceMeta(risk).label }} · 原文{{ risk.original_text_verified ? '已核验' : '未核验' }}</dd>
+          <dt>核验记录</dt><dd>{{ validationModeLabel(risk.support_validation_mode) }} · {{ risk.support_validator_version || '版本未记录' }} · {{ risk.support_validation_failed_stage || '阶段未记录' }} · {{ risk.support_validation_reason_code || '原因码未记录' }}</dd>
+          <dt>人工复核记录</dt><dd v-if="risk.decision_trace?.human_review">操作人ID {{ risk.decision_trace.human_review.operator_id }} · {{ risk.decision_trace.human_review.reviewed_at }}<p>{{ risk.decision_trace.human_review.reason || '已重置为待复核' }}</p></dd><dd v-else>暂无人工复核记录，人工确认独立于机器证据核验。</dd>
+          <dt>法规适用性</dt><dd><el-tag size="small" :type="applicabilityMeta(risk.applicability_status).type">{{ applicabilityMeta(risk.applicability_status).label }}</el-tag><span v-if="risk.applicability_reason_codes?.length"> · {{ risk.applicability_reason_codes.join('、') }}</span></dd>
+          <dt>规则核验</dt><dd><template v-if="risk.rule_executions?.length"><span v-for="(rule, index) in risk.rule_executions" :key="index"><el-tag size="small" :type="ruleStatusMeta(rule.status).type">{{ ruleStatusMeta(rule.status).label }}</el-tag><span v-if="rule.rule_id"> {{ rule.rule_id }}</span><span v-if="index < risk.rule_executions.length - 1">；</span></span></template><span v-else>待核验</span></dd>
+          <dt>决策结果</dt><dd><el-tag size="small" :type="decisionMeta(risk.decision_trace?.status).type">{{ decisionMeta(risk.decision_trace?.status).label }}</el-tag><span v-if="risk.decision_trace?.reason_codes?.length"> · {{ risk.decision_trace.reason_codes.join('、') }}</span></dd>
+          <dt>检索来源</dt><dd><p v-for="(source, index) in risk.rag_sources" :key="index">{{ source.source || source.title || '来源待核实' }}：{{ source.content || source.quote || '正文待核实' }}</p><span v-if="!risk.rag_sources.length">尚无可回读的检索来源</span></dd>
+          <dt>修改建议</dt><dd>{{ risk.suggestion }}</dd>
+        </dl>
       </article>
     </el-drawer>
   </div>

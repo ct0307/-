@@ -585,7 +585,11 @@ def test_payee_mismatch_binds_exact_candidate_and_calls_secondary(monkeypatch):
             [candidate.copy()], [], 1, 1
         ),
     )
-    adapter = QueueAdapter([_decision("C-PAYEE-MISMATCH")])
+    adapter = QueueAdapter([
+        json.dumps(dict(verdict="agree", claim_ids=["C-PAYEE-MISMATCH"],
+                        quote=candidate["original_text"])),
+        _decision("C-PAYEE-MISMATCH"),
+    ])
     monkeypatch.setattr(auditor, "get_llm_adapter", lambda: adapter)
 
     result = auditor.audit_contract(
@@ -596,7 +600,9 @@ def test_payee_mismatch_binds_exact_candidate_and_calls_secondary(monkeypatch):
 
     x2 = next(check for check in result["cross_checks"] if check["id"] == "X2")
     assert x2["claim_ids"] == ["C-PAYEE-MISMATCH"]
-    assert len(adapter.calls) == 1
+    assert len(adapter.calls) == 2
+    assert result["workflow"]["directed_reviews"][0]["status"] == "reviewed"
+    assert json.loads(adapter.calls[0][1])["target_agent"] == "legal"
     assert result["risks"][0]["secondary_review_status"] == "confirmed"
 
 
@@ -663,7 +669,11 @@ def test_rejected_payee_candidate_leaves_unbound_conflict_for_review(monkeypatch
             [candidate.copy()], [], 1, 1
         ),
     )
-    adapter = QueueAdapter([_decision("C-PAYEE-REJECTED", "reject")])
+    adapter = QueueAdapter([
+        json.dumps(dict(verdict="disagree", claim_ids=["C-PAYEE-REJECTED"],
+                        quote=candidate["original_text"])),
+        _decision("C-PAYEE-REJECTED", "reject"),
+    ])
     monkeypatch.setattr(auditor, "get_llm_adapter", lambda: adapter)
 
     result = auditor.audit_contract(
@@ -675,7 +685,7 @@ def test_rejected_payee_candidate_leaves_unbound_conflict_for_review(monkeypatch
         result["risks"], result["issues"], AuditCoverage(**result["coverage"])
     )
 
-    assert len(adapter.calls) == 1
+    assert len(adapter.calls) == 2
     assert result["risks"] == []
     assert [issue["code"] for issue in result["issues"]] == ["UNBOUND_CONFLICT"]
     assert decision.status == "review_required"

@@ -53,15 +53,15 @@ const passRate = computed(() => {
   if (!rs) return '—'
   const total = Object.values(rs).reduce((a, b) => a + b, 0)
   if (!total) return '0'
-  const passed = (rs['已确认'] ?? 0) + (rs['已忽略'] ?? 0)
+  const passed = (rs['已确认'] ?? 0) + (rs['已忽略'] ?? 0) + (rs['需修改'] ?? 0)
   return String(Math.round((passed / total) * 1000) / 10)
 })
 
 const kpis = computed(() => [
-  { label: '累计审查合同', value: String(summary.value?.total_contracts ?? '—'), unit: '份', hint: '系统上线至今累计处理的合同总份数', up: true },
+  { label: '累计导入合同', value: String(summary.value?.total_contracts ?? '—'), unit: '份', hint: '当前可见的合同总份数，包含未审查和失败合同', up: true },
   { label: '待整改项', value: String(rectify.openCount), unit: '项', hint: '当前"待处理"状态的整改项，需尽快跟进', up: false },
   { label: '累计检出风险', value: String(summary.value?.total_risks ?? '—'), unit: '条', hint: '所有合同审查中 AI 检出的风险条款总数', up: false },
-  { label: '合规通过率', value: passRate.value, unit: '%', hint: '已确认 + 已忽略的风险数 ÷ 总风险数（复核完成口径）', up: true },
+  { label: '风险复核完成率', value: passRate.value, unit: '%', hint: '已确认、已忽略和需修改的风险数 ÷ 总风险数，不代表合同合规率', up: true },
 ])
 
 // —— 待办：取真实"待处理"整改项，最多展示 5 条 ——
@@ -78,6 +78,7 @@ const levelColor: Record<string, string> = {
 // —— 近期动态：从真实审查记录推导 ——
 function formatRelativeTime(isoStr: string): string {
   const diff = Date.now() - new Date(isoStr).getTime()
+  if (!Number.isFinite(diff)) return '时间未知'
   const m = Math.floor(diff / 60000)
   if (m < 1) return '刚刚'
   if (m < 60) return `${m} 分钟前`
@@ -90,7 +91,11 @@ function formatRelativeTime(isoStr: string): string {
 
 const activity = computed(() =>
   recentContracts.value.map((c) => ({
-    text: `完成「${c.name}」审查，检出 ${c.riskCount} 条风险`,
+    text: c.status === '未审查' ? `「${c.name}」已导入，待审查`
+      : c.status === '审查中' ? `「${c.name}」审查中`
+      : c.status === '解析失败' || c.status === '审查失败' ? `「${c.name}」${c.status}`
+      : c.status === '待人工复核' ? `「${c.name}」待人工复核，${c.riskCount} 条候选风险`
+      : `「${c.name}」${c.status}，${c.riskCount} 条风险记录`,
     time: formatRelativeTime(c.time),
     high: c.level === '高风险',
   })),

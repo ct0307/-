@@ -69,7 +69,7 @@ def repository(factory, **kwargs):
 def test_models_define_window_identity_and_observation_fields(store):
     assert hasattr(models, "AuditWindowRun"), "缺少 AuditWindowRun 模型"
     inspector = inspect(store.kw["bind"])
-    identity = {"audit_job_id", "audit_generation", "agent", "dimensions_hash", "window_id", "protocol_version"}
+    identity = {"audit_job_id", "audit_generation", "agent", "dimensions_hash", "window_id", "protocol_version", "run_fingerprint"}
     assert any(set(c["column_names"]) == identity for c in inspector.get_unique_constraints("audit_window_runs"))
     indexes = {i["name"] for i in inspector.get_indexes("audit_window_runs")}
     assert {"ix_audit_window_runs_contract_id", "ix_audit_window_runs_audit_job_id"} <= indexes
@@ -103,6 +103,7 @@ def test_idempotent_save_restores_complete_result_from_new_repository(store):
 @pytest.mark.parametrize("changes", [
     {"audit_job_id": 11}, {"audit_generation": 3}, {"agent": "finance"},
     {"dimensions": ("payment",)},
+    {"run_fingerprint": "new-model-or-knowledge-version"},
     {"review_window": ReviewWindow(ContractWindow("window-2", (), "另一条款"))},
 ])
 def test_each_identity_field_is_isolated(store, changes):
@@ -167,6 +168,41 @@ def test_dimensions_are_sorted_deduplicated_and_sha256_hashed(store):
         row = db.scalar(select(models.AuditWindowRun))
         normalized = json.dumps(sorted({"付款", "责任"}), ensure_ascii=False, separators=(",", ":"))
         assert row.dimensions_hash == hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("mode", ["dev_constraint", "dev_index", "alembic"])
+def test_fingerprint_migration_preserves_legacy_rows_and_allows_new_versions(tmp_path, monkeypatch, mode):
+    from app.db import init_db
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
+    columns = "audit_job_id, audit_generation, agent, dimensions_hash, window_id, protocol_version"
+    constraint = "" if mode == "dev_index" else f", CONSTRAINT uq_audit_window_runs_identity UNIQUE ({columns})"
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE audit_window_runs (id INTEGER PRIMARY KEY, "
+                          "audit_job_id INTEGER, audit_generation INTEGER, agent TEXT, "
+                          "dimensions_hash TEXT, window_id TEXT, protocol_version TEXT, "
+                          f"result_json TEXT{constraint})"))
+        if mode == "dev_index":
+            conn.execute(text(f"CREATE UNIQUE INDEX uq_audit_window_runs_identity ON audit_window_runs ({columns})"))
+        conn.execute(text("INSERT INTO audit_window_runs VALUES (1, 10, 1, 'legal', 'dims', 'w1', 'v4', 'legacy')"))
+    if mode.startswith("dev"):
+        monkeypatch.setattr(init_db, "engine", engine)
+        monkeypatch.setattr(init_db.settings, "DB_BACKEND", "sqlite")
+        init_db._migrate_dev_columns()
+        init_db._migrate_dev_columns()
+    else:
+        path = Path(__file__).parents[1] / "alembic/versions/20260929_04_window_fingerprint.py"
+        spec = importlib.util.spec_from_file_location("fingerprint_migration", path)
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        with engine.begin() as conn, Operations.context(MigrationContext.configure(conn)):
+            migration.upgrade()
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT result_json, run_fingerprint FROM audit_window_runs")).one() == ("legacy", "")
+        conn.execute(text("INSERT INTO audit_window_runs "
+                          f"({columns}, result_json, run_fingerprint) "
+                          "VALUES (10, 1, 'legal', 'dims', 'w1', 'v4', 'new', 'new-version')"))
+        assert conn.scalar(text("SELECT COUNT(*) FROM audit_window_runs")) == 2
+    engine.dispose()
 
 
 def test_corrupt_valid_result_propagates_but_transient_database_errors_are_typed(store):

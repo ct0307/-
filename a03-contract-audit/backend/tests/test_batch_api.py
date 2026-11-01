@@ -45,6 +45,32 @@ def _files(count: int) -> list[UploadFile]:
     ]
 
 
+def test_retry_batch_only_dispatches_recoverable_failures(monkeypatch):
+    with _session() as db:
+        user = _user(db)
+        batch = AuditBatch(owner_id=user.id, department=user.department,
+                           idempotency_key="mixed-failure-retry")
+        db.add(batch)
+        for index, code in enumerate(["MODEL_TIMEOUT", "MODEL_REJECTED", "AUDIT_INTERNAL_ERROR"]):
+            contract = Contract(filename=f"{index}.pdf", storage_path=f"/{index}.pdf",
+                                uploaded_by=user.id, department=user.department,
+                                status="audit_failed", audit_generation=1)
+            db.add(contract)
+            db.flush()
+            batch.items.append(AuditBatchItem(
+                contract_id=contract.id, filename=contract.filename, status="failed",
+                result_json=json.dumps({"issues": [{"code": code}],
+                                        "quality_reasons": [code]}),
+            ))
+        db.commit()
+        dispatched = []
+        monkeypatch.setattr(batches, "_dispatch_item", lambda item, dims: dispatched.append(item.id) or "task")
+        result = batches.retry_batch(batch.id, None, db, user)
+        assert result.retried == 1
+        assert dispatched == [batch.items[0].id]
+        assert [item.status for item in batch.items] == ["queued", "failed", "failed"]
+
+
 def test_create_batch_persists_fifty_items(monkeypatch, tmp_path):
     db = _session()
     user = _user(db)
@@ -246,7 +272,8 @@ def test_create_batch_rejects_more_than_two_hundred_files(tmp_path):
             user=user,
         )
 
-    assert exc_info.value.status_code == 400
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail["code"] == "BATCH_TOO_LARGE"
     assert list(tmp_path.iterdir()) == []
 
 
@@ -926,6 +953,8 @@ def test_retry_reuses_persisted_dimensions_by_default(monkeypatch, tmp_path):
         status="failed",
         progress=68,
         progress_stage="failed",
+        error_code="MODEL_TIMEOUT",
+        error="模型调用超时",
     )
     db.add(item)
     db.commit()

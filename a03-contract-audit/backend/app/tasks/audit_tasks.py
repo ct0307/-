@@ -144,7 +144,7 @@ def recover_orphaned_batch_items(
                 )
             )
             .order_by(AuditBatchItem.id)
-            .with_for_update(skip_locked=True)
+            .with_for_update(of=AuditBatchItem, skip_locked=True)
             .limit(500)
             .all()
         )
@@ -212,7 +212,7 @@ def run_contract_audit(
         item = (
             db.query(AuditBatchItem)
             .filter(AuditBatchItem.id == batch_item_id)
-            .with_for_update()
+            .with_for_update(of=AuditBatchItem)
             .first()
             if batch_item_id
             else None
@@ -249,14 +249,27 @@ def run_contract_audit(
                     audit_generation=audit_generation,
                 )
                 return {"contract_id": contract_id, "status": "stale"}
-            item.status = transition_item(item.status, "parsing") if item.status == "queued" else "parsing"
-            item.progress = max(item.progress, 5)
-            item.progress_stage = "claimed"
-            item.started_at = item.started_at or now
-            item.lease_expires_at = now + timedelta(minutes=30)
             execution_token = uuid.uuid4().hex
-            item.execution_token = execution_token
-            db.flush()
+            # SQLite忽略FOR UPDATE；必须比较刚读到的状态与令牌后原子领取，
+            # 否则同一任务重复派发会覆盖执行权并重复调用模型。
+            acquired = db.query(AuditBatchItem).filter(
+                AuditBatchItem.id == item.id,
+                AuditBatchItem.contract_id == contract_id,
+                AuditBatchItem.audit_generation == audit_generation,
+                AuditBatchItem.status == item.status,
+                AuditBatchItem.execution_token == item.execution_token,
+                AuditBatchItem.lease_expires_at == item.lease_expires_at,
+            ).update({
+                AuditBatchItem.status: "parsing",
+                AuditBatchItem.progress: max(item.progress, 5),
+                AuditBatchItem.progress_stage: "claimed",
+                AuditBatchItem.started_at: item.started_at or now,
+                AuditBatchItem.lease_expires_at: now + timedelta(minutes=30),
+                AuditBatchItem.execution_token: execution_token,
+            }, synchronize_session=False)
+            if acquired != 1:
+                db.rollback()
+                return {"contract_id": contract_id, "status": "already_claimed"}
             item_fence = exists().where(
                 AuditBatchItem.id == item.id,
                 AuditBatchItem.contract_id == contract_id,

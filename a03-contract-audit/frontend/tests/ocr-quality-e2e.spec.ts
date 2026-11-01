@@ -80,6 +80,8 @@ test('renders low-confidence OCR review state without mobile overflow', async ({
       }
     } else if (path.includes('/admin/lookups/')) {
       body = []
+    } else if (path.endsWith('/handoffs')) {
+      body = { state: 'NO_DATA', items: [] }
     } else if (path.endsWith('/contracts/1/audit-status')) {
       body = { ...auditResult, job_id: 9, batch_id: 8 }
     } else if (path.endsWith('/contracts/1/risks')) {
@@ -98,8 +100,8 @@ test('renders low-confidence OCR review state without mobile overflow', async ({
   await page.goto(`${baseUrl}/audit`)
   await page.waitForLoadState('networkidle')
 
-  const reviewAlert = page.getByRole('alert').filter({ hasText: '扫描件需人工复核' })
-  await expect(reviewAlert).toContainText('扫描件需人工复核')
+  const reviewAlert = page.getByRole('alert').filter({ hasText: '审查结果需人工复核' })
+  await expect(reviewAlert).toContainText('审查结果需人工复核')
   await expect(reviewAlert).toContainText('42.3%')
   await expect(page.getByText('待人工复核', { exact: true })).toBeVisible()
   await expect(page.getByText('扫描件识别质量不足')).toBeVisible()

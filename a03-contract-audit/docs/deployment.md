@@ -35,8 +35,8 @@ docker compose up -d --build
 docker compose ps
 docker compose logs backend --tail=50
 
-# 5. 灌演示数据（首次部署执行一次，幂等）
-docker compose exec backend python -m scripts.seed_demo
+# 5. 生产空库创建首个管理员（隐藏输入密码两次）
+docker compose exec backend python -m scripts.bootstrap_admin --username ops-admin
 ```
 
 ### 访问
@@ -204,6 +204,25 @@ OCR_MIN_CONFIDENCE=0.75
 
 ## 数据初始化
 
+### 首个管理员（生产）
+
+先完成迁移和生产配置：`APP_ENV=prod`、`DEBUG=false`、PostgreSQL、`AUDIT_ASYNC=true`、非默认数据库密码、至少32字符且满足配置策略的 JWT 密钥、有效 Fernet 密钥。初始化命令复用应用的生产安全校验；迁移失败或配置不满足时拒绝建号。
+
+```powershell
+# 在项目根目录执行；使用当前后端配置数据库，不创建或重置表。
+Set-Location backend
+.\.venv\Scripts\python.exe -m scripts.bootstrap_admin --username ops-admin
+```
+
+```bash
+# 容器内方式，须保留交互终端输入密码。
+docker compose exec backend python -m scripts.bootstrap_admin --username ops-admin
+```
+
+密码至少12个字符、UTF-8编码最多72字节，默认弱密码被拒绝；中文字符通常占3字节。命令不接收命令行密码参数。禁止把密码写入脚本、命令历史或日志。登录入口也拒绝超过72字节的输入（HTTP 422），不会截断密码。
+
+同名账号或任意已有管理员都会拒绝初始化，不覆盖账号。创建账号与 `bootstrap_admin` 审计记录同事务提交，失败自动回滚；PostgreSQL使用事务咨询锁、SQLite开发环境使用写事务锁串行检查。命令成功后再次运行返回非零码；其他账号管理应走已有授权管理流程。该命令不参与服务启动，也不提供未认证建号接口。
+
 ### 演示数据（开发/竞赛演示）
 
 ```bash
@@ -221,6 +240,27 @@ python -m scripts.seed_demo
 - 26个下拉配置项（12部门 + 14合同类型）
 
 脚本幂等，可重复执行。
+
+上述合同、风险和调用记录均为演示数据，不是生产业务数据或模型真实评测结果。生产禁止执行 `seed_demo`。
+
+### 上传容量与证据核验
+
+| 配置 | 默认值 | 行为 |
+|---|---|---|
+| `MAX_UPLOAD_MB` | 50 | 每个文件最多50 MiB |
+| `MAX_BATCH_FILES` | 200 | 每批最多200个文件，追加计入已有有效项和失败项 |
+| `MAX_BATCH_MB` | 500 | 每批累计原始上传字节最多500 MiB |
+| `EVIDENCE_VALIDATION_MODE` | `manual_only` | 候选资料交人工核验 |
+
+容量配置须为正整数。前端从认证接口 `GET /api/v1/imports/limits` 读取限制；读取失败显示“上传时由服务器校验”，保留上传入口，不使用猜测值。文件数或总字节超限返回HTTP 413及 `BATCH_TOO_LARGE`；单文件超限为 `FILE_TOO_LARGE`。整批容量检查在持久化前执行，合法批次仍保留逐文件失败隔离。
+
+追加导入按每项的原始上传大小累计，包含解析失败项，排除已删除项；新项通过同事务审计元数据记录大小。旧项读取原文或解密后计算，不按Fernet膨胀后的磁盘大小计算。旧项文件缺失、为空、解密失败或哈希不一致时返回409及 `IMPORT_BATCH_CAPACITY_UNKNOWN`，需恢复文件或新建收件箱。
+
+项目Nginx默认 `client_max_body_size 520m`，覆盖默认500 MiB和协议开销。该值不是环境变量自动生成的模板；若增大 `MAX_BATCH_MB`，必须人工同步 `frontend/nginx.conf` 及所有外层网关限制并留协议余量，否则代理可能先返回413。外层Nginx示例也应配置同一上限。
+
+`deterministic` 当前仅支持一个有限场景：原文精确定位、无附条件/例外/引用的限定绝对免责完整句式，且可信、适用来源为民法典506条完整限定正文。结果版本为 `support-deterministic-v1`，绑定 `LEGAL-INJURY-WAIVER-001@1.0.0`；不覆盖一般违约金高低或其他法律判断。词语重叠不构成采信依据，条件不足或验证器异常返回 `unclear`；默认 `manual_only` 保持人工接管。
+
+核验模式、版本、失败阶段、原因码在API、追问、报告与前端贯通；当前已核验还要求原文、来源、证据编号和成功原因码完整。旧版 `rules-v2` 不计为当前已核验。人工复核保存操作人ID、带时区时间和意见，并同事务写审计记录；人工确认独立于机器核验，不把候选法条变成已验证法律结论。
 
 ### 仅灌知识库法规
 
@@ -254,7 +294,7 @@ alembic -c alembic.ini upgrade head
 alembic -c alembic.ini current
 ```
 
-生产应用不会执行 `create_all`，也不会自动灌入演示账号。首次上线前应通过受控脚本或管理流程创建管理员；`scripts.seed_demo` 仅限竞赛演示环境。
+生产应用不会执行 `create_all`，也不会自动灌入演示账号。首次上线前执行上面的 `scripts.bootstrap_admin`；`scripts.seed_demo` 仅限开发或竞赛演示环境。
 
 生产配置采用 fail-fast：`DEBUG=true`、SQLite、同步审查、默认数据库密码、弱 JWT 密钥或无效 Fernet 密钥都会阻止 backend、worker 和 Alembic 启动，避免服务以不安全配置进入健康状态。
 
@@ -283,6 +323,7 @@ upstream a03_frontend { server 127.0.0.1:80; }
 
 server {
     listen 443 ssl;
+    client_max_body_size 520m;
     # SSL 证书配置...
 
     location /api/ { proxy_pass http://a03_backend; }

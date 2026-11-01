@@ -342,8 +342,8 @@ def test_append_import_rejects_files_beyond_the_batch_limit(monkeypatch, tmp_pat
             batch.id, [_file("overflow.txt", b"overflow")], "append-overflow", db, legal
         )
 
-    assert error.value.status_code == 409
-    assert error.value.detail["code"] == "IMPORT_BATCH_LIMIT_EXCEEDED"
+    assert error.value.status_code == 413
+    assert error.value.detail["code"] == "BATCH_TOO_LARGE"
     assert db.query(ImportBatchItem).filter(ImportBatchItem.batch_id == batch.id).count() == 200
     assert list(tmp_path.iterdir()) == []
 

@@ -17,12 +17,18 @@ export interface AuditBatchItem {
   progress_stage: AuditProgressStage
   error: string | null
   error_code?: string | null
+  retryable?: boolean
+  error_action?: string | null
   attempts: number
   started_at: string | null
   finished_at: string | null
   requires_review?: boolean
   ocr_confidence?: number | null
   review_reason?: string | null
+  created_at?: string | null
+  queue_wait_ms?: number | null
+  processing_ms?: number | null
+  total_ms?: number | null
 }
 
 export interface AuditBatch {

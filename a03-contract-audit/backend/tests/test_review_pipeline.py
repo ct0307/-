@@ -20,6 +20,26 @@ def _risk(category="付款风险", quote="甲方应在验收后付款。"):
     }
 
 
+def test_discovery_retry_provides_schema_without_replaying_invalid_model_text(monkeypatch):
+    from app.services.audit.review_pipeline import WindowReviewer
+    monkeypatch.setattr(settings, 'AUDIT_BATCH_ENRICHMENT_ENABLED', False)
+    invalid = {'level': 'high', 'category': '长' * 65, 'quote': '甲方应在验收后付款。'}
+    adapter = FakeAdapter([
+        _response(risks=[invalid]),
+        _response(risks=[{'level':'high', 'category':'付款风险', 'quote':invalid['quote']}]),
+        LLMResponse(text=json.dumps({'reason':'付款条件需要核验。', 'suggestion':'明确付款所需材料。'}), model='test'),
+    ])
+    checkpoint = MemoryCheckpoint()
+    result = WindowReviewer(adapter, checkpoint=checkpoint).review(_two_stage_batch_request())
+    assert adapter.calls[1][1] != adapter.calls[0][1]
+    assert invalid['category'] not in adapter.calls[1][1]
+    schema = json.loads(adapter.calls[1][1].split('<output_schema>')[1].split('</output_schema>')[0])
+    assert schema['$defs']['RiskFinding']['properties']['category']['maxLength'] == 64
+    assert result.complete is True and len(result.candidates) == 1
+    assert checkpoint.records[0]['validation_status'] == 'invalid'
+    assert checkpoint.records[1]['validation_status'] == 'valid'
+
+
 def _response(*, risks=None, has_more=False, finish_reason="stop", model="model-a"):
     return LLMResponse(
         text=json.dumps(
@@ -77,6 +97,20 @@ class MemoryCheckpoint:
                 "error_code": error_code,
             }
         )
+
+
+@pytest.mark.parametrize("code", ["MODEL_DISABLED", "MODEL_OUTBOUND_BLOCKED"])
+def test_model_policy_failure_keeps_actionable_code_without_valid_checkpoint(code):
+    from app.services.audit.review_pipeline import WindowReviewer
+
+    adapter = FakeAdapter([LLMError("模型策略禁止调用", code=code, retryable=False)])
+    checkpoint = MemoryCheckpoint()
+    result = WindowReviewer(adapter, checkpoint=checkpoint).review(_request())
+    assert result.complete is False
+    assert result.completed_windows == 0
+    assert [issue.code for issue in result.issues] == [code]
+    assert len(adapter.calls) == 1
+    assert checkpoint.saved == []
 
 
 @pytest.mark.parametrize("text", ['{}', '{"risks":[]}', '{"has_more":false}'])

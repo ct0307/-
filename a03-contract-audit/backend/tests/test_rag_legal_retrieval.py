@@ -1,4 +1,5 @@
 from datetime import date
+import hashlib
 from unittest.mock import patch
 
 import pytest
@@ -56,7 +57,7 @@ def _add_legal_article(
             article_sort=article_id * 1000,
             chapter_title="第三编 合同",
             content=content,
-            content_hash="b" * 64,
+            content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
         ))
         db.commit()
 
@@ -202,8 +203,16 @@ def test_explicit_article_reference_returns_exact_parent_article(retrieval_db):
         "content": parent_content,
         "source": "中华人民共和国民法典",
         "score": 1.0,
+        "source_id": "source-585",
+        "trust_status": "authoritative",
+        "provenance_type": "official_legal_source",
+        "approval_version": 0,
         "article_number": "第五百八十五条",
         "version": "2020",
+        "effective_date": "2021-01-01",
+        "expiry_date": None,
+        "applicability_status": "unknown_as_of",
+        "applicability_reason_code": "AS_OF_DATE_UNKNOWN",
         "retrieval_mode": "exact",
         "reliable": True,
         "legal_article_id": 585,

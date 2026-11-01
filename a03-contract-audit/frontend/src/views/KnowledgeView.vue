@@ -12,6 +12,7 @@ import {
   previewLegalImport,
   applyLegalImport,
   deleteKnowledge,
+  updateKnowledgeApproval,
 } from '@/api/knowledge'
 import type { LegalImportPreview, LegalImportResult } from '@/api/knowledge'
 import type { KnowledgeCard, KnowledgeCat } from '@/mock/knowledge'
@@ -79,7 +80,9 @@ function onPageChange(page: number) {
 
 // 关键词命中高亮
 function highlight(text: string): string {
-  const kw = keyword.value.trim()
+  const escapeHtml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+  text = escapeHtml(text)
+  const kw = escapeHtml(keyword.value.trim())
   if (!kw) return text
   return text.replace(new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'g'), '<mark>$1</mark>')
 }
@@ -89,10 +92,16 @@ const detailOpen = ref(false)
 const active = ref<KnowledgeCard | null>(null)
 const detailContent = ref('')     // 完整正文（懒加载）
 const detailLoading = ref(false)
+const detailMeta = ref<Awaited<ReturnType<typeof getKnowledgeDetail>> | null>(null)
+const approvalSaving = ref(false)
+const trustLabels: Record<string, string> = {
+  unverified: '未核验', approved_internal: '已批准', rejected: '已拒绝', authoritative: '权威法源',
+}
 
 async function openDetail(c: KnowledgeCard) {
   active.value = c
   detailContent.value = c.desc   // 先显示截断摘要，避免白屏
+  detailMeta.value = null
   detailOpen.value = true
   // 懒加载完整内容
   const numId = parseInt(c.id.replace(/\D/g, ''))
@@ -101,11 +110,33 @@ async function openDetail(c: KnowledgeCard) {
   try {
     const detail = await getKnowledgeDetail(numId)
     detailContent.value = detail.content
+    detailMeta.value = detail
   } catch {
     // 失败时保留截断摘要，不弹错误
   } finally {
     detailLoading.value = false
   }
+}
+
+async function updateApproval(status: 'approved_internal' | 'rejected' | 'unverified') {
+  if (!isAdmin.value || !active.value || !detailMeta.value) return
+  if (status === 'approved_internal' && detailMeta.value.legal_article_id) {
+    ElMessage.warning('权威法源需通过校验导入流程恢复')
+    return
+  }
+  try {
+    const { value: reason } = await ElMessageBox.prompt('请填写本次知识库信任状态变更原因', '知识库审核留痕', {
+      inputType: 'textarea', inputValidator: value => (value?.trim().length ?? 0) >= 2 || '原因至少 2 个字符',
+      confirmButtonText: '提交', cancelButtonText: '取消',
+    })
+    approvalSaving.value = true
+    const numericId = parseInt(active.value.id.replace(/\D/g, ''))
+    await updateKnowledgeApproval(numericId, { status, reason, expected_version: detailMeta.value.approval_version })
+    await openDetail(active.value)
+    ElMessage.success('知识库信任状态已更新')
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('知识库审核失败，请刷新后重试')
+  } finally { approvalSaving.value = false }
 }
 
 function copyClause() {
@@ -517,9 +548,18 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
     </div>
 
     <!-- 详情 -->
-    <el-dialog v-model="detailOpen" :title="active?.title" width="620px">
+    <el-dialog v-model="detailOpen" :title="active?.title" width="min(620px, calc(100vw - 24px))">
       <template v-if="active">
         <el-tag :type="catType[active.cat]" size="small" style="margin-bottom: 12px">{{ active.cat }}</el-tag>
+        <div v-if="detailMeta" class="trust-meta">
+          <el-tag size="small" :type="detailMeta.trust_status === 'rejected' ? 'danger' : detailMeta.trust_status === 'approved_internal' || detailMeta.trust_status === 'authoritative' ? 'success' : 'warning'">
+            {{ trustLabels[detailMeta.trust_status] || detailMeta.trust_status }}
+          </el-tag>
+          <span class="hint">审核版本 {{ detailMeta.approval_version }}</span>
+          <el-button v-if="isAdmin && !detailMeta.legal_article_id" size="small" :loading="approvalSaving" @click="updateApproval('approved_internal')">批准为内部依据</el-button>
+          <el-button v-if="isAdmin && detailMeta.trust_status !== 'authoritative'" size="small" :loading="approvalSaving" @click="updateApproval('rejected')">拒绝</el-button>
+          <el-button v-if="isAdmin && detailMeta.trust_status !== 'authoritative' && detailMeta.trust_status !== 'unverified'" size="small" :loading="approvalSaving" @click="updateApproval('unverified')">撤销审核</el-button>
+        </div>
         <div v-loading="detailLoading" style="min-height: 60px">
           <p class="detail-desc">{{ detailContent }}</p>
         </div>
@@ -838,6 +878,14 @@ function onCatClick(cat: '全部' | KnowledgeCat) {
   color: var(--ivory);
   margin: 0 0 14px;
 }
+.trust-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 14px;
+}
+.trust-meta .hint { color: var(--muted); font-size: 12px; }
 
 /* 批量导入弹窗 */
 .batch-config {

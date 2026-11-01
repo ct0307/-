@@ -24,6 +24,22 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.session import Base
 
 
+class AuditWorkflow(Base):
+    """机器运行快照及独立人工终审，按合同代次保留。"""
+    __tablename__ = 'audit_workflows'
+    __table_args__ = (UniqueConstraint('contract_id', 'audit_generation', name='uq_workflow_generation'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey('contracts.id'), index=True)
+    audit_generation: Mapped[int] = mapped_column(Integer)
+    audit_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    snapshot_json: Mapped[str] = mapped_column(Text, default='{}')
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    review_json: Mapped[str] = mapped_column(Text, default='{}')
+    published_fingerprint: Mapped[str] = mapped_column(String(64), default='')
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -82,6 +98,18 @@ class Contract(Base):
     parse_cache: Mapped["ContractParseCache | None"] = relationship(
         back_populates="contract", cascade="all, delete-orphan", uselist=False
     )
+
+
+class ContractHandoff(Base):
+    """独立于解析和审查任务的业务交接记录，每份合同一条。"""
+    __tablename__ = "contract_handoffs"
+    contract_id: Mapped[int] = mapped_column(ForeignKey("contracts.id"), primary_key=True)
+    state: Mapped[str] = mapped_column(String(24), default="draft", server_default="draft")
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    submitted_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    assigned_to: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ContractParseCache(Base):
@@ -292,7 +320,7 @@ class AuditWindowRun(Base):
     __table_args__ = (
         UniqueConstraint(
             "audit_job_id", "audit_generation", "agent", "dimensions_hash",
-            "window_id", "protocol_version", name="uq_audit_window_runs_identity",
+            "window_id", "protocol_version", "run_fingerprint", name="uq_audit_window_runs_identity",
         ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -307,6 +335,7 @@ class AuditWindowRun(Base):
     parent_window_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     depth: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     protocol_version: Mapped[str] = mapped_column(String(32))
+    run_fingerprint: Mapped[str] = mapped_column(String(64), default="", server_default="")
     status: Mapped[str] = mapped_column(String(16))
     result_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
     issues_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
@@ -339,6 +368,12 @@ class Risk(Base):
     support_relation_status: Mapped[str] = mapped_column(String(16), default="unclear")
     support_validation_reason: Mapped[str] = mapped_column(Text, default="")
     support_validator_version: Mapped[str] = mapped_column(String(32), default="unvalidated")
+    support_validation_failed_stage: Mapped[str] = mapped_column(String(32), default="none")
+    support_validation_reason_code: Mapped[str] = mapped_column(String(64), default="")
+    applicability_status: Mapped[str] = mapped_column(String(24), default="unresolved")
+    applicability_reason_codes_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    rule_executions_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    decision_trace_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
     claim_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     claim_status: Mapped[str] = mapped_column(
         String(24), default="pending_evidence", server_default="pending_evidence"
@@ -407,6 +442,11 @@ class KnowledgeChunk(Base):
     category: Mapped[str] = mapped_column(String(32), index=True)  # law/rule/template
     source: Mapped[str] = mapped_column(String(255), default="")   # 来源（法规名/文件名）
     content: Mapped[str] = mapped_column(Text)                     # 切片正文
+    trust_status: Mapped[str] = mapped_column(String(24), default="unverified", server_default="unverified")
+    approved_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approval_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    approved_content_hash: Mapped[str] = mapped_column(String(64), default="", server_default="")
     embedding: Mapped[str] = mapped_column(Text, default="")       # JSON 序列化的向量
     article_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
     version: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -603,4 +643,35 @@ class Rectification(Base):
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     risk_id: Mapped[int | None] = mapped_column(ForeignKey("risks.id"), nullable=True)  # 溯源风险，可空
+    acceptance_criteria: Mapped[str] = mapped_column(Text, default="", server_default="")
+    contract_stage: Mapped[str] = mapped_column(String(16), default="unknown", server_default="unknown")
+    handling_method: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    collaborators_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    after_text: Mapped[str] = mapped_column(Text, default="", server_default="")
+    submitted_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acceptance_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    residual_risk: Mapped[str] = mapped_column(Text, default="", server_default="")
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    escalation_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    escalated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    __mapper_args__ = {"version_id_col": version}
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RectificationEvent(Base):
+    """不可经 API 修改的整改操作及完整快照。"""
+    __tablename__ = "rectification_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rectification_id: Mapped[int] = mapped_column(ForeignKey("rectifications.id"), index=True)
+    action: Mapped[str] = mapped_column(String(32))
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    actor: Mapped[str] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    from_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(16))
+    snapshot_json: Mapped[str] = mapped_column(Text)

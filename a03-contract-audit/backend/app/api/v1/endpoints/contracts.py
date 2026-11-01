@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile,
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import allowed_departments, get_current_user, require_roles
+from app.api.deps import allowed_departments, get_current_user, require_roles, require_department_access
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_db
@@ -67,6 +67,27 @@ def _raise_upload_validation_error(error: FileValidationError) -> None:
     )
     raise HTTPException(status_code, {"code": error.code, "message": error.message})
 
+
+def _validate_batch_capacity(files: list[UploadFile]) -> None:
+    """批次落盘前检查数量和原始总大小；单文件超限由逐项处理隔离。"""
+    if not files:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "至少上传 1 份合同")
+    if len(files) > settings.MAX_BATCH_FILES:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            {"code": "BATCH_TOO_LARGE", "message": f"单批最多上传 {settings.MAX_BATCH_FILES} 份合同"},
+        )
+    total_bytes = 0
+    for file in files:
+        while chunk := file.file.read(1024 * 1024):
+            total_bytes += len(chunk)
+        file.file.seek(0)
+    if total_bytes > settings.max_batch_size_bytes:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            {"code": "BATCH_TOO_LARGE", "message": f"单批总大小不得超过 {settings.MAX_BATCH_MB}MB"},
+        )
+
 # 风险等级聚合：取最高等级
 _LEVEL_RANK = {"high": 2, "medium": 1, "low": 0}
 _LEVEL_ZH = {2: "高风险", 1: "中风险", 0: "低风险"}
@@ -95,26 +116,65 @@ def _dept_accessible(contract, user) -> bool:
     return user.role == "admin" or contract.department in allowed_departments(user)
 
 
-# 审查状态推导：人工复核优先；其次是整改状态；其余为合规。
-def _derive_status(contract: Contract, risks: list) -> str:
+# 审查状态与整体等级均需受当前任务质量约束。
+def _derive_status(
+    contract: Contract, risks: list, *, assessment_complete: bool = False,
+    audit_item: AuditBatchItem | None = None,
+) -> str:
+    if contract.status == "audit_failed":
+        return "审查失败"
+    if contract.status in {"queued", "auditing", "reviewing", "validating", "parsing"}:
+        return "审查中"
     if contract.status == "failed":
         return "解析失败"
+    if contract.status in {"uploaded", "parsed"}:
+        return "未审查"
+    if audit_item is not None:
+        if audit_item.status == "failed":
+            return "审查失败"
+        if audit_item.status in {"queued", "parsing", "reviewing", "validating"}:
+            return "审查中"
     if contract.status == "review_required" or contract.requires_review:
         return "待人工复核"
+    if not assessment_complete:
+        return "待人工复核"
     if not risks:
-        return "合规"
+        return "未发现风险"
     if any(r.review_status in ("pending", "to_modify") for r in risks):
         return "待整改"
     if contract.status == "done":
         return "已整改"
-    return "合规"
+    return "待人工复核"
 
 
-def _derive_level(risks: list) -> str:
+def _derive_level(risks: list, *, assessment_complete: bool = False) -> str:
+    if not assessment_complete:
+        return "尚无法判断"
     if not risks:
-        return "低风险"
+        return "未发现风险"
     max_rank = max(_LEVEL_RANK.get(r.level, 0) for r in risks)
     return _LEVEL_ZH[max_rank]
+
+
+def _history_assessment_complete(contract: Contract, item: AuditBatchItem | None) -> bool:
+    """只有当前代次、成功且覆盖完整的任务，才能支撑整体风险等级。"""
+    if (
+        item is None or contract.status != "done" or item.status != "done"
+        or item.audit_generation != contract.audit_generation
+        or contract.requires_review
+    ):
+        return False
+    quality = quality_snapshot(item, contract)
+    coverage = safe_coverage(quality.result.get("coverage"))
+    return bool(
+        coverage and coverage["planned"] > 0
+        and coverage["completed"] == coverage["planned"]
+        and not quality.requires_review
+        and quality.result.get("status", "done") == "done"
+        and quality.result.get("requires_review", False) is False
+        and quality.result.get("quality_reasons", []) == []
+        and quality.result.get("issues", []) == []
+    )
 
 
 @router.get("", response_model=list[HistoryRow])
@@ -132,16 +192,31 @@ def list_contracts_history(
     # 批量预取上传者（避免 N+1）
     user_ids = {c.uploaded_by for c in contracts}
     users = {u.id: u for u in db.query(User).filter(User.id.in_(user_ids)).all()}
+    contract_ids = [c.id for c in contracts]
+    latest_items: dict[int, AuditBatchItem] = {}
+    if contract_ids:
+        items = db.query(AuditBatchItem).filter(
+            AuditBatchItem.contract_id.in_(contract_ids),
+        ).order_by(AuditBatchItem.audit_generation.desc(), AuditBatchItem.id.desc()).all()
+        for item in items:
+            latest_items.setdefault(item.contract_id, item)
     result: list[HistoryRow] = []
     for c in contracts:
-        risks = db.query(Risk).filter(Risk.contract_id == c.id).all()
+        item = latest_items.get(c.id)
+        risk_query = db.query(Risk).filter(Risk.contract_id == c.id)
+        risks = risk_query.filter(
+            Risk.audit_job_id == item.id
+            if item is not None and item.audit_generation > 0
+            else Risk.audit_job_id.is_(None),
+        ).all()
+        assessment_complete = _history_assessment_complete(c, item)
+        quality = quality_snapshot(item, c) if item else None
         submitter_obj = users.get(c.uploaded_by)
-        # 时间格式 YYYY-MM-DD HH:mm（本地化显示，非 ISO）
+        # SQLite 的 naive 时间为 UTC；传输时保留时区，由客户端本地化。
         dt = c.created_at
-        if dt.tzinfo is not None:
-            # SQLite 以 UTC 存储，直接取 naive 字符串
-            dt = dt.replace(tzinfo=None)
-        time_str = dt.strftime("%Y-%m-%d %H:%M") if dt else ""
+        if dt is not None and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        time_str = dt.isoformat() if dt else ""
         submitter_raw = submitter_obj.username if submitter_obj else ""
         result.append(HistoryRow(
             id=f"C{c.id:04d}",
@@ -149,27 +224,28 @@ def list_contracts_history(
             type=c.contract_type or "",
             submitter=masking.apply_history_row_masking({"submitter": submitter_raw}, user.role)["submitter"],
             time=time_str,
-            level=_derive_level(risks),
+            level=_derive_level(risks, assessment_complete=assessment_complete),
             riskCount=len(risks),
-            status=_derive_status(c, risks),
+            status=_derive_status(c, risks, assessment_complete=assessment_complete, audit_item=item),
+            assessmentComplete=assessment_complete,
+            coverage=safe_coverage(quality.result.get("coverage")) if quality else None,
         ))
     return result
 
 
 @router.post("/batch-upload")
 def batch_upload_contracts(
-    files: list[UploadFile] = File(..., description="批量上传合同文件，最多50份"),
+    files: list[UploadFile] = File(..., description="批量上传合同文件，容量按服务器配置校验"),
     contract_type: str = "",
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(["legal", "finance", "admin"])),
+    user: User = Depends(require_roles("legal", "finance", "admin")),
 ) -> list[dict]:
-    """批量上传合同：一次最多50份，逐文件处理。
+    """批量上传合同：按统一配置限制容量，逐文件处理。
 
     每份文件独立上传 + 加密存储 + 文本解析，互不影响（单文件失败不中断其余）。
     返回每份文件的处理结果列表，包含 contract_id / status / error。
     """
-    if len(files) > 200:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次最多上传 200 份合同")
+    _validate_batch_capacity(files)
     confirmed_type = contract_type.strip()
     if not confirmed_type:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "请先确认合同类型")
@@ -190,8 +266,8 @@ def batch_upload_contracts(
                 results.append({"filename": fname, "status": "failed", "error": f"不支持的文件类型 {ext}"})
                 continue
             content = file.file.read()
-            if len(content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
-                results.append({"filename": fname, "status": "failed", "error": "文件超过大小限制"})
+            if len(content) > settings.max_file_size_bytes:
+                results.append({"filename": fname, "status": "failed", "error_code": "FILE_TOO_LARGE", "error": "文件超过大小限制"})
                 continue
             try:
                 validate_upload(fname, content)
@@ -306,15 +382,24 @@ def upload_contract(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    department: str = "",
 ) -> Contract:
+    target_department = department.strip() or user.department
+    require_department_access(user, target_department)
     filename = os.path.basename(file.filename or "unknown")
     ext = os.path.splitext(filename)[1].lower()
     if ext not in _ALLOWED_EXT:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"不支持的文件类型: {ext}")
 
     content = file.file.read()
-    if len(content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "文件超过大小限制")
+    if len(content) > settings.max_file_size_bytes:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, {
+            "code": "FILE_TOO_LARGE", "message": f"文件超过 {settings.MAX_UPLOAD_MB}MB 限制",
+        })
+    if len(content) > settings.max_batch_size_bytes:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, {
+            "code": "BATCH_TOO_LARGE", "message": f"单批总大小不得超过 {settings.MAX_BATCH_MB}MB",
+        })
 
     content_sha256 = hashlib.sha256(content).hexdigest()
     key = (idempotency_key or f"sha256:{content_sha256}").strip()
@@ -325,8 +410,8 @@ def upload_contract(
         Contract.upload_idempotency_key == key,
     ).first()
     if existing:
-        if existing.deleted_at is None and existing.content_sha256 != content_sha256:
-            raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键与文件内容不一致")
+        if existing.deleted_at is None and (existing.content_sha256 != content_sha256 or existing.department != target_department):
+            raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键与文件内容或归属部门不一致")
         if existing.deleted_at is None:
             return existing
 
@@ -358,7 +443,7 @@ def upload_contract(
             filename=filename,
             storage_path=stored_path,
             contract_type=contract_type,
-            department=user.department,
+            department=target_department,
             status="uploaded",
             uploaded_by=user.id,
             upload_idempotency_key=key,
@@ -383,7 +468,7 @@ def upload_contract(
             Contract.uploaded_by == user.id,
             Contract.upload_idempotency_key == key,
         ).first()
-        if duplicate and duplicate.content_sha256 == content_sha256:
+        if duplicate and duplicate.content_sha256 == content_sha256 and duplicate.department == target_department:
             return duplicate
         raise HTTPException(status.HTTP_409_CONFLICT, "上传幂等键冲突") from exc
     except HTTPException:
@@ -683,7 +768,7 @@ def _get_contract(db: Session, contract_id: int, user: User | None = None) -> Co
 def escalate_contract(
     contract_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_roles(["legal", "finance", "admin"])),
+    current_user: User = Depends(require_roles("legal", "finance", "admin")),
 ):
     """三方会审发起：更新合同状态 + 写审计日志。
 

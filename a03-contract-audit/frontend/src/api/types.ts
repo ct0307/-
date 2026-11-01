@@ -22,6 +22,8 @@ export type AuditProgressStage =
   | 'claimed'
   | 'parsing'
   | 'reviewing'
+  | 'discovering'
+  | 'enriching'
   | 'verifying'
   | 'persisting'
   | 'completed'
@@ -72,6 +74,17 @@ export interface ParseResult extends ContractQualityFields {
   missing_pages?: number[]
 }
 
+export interface ContractDocument extends ContractQualityFields {
+  contract_id: number
+  filename: string
+  status: 'available' | 'unavailable' | 'empty'
+  text: string
+  source?: 'native' | 'ocr' | 'mixed' | null
+  message?: string
+  total_pages?: number | null
+  missing_pages?: number[]
+}
+
 // 交叉验证 / 冲突消解项（后端审查态动态结果，不落库，随 audit 响应返回）
 export interface CrossCheckOut {
   id: string
@@ -100,6 +113,8 @@ export interface AuditResult {
   review_reason?: string | null
 }
 
+import type { DecisionTrace } from '@/utils/risk-evidence'
+
 export interface RiskOut {
   id: number
   agent: 'legal' | 'finance' | 'system'
@@ -112,13 +127,44 @@ export interface RiskOut {
   confidence: number
   tier: 'green' | 'yellow' | 'red' // 人工干预档位
   review_status: 'pending' | 'confirmed' | 'ignored' | 'to_modify'
-  rag_sources: Array<{ content: string; source: string; score: number }> // RAG 检索溯源
+  evidence_ids?: string[]
+  retrieval_attempts?: Array<{
+    attempt?: string
+    support_status?: string
+    candidate_match_status?: string
+    source_ids?: string[]
+    evidence_relations?: Array<{
+      source?: { source?: string; content?: string; id?: number; chunk_id?: number; evidence_id?: string }
+      relation?: string; status?: string; reason?: string; validator_version?: string
+      reason_code?: string; failed_stage?: string; mode?: string; rule_id?: string; rule_version?: string
+    }>
+  }>
+  rag_sources: Array<{ content: string; source: string; score: number; reliable?: boolean; applicability_status?: string }> // RAG 检索溯源
   evidence_status: 'supported' | 'partially_supported' | 'unsupported' | string
   original_text_verified: boolean | null
   requires_manual_review: boolean
   support_relation_status: 'supported' | 'unclear' | 'contradicted' | string
   support_validation_reason: string
   support_validator_version: string
+  support_validation_mode?: string
+  support_validation_failed_stage?: string
+  support_validation_reason_code?: string
   secondary_review_status?: 'not_required' | 'confirmed' | 'rejected' | 'conflict' | 'manual_required'
   secondary_review_reason?: string
+  applicability_status?: 'applicable' | 'unknown_as_of' | 'expired' | 'not_yet_effective' | 'unresolved' | string
+  applicability_reason_codes?: string[]
+  rule_executions?: Array<{
+    rule_id?: string
+    rule_version?: string
+    status?: string
+    reason_code?: string
+    calculation?: string
+  }>
+  decision_trace?: DecisionTrace
+  collaboration_trace?: {
+    discovered_by?: 'legal' | 'finance' | 'system' | string
+    reviewed_by?: string[]
+    corrected?: boolean
+    conflict?: boolean
+  } | null
 }

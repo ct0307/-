@@ -28,6 +28,12 @@ from app.models.models import (
 from app.schemas.import_batch import ConfirmImportItem, ImportBatchOut, ImportItemOut
 from app.services.batch.service import ACTIVE_AUDIT_ITEM_STATUSES
 from app.services.imports.file_validation import FileValidationError, validate_upload
+from app.services.imports.capacity import (
+    capacity_error as _capacity_error,
+    existing_batch_bytes,
+    record_upload_sizes,
+    serialize_append_transaction,
+)
 from app.services.imports.errors import failure_for_code
 from app.services.imports.service import summarize_import
 from app.tasks.dispatcher import dispatch_import_item
@@ -35,10 +41,6 @@ from app.tasks.dispatcher import dispatch_import_item
 router = APIRouter()
 
 _ALLOWED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
-_MAX_BATCH_FILES = 200
-_MAX_TOTAL_BYTES = 500 * 1024 * 1024
-
-
 @dataclass(frozen=True)
 class PreparedUpload:
     source: UploadFile
@@ -100,27 +102,23 @@ def _append_prepared_uploads(
     created_paths: list[str],
 ) -> list[ImportBatchItem]:
     new_items: list[ImportBatchItem] = []
-    total_bytes = 0
     filenames = {
         item.filename
         for item in batch.items
         if item.status != "deleted"
     }
     for index, upload in enumerate(uploads):
-        content = upload.source.file.read()
-        total_bytes += upload.size
+        content = upload.source.file.read() if upload.size <= settings.max_file_size_bytes else b""
         error_code = None
         error_message = None
         if upload.filename in filenames:
             error_code, error_message = "DUPLICATE_FILENAME", "本批次存在同名文件"
         elif upload.extension not in _ALLOWED_EXTENSIONS:
             error_code, error_message = "UNSUPPORTED_FILE_TYPE", "不支持的文件类型"
+        elif upload.size > settings.max_file_size_bytes:
+            error_code, error_message = "FILE_TOO_LARGE", "文件超过大小限制"
         elif not content:
             error_code, error_message = "EMPTY_FILE", "文件为空"
-        elif upload.size > settings.MAX_UPLOAD_MB * 1024 * 1024:
-            error_code, error_message = "FILE_TOO_LARGE", "文件超过大小限制"
-        elif total_bytes > _MAX_TOTAL_BYTES:
-            error_code, error_message = "BATCH_TOO_LARGE", "批次总大小超过 500MB"
         else:
             try:
                 validate_upload(upload.filename, content)
@@ -248,6 +246,16 @@ def _get_item(db: Session, batch_id: int, item_id: int, user: User) -> tuple[Imp
     return batch, item
 
 
+@router.get("/limits")
+def get_import_limits(user: User = Depends(get_current_user)) -> dict[str, int]:
+    """认证后读取与所有上传接口一致的当前容量配置（MB 按 1024² 字节计）。"""
+    return {
+        "max_file_mb": settings.MAX_UPLOAD_MB,
+        "max_batch_files": settings.MAX_BATCH_FILES,
+        "max_batch_mb": settings.MAX_BATCH_MB,
+    }
+
+
 @router.post("", response_model=ImportBatchOut, status_code=status.HTTP_202_ACCEPTED)
 def create_import(
     files: list[UploadFile] = File(...),
@@ -259,8 +267,8 @@ def create_import(
     key = idempotency_key.strip()
     if not 8 <= len(key) <= 128:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Idempotency-Key 长度必须为 8 至 128")
-    if not files or len(files) > _MAX_BATCH_FILES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次必须上传 1 至 200 份合同")
+    if not files:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "至少上传 1 份合同")
     target_department = (department or user.department).strip()
     require_department_access(user, target_department)
     uploads = _prepare_uploads(files)
@@ -273,6 +281,11 @@ def create_import(
         if existing.request_fingerprint and existing.request_fingerprint != request_fingerprint:
             _raise_idempotency_conflict()
         return _batch_out(existing)
+
+    if len(files) > settings.MAX_BATCH_FILES:
+        raise _capacity_error("BATCH_TOO_LARGE", f"单批最多上传 {settings.MAX_BATCH_FILES} 份合同")
+    if sum(upload.size for upload in uploads) > settings.max_batch_size_bytes:
+        raise _capacity_error("BATCH_TOO_LARGE", f"单批总大小不得超过 {settings.MAX_BATCH_MB}MB")
 
     batch = ImportBatch(
         owner_id=user.id,
@@ -293,6 +306,7 @@ def create_import(
             operation_key=key,
             created_paths=created_paths,
         )
+        record_upload_sizes(db, new_items, [upload.size for upload in uploads], user_id=user.id)
         db.add(AuditLog(
             user_id=user.id,
             action="import_create",
@@ -343,11 +357,22 @@ def append_import_items(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> ImportBatchOut:
+    with serialize_append_transaction(db):
+        return _append_import_items(batch_id, files, idempotency_key, db, user)
+
+
+def _append_import_items(
+    batch_id: int,
+    files: list[UploadFile],
+    idempotency_key: str,
+    db: Session,
+    user: User,
+) -> ImportBatchOut:
     key = idempotency_key.strip()
     if not 8 <= len(key) <= 128:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Idempotency-Key 长度必须为 8 至 128")
-    if not files or len(files) > _MAX_BATCH_FILES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次必须上传 1 至 200 份合同")
+    if not files:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "至少上传 1 份合同")
 
     batch = _get_batch(db, batch_id, user)
     if batch.owner_id != user.id:
@@ -383,14 +408,10 @@ def append_import_items(
             _raise_idempotency_conflict()
         return _batch_out(batch)
     visible_count = sum(item.status != "deleted" for item in batch.items)
-    if visible_count + len(uploads) > _MAX_BATCH_FILES:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            {
-                "code": "IMPORT_BATCH_LIMIT_EXCEEDED",
-                "message": "单个收件箱最多包含 200 份合同",
-            },
-        )
+    if visible_count + len(uploads) > settings.MAX_BATCH_FILES:
+        raise _capacity_error("BATCH_TOO_LARGE", f"单个收件箱最多包含 {settings.MAX_BATCH_FILES} 份合同")
+    if sum(upload.size for upload in uploads) + existing_batch_bytes(db, batch) > settings.max_batch_size_bytes:
+        raise _capacity_error("BATCH_TOO_LARGE", f"追加后单批总大小不得超过 {settings.MAX_BATCH_MB}MB")
 
     os.makedirs(settings.storage_path, exist_ok=True)
     created_paths: list[str] = []
@@ -407,6 +428,7 @@ def append_import_items(
             operation_key=key,
             created_paths=created_paths,
         )
+        record_upload_sizes(db, new_items, [upload.size for upload in uploads], user_id=user.id)
 
         db.add(AuditLog(
             user_id=user.id,

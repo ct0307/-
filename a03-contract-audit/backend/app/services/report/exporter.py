@@ -11,10 +11,12 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from app.models.models import AuditBatchItem, Contract, ContractClause, Rectification, Risk
+from app.models.models import AuditBatchItem, Contract, ContractClause, Rectification, RectificationEvent, Risk
 from app.services.report.renderers import export_report_docx, export_report_xlsx
 from app.services.report.payment_insights import analyze_payments
 from app.services.audit.result_snapshot import quality_snapshot, safe_coverage
+from app.services.report.operations import operational_summary
+from app.services.audit.evidence_state import evidence_validation_mode, is_current_evidence_verified
 
 DepartmentScope = str | set[str] | None
 
@@ -170,7 +172,16 @@ def build_report_snapshot(
         "requires_manual_review": bool(risk.requires_manual_review),
         "review_status": risk.review_status,
         "support_relation_status": risk.support_relation_status,
+        "support_validator_version": risk.support_validator_version,
+        "support_validation_mode": evidence_validation_mode(risk.decision_trace_json),
+        "support_validation_failed_stage": risk.support_validation_failed_stage,
+        "support_validation_reason_code": risk.support_validation_reason_code,
+        "evidence_ids": _json_value(risk.evidence_ids_json, []),
         "support_validation_reason": _clean_text(risk.support_validation_reason),
+        "applicability_status": risk.applicability_status,
+        "applicability_reason_codes": _json_value(risk.applicability_reason_codes_json, []),
+        "rule_executions": _json_value(risk.rule_executions_json, []),
+        "decision_trace": _json_value(risk.decision_trace_json, {}),
         "claim_id": risk.claim_id,
         "claim_status": risk.claim_status,
         "secondary_review_status": risk.secondary_review_status,
@@ -181,15 +192,46 @@ def build_report_snapshot(
     } for risk in visible_risks]
 
     visible_risk_ids = {row["id"] for row in risk_rows}
+    # 整改是独立业务记录，重审不能撤销已接受的剩余风险或抹去验收历史。
+    risks_by_id = {risk.id: risk for risk in all_risks}
+    jobs_by_id = {job.id: job for job in jobs}
     rectifications = []
-    if visible_risk_ids:
-        for row in db.query(Rectification).filter(Rectification.risk_id.in_(visible_risk_ids)).order_by(Rectification.id).all():
+    if risks_by_id:
+        tasks = db.query(Rectification).filter(Rectification.risk_id.in_(risks_by_id)).order_by(Rectification.id).all()
+        events_by_task = {}
+        if tasks:
+            for event in db.query(RectificationEvent).filter(RectificationEvent.rectification_id.in_([task.id for task in tasks])).order_by(RectificationEvent.id).all():
+                events_by_task.setdefault(event.rectification_id, []).append({
+                    "id": event.id, "action": event.action, "actor_id": event.actor_id,
+                    "actor": _clean_text(event.actor), "occurred_at": _iso(event.occurred_at),
+                    "from_status": event.from_status, "to_status": event.to_status,
+                    "snapshot": _json_value(event.snapshot_json, {}),
+                })
+        for row in tasks:
+            source_risk = risks_by_id[row.risk_id]
+            source_job = jobs_by_id.get(source_risk.audit_job_id)
             rectifications.append({
                 "id": row.id, "risk_id": row.risk_id, "contract": _clean_text(row.contract),
+                "contract_id": source_risk.contract_id, "audit_job_id": source_risk.audit_job_id,
+                "audit_generation": source_job.audit_generation if source_job else None,
+                "source_scope": "current" if row.risk_id in visible_risk_ids else "historical",
                 "risk": _clean_text(row.risk), "level": row.level, "owner": _clean_text(row.owner),
                 "status": row.status, "created": row.created, "due": row.due,
                 "note": _clean_text(row.note), "created_at": _iso(row.created_at),
+                "acceptance_criteria": _clean_text(row.acceptance_criteria),
+                "contract_stage": row.contract_stage, "handling_method": row.handling_method,
+                "collaborators": _json_value(row.collaborators_json, []),
+                "evidence": _json_value(row.evidence_json, []), "after_text": _clean_text(row.after_text),
+                "resolution": _clean_text(row.resolution), "review_comment": _clean_text(row.review_comment),
+                "submitted_by": row.submitted_by, "submitted_at": _iso(row.submitted_at),
+                "reviewed_by": row.reviewed_by, "reviewed_at": _iso(row.reviewed_at), "closed_at": _iso(row.closed_at),
+                "acceptance_reason": _clean_text(row.acceptance_reason), "residual_risk": _clean_text(row.residual_risk),
+                "accepted_at": _iso(row.accepted_at), "escalation_reason": _clean_text(row.escalation_reason),
+                "escalated_at": _iso(row.escalated_at), "version": row.version,
+                "events": events_by_task.get(row.id, []),
             })
+    if any(task["source_scope"] == "historical" for task in rectifications):
+        notes.append("整改记录包含所选授权合同的历史审查任务；历史整改及剩余风险继续跟踪，不计入当前风险发现数。")
 
     categories = sorted({row["category"] for row in risk_rows})
     matrix_rows = []
@@ -208,13 +250,22 @@ def build_report_snapshot(
         "high": sum(row["level"] == "high" for row in risk_rows),
         "medium": sum(row["level"] == "medium" for row in risk_rows),
         "low": sum(row["level"] == "low" for row in risk_rows),
-        "supported": sum(row["evidence_status"] == "supported" and row["original_text_verified"] is True for row in risk_rows),
+        "supported": sum(is_current_evidence_verified(row) for row in risk_rows),
     }
     content = {
         "contract_ids": ids, "summary": summary, "contracts": contract_rows,
         "risks": risk_rows, "rectifications": rectifications,
         "matrix": {"categories": categories, "rows": matrix_rows}, "notes": notes,
     }
+    content["operations"] = operational_summary(content)
+    operations = content["operations"]
+    notes.extend([
+        f"运营口径 {operations['metric_version']}，统计日 {operations['as_of_date']}：高风险合同 {operations['high_risk_contracts']} 份，待复核风险 {operations['pending_risk_count']} 条，逾期整改 {operations['overdue_count']} 项，截止日期待确认 {operations['unknown_due_count']} 项。",
+        operations["amount_note"], operations["risk_count_basis"], "历史数据不足，未生成环比或同比。",
+        operations["risk_acceptance_note"],
+    ])
+    content["schema_version"] = "report-v2"
+    content["state"] = "NO_AUTH_SCOPE" if department_scope == set() else "NO_DATA" if not contracts else "NO_COMPLETED_AUDIT" if not any(value in _TERMINAL_SUCCESS for value in statuses) else "READY"
     notes.extend(["风险按各合同最新审查任务统计；失败或未完成任务不使用旧结果替代。", "证据已核验需原文精确定位且依据支持；无高风险不等于合规。", "上传日期用于导入趋势，不能解释为当日审查或整改效果。"])
     report_id = hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return {"report_id": report_id, "generated_at": datetime.now(timezone.utc).isoformat(), **content}

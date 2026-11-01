@@ -10,22 +10,25 @@ import jwt
 
 from app.core.config import settings
 
-# bcrypt 单次最多处理 72 字节，超出部分会被静默截断。
-# 直接截断到 72 字节，避免不同长度密码碰撞到同一哈希。
+# bcrypt 仅支持最多 72 字节；拒绝超长输入，避免截断造成密码前缀碰撞。
 _BCRYPT_MAX_BYTES = 72
 
 
-def _truncate(raw: str) -> bytes:
-    return raw.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+def encode_password(raw: str) -> bytes:
+    """校验 UTF-8 字节上限并完整编码，不记录或截断密码。"""
+    encoded = raw.encode("utf-8")
+    if len(encoded) > _BCRYPT_MAX_BYTES:
+        raise ValueError("密码的 UTF-8 编码不能超过 72 字节")
+    return encoded
 
 
 def hash_password(raw: str) -> str:
-    return bcrypt.hashpw(_truncate(raw), bcrypt.gensalt()).decode("utf-8")
+    return bcrypt.hashpw(encode_password(raw), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(raw: str, hashed: str) -> bool:
     try:
-        return bcrypt.checkpw(_truncate(raw), hashed.encode("utf-8"))
+        return bcrypt.checkpw(encode_password(raw), hashed.encode("utf-8"))
     except ValueError:
         return False
 

@@ -16,6 +16,7 @@ from app.llm.base import LLMResponse
 from app.models.models import AuditWindowRun, LLMCallLog
 from app.services.audit.protocol import AUDIT_PROTOCOL_VERSION, AgentReviewResult
 from app.services.audit.review_pipeline import BufferedWindowExecution, WindowReviewRequest
+from app.services.audit.workflow import fingerprint
 
 
 log = get_logger("audit.window_repository")
@@ -89,6 +90,16 @@ class SqlAlchemyWindowCheckpoint:
             "dimensions_hash": dimensions_hash(request.dimensions),
             "window_id": request.review_window.window.window_id,
             "protocol_version": self._protocol_version,
+            "run_fingerprint": fingerprint({
+                "run": request.run_fingerprint,
+                "text": request.review_window.window.text,
+                "system": request.system_prompt,
+                "discovery": request.discovery_system_prompt,
+                "enrichment": request.enrichment_system_prompt,
+                "input": request.build_user_prompt(
+                    request.review_window, 1, tuple(sorted(set(request.dimensions))),
+                ),
+            }),
         }
 
     def load_valid(self, request: WindowReviewRequest) -> AgentReviewResult | None:

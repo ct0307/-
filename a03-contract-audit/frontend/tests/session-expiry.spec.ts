@@ -35,7 +35,7 @@ async function login(page: Page) {
   await page.getByPlaceholder('密码').fill('test-password')
   await page.getByRole('button', { name: '登 录' }).click()
   await expect(page).toHaveURL(/\/dashboard$/)
-  await expect(page.getByText('累计审查合同', { exact: true })).toBeVisible()
+  await expect(page.getByText('累计导入合同', { exact: true })).toBeVisible()
 }
 
 async function requestError(page: Page, path: string) {

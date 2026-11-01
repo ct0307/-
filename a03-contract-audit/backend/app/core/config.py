@@ -3,6 +3,7 @@ import os
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
@@ -36,6 +37,8 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     # 审查是否走异步队列。生产开 True（需 Redis+worker）；本地无 Redis 时 False 同步执行。
     AUDIT_ASYNC: bool = False
+    # 本地同时处理的合同数，与单合同内部模型窗口并发分别限额。
+    AUDIT_LOCAL_CONCURRENCY: int = Field(default=2, ge=1, le=4)
 
     # 安全（生产环境必须通过 .env 覆盖）
     JWT_SECRET: str = "CHANGE_ME_IN_PRODUCTION"
@@ -44,7 +47,18 @@ class Settings(BaseSettings):
 
     # 文件存储（私有化本地存储）。相对路径按 backend 目录解析，避免依赖启动工作目录。
     STORAGE_DIR: str = "storage"
-    MAX_UPLOAD_MB: int = 50
+    MAX_UPLOAD_MB: int = Field(default=50, gt=0)
+    # 导入容量统一入口：新导入、旧兼容上传、前端提示和网关均以此为准。
+    MAX_BATCH_FILES: int = Field(default=200, gt=0)
+    MAX_BATCH_MB: int = Field(default=500, gt=0)
+
+    @property
+    def max_file_size_bytes(self) -> int:
+        return self.MAX_UPLOAD_MB * 1024 * 1024
+
+    @property
+    def max_batch_size_bytes(self) -> int:
+        return self.MAX_BATCH_MB * 1024 * 1024
 
     # 合同导入分类与草稿生命周期。
     CONTRACT_TYPE_CONFIRM_THRESHOLD: float = 0.60
@@ -68,9 +82,12 @@ class Settings(BaseSettings):
     DB_BACKEND: str = "sqlite"
     SQLITE_PATH: str = "storage/a03_dev.db"
 
-    # LLM Adapter：当前项目测试基线使用 DeepSeek 中转；生产环境需评估合同出公网风险
+    # LLM Adapter：外部端点必须由企业显式配置和授权。
     LLM_PROVIDER: str = "deepseek"  # qwen / deepseek / openclaw
-    LLM_BASE_URL: str = "https://yorhamc.com/v1"
+    MODEL_PROCESSING_MODE: Literal["private_model", "external_model", "rules_fallback"] = "external_model"
+    LLM_BASE_URL: str = ""
+    # 外部模型需显式授权完整 HTTPS 基地址（环境变量使用 JSON 数组）。
+    MODEL_EXTERNAL_ALLOWED_BASE_URLS: list[str] = Field(default_factory=list)
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "deepseek-v4-flash"
     LLM_TIMEOUT: int = 120
@@ -80,6 +97,11 @@ class Settings(BaseSettings):
     AUDIT_BATCH_SECONDARY_ENABLED: bool = False
     AUDIT_BATCH_ENRICHMENT_ENABLED: bool = False
     AUDIT_MODEL_CONCURRENCY: int = Field(default=2, ge=1, le=3)
+    AUDIT_MAX_MODEL_CALLS: int = Field(default=120, ge=1, le=1000)
+    AUDIT_MAX_TOKEN_BUDGET: int = Field(default=3000000, ge=1000, le=10000000)
+    AUDIT_DIRECTED_MAX_CALLS: int = Field(default=3, ge=0, le=10)
+    # 证据核验默认人工接管；仅在规则验证器经过评测后显式切换。
+    EVIDENCE_VALIDATION_MODE: Literal["manual_only", "deterministic"] = "manual_only"
 
     # Embedding 配置（RAG 向量化用）
     # EMBED_BACKEND=local（默认）：sentence-transformers 本地模型，合同数据不出企业
@@ -95,6 +117,11 @@ class Settings(BaseSettings):
     # 本地 bge 模型的查询侧检索指令前缀（官方推荐，仅 EMBED_BACKEND=local 时生效；
     # 知识入库的文档侧不加）。置空字符串可关闭。
     EMBED_QUERY_PREFIX: str = "为这个句子生成表示以用于检索相关文章："
+
+    # 可选 Cross-Encoder 精排。默认关闭；local 仅允许读取已审计的本地模型缓存。
+    RERANK_BACKEND: Literal["disabled", "local"] = "disabled"
+    RERANK_MODEL: str = "BAAI/bge-reranker-base"
+    RERANK_CANDIDATE_K: int = Field(default=30, ge=5, le=100)
 
     @model_validator(mode="after")
     def validate_production_security(self) -> "Settings":
@@ -157,6 +184,9 @@ settings = get_settings()
 def validate_llm_configuration(config: Settings) -> None:
     """校验模型连接的结构配置，不发起网络请求。"""
     errors: list[str] = []
+    from app.core.model_policy import check_model_endpoint
+    if config.MODEL_PROCESSING_MODE != "rules_fallback":
+        check_model_endpoint(config.LLM_BASE_URL, config)
     provider = config.LLM_PROVIDER.strip().lower()
     if provider not in {"qwen", "deepseek", "openclaw"}:
         errors.append("LLM_PROVIDER 不受支持")
@@ -168,11 +198,11 @@ def validate_llm_configuration(config: Settings) -> None:
     except ValueError:
         parsed = None
         errors.append("LLM_BASE_URL 端口无效")
-    if parsed is None or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    if config.MODEL_PROCESSING_MODE != "rules_fallback" and (parsed is None or parsed.scheme not in {"http", "https"} or not parsed.hostname):
         errors.append("LLM_BASE_URL 必须是有效的 HTTP(S) 地址")
-    if not config.LLM_MODEL.strip():
+    if config.MODEL_PROCESSING_MODE != "rules_fallback" and not config.LLM_MODEL.strip():
         errors.append("LLM_MODEL 不能为空")
-    if provider == "deepseek" and not config.LLM_API_KEY.strip():
+    if config.MODEL_PROCESSING_MODE != "rules_fallback" and provider == "deepseek" and not config.LLM_API_KEY.strip():
         errors.append("DeepSeek 模式必须配置 LLM_API_KEY")
 
     if errors:
@@ -182,6 +212,13 @@ def validate_llm_configuration(config: Settings) -> None:
 def llm_configuration_metadata(config: Settings) -> dict[str, str]:
     """返回可安全记录的模型配置摘要。"""
     validate_llm_configuration(config)
+    if config.MODEL_PROCESSING_MODE == "rules_fallback":
+        return {
+            "llm_provider": "rules",
+            "llm_model": "disabled",
+            "llm_endpoint": "",
+            "llm_config_fingerprint": sha256(b"rules_fallback").hexdigest()[:12],
+        }
     endpoint = safe_http_authority(config.LLM_BASE_URL.strip())
     if endpoint is None:
         raise ValueError("模型配置无效：LLM_BASE_URL 必须是有效的 HTTP(S) 地址")

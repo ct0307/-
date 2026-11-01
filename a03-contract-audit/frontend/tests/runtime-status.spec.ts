@@ -2,6 +2,10 @@ import { expect, test } from '@playwright/test'
 
 import { runtimeStatusText, type RuntimeStatus } from '../src/api/runtime'
 
+test('规则模式明确禁用模型，不伪装为离线重试', () => {
+  expect(runtimeStatusText({ status: 'degraded', checked_at: '', processing_mode: 'rules_fallback' })).toBe('模型调用已禁用，使用规则降级')
+})
+
 
 function status(state: RuntimeStatus['status']): RuntimeStatus {
   return {

@@ -27,6 +27,7 @@ from app.services.audit.jobs import (
     import_batch_request_fingerprint,
     normalize_dimensions,
 )
+from app.services.audit.failure import audit_failure
 from app.services.batch.service import (
     ACTIVE_AUDIT_ITEM_STATUSES,
     retry_failed_item,
@@ -38,8 +39,13 @@ router = APIRouter()
 log = get_logger("batches")
 
 _ALLOWED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
-_MAX_BATCH_FILES = 200
-_MAX_TOTAL_BYTES = 500 * 1024 * 1024
+
+
+def _capacity_error(code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        {"code": code, "message": message},
+    )
 
 
 @dataclass(frozen=True)
@@ -50,8 +56,13 @@ class _ValidatedUpload:
 
 
 def _validate_uploads(files: list[UploadFile]) -> list[_ValidatedUpload]:
-    if not files or len(files) > _MAX_BATCH_FILES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "单次必须上传 1 至 200 份合同")
+    if not files:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "至少上传 1 份合同")
+    if len(files) > settings.MAX_BATCH_FILES:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            {"code": "BATCH_TOO_LARGE", "message": f"单批最多上传 {settings.MAX_BATCH_FILES} 份合同"},
+        )
 
     validated: list[_ValidatedUpload] = []
     total_bytes = 0
@@ -63,11 +74,11 @@ def _validate_uploads(files: list[UploadFile]) -> list[_ValidatedUpload]:
         content = file.file.read()
         if not content:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"文件为空: {filename}")
-        if len(content) > settings.MAX_UPLOAD_MB * 1024 * 1024:
-            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"文件超过大小限制: {filename}")
+        if len(content) > settings.max_file_size_bytes:
+            raise _capacity_error("FILE_TOO_LARGE", f"文件超过 {settings.MAX_UPLOAD_MB}MB 限制: {filename}")
         total_bytes += len(content)
-        if total_bytes > _MAX_TOTAL_BYTES:
-            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "批次总大小超过 500MB")
+        if total_bytes > settings.max_batch_size_bytes:
+            raise _capacity_error("BATCH_TOO_LARGE", f"单批总大小不得超过 {settings.MAX_BATCH_MB}MB")
         validated.append(_ValidatedUpload(filename, extension, content))
     return validated
 
@@ -443,6 +454,9 @@ def retry_batch(
     pending_dispatch: list[AuditBatchItem] = []
     for item in batch.items:
         if item.status != "failed":
+            continue
+        failure = audit_failure(item)
+        if failure is None or not failure.retryable:
             continue
         decision = retry_failed_item(item.status, attempts=item.attempts)
         item.status = decision.status

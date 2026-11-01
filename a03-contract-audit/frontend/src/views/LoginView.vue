@@ -50,8 +50,8 @@ async function onSubmit() {
           </div>
         </div>
         <ul class="brand-points">
-          <li>私有化部署 · 合同数据不出企业</li>
-          <li>RAG 可解释审查 · 每条风险可溯源到法条</li>
+          <li>支持私有化部署 · 数据出站取决于模型配置</li>
+          <li>RAG 辅助审查 · 未核验依据交由人工确认</li>
           <li>法务 / 财务双 Agent 协同 · 人工复核闭环</li>
         </ul>
         <p class="brand-foot">合同风险体检 · 合规留痕 · 一站交付</p>

@@ -5,39 +5,28 @@ import type { RiskOut } from './types'
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+  state?: string
+  references?: { evidence_id: string; kind: string }[]
 }
 
 export interface ChatRequest {
-  risk_context: {
-    category: string
-    original_text: string
-    basis: string
-    suggestion: string
-    confidence: number
-  }
+  risk_id: number
   message: string
-  history: ChatMessage[]
 }
 
 export interface ChatResponse {
   reply: string
   model: string
+  state: string
+  references: { evidence_id: string; kind: string }[]
 }
 
 export async function chatWithRisk(
-  risk: Pick<RiskOut, 'category' | 'original_text' | 'basis' | 'suggestion' | 'confidence'>,
+  risk: Pick<RiskOut, 'id'>,
   message: string,
-  history: ChatMessage[],
 ): Promise<ChatResponse> {
   return client.post('/chat', {
-    risk_context: {
-      category: risk.category,
-      original_text: risk.original_text,
-      basis: risk.basis,
-      suggestion: risk.suggestion,
-      confidence: risk.confidence,
-    },
+    risk_id: risk.id,
     message,
-    history,
   })
 }

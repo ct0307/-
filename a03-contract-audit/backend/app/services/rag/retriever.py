@@ -38,10 +38,13 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.llm.base import LLMError
 from app.llm.factory import get_embedding_adapter
-from app.models.models import KnowledgeChunk, LegalArticle
+from app.models.models import KnowledgeChunk, LegalArticle, LegalSource
+from app.services.rag.trust import approval_fingerprint, reference_sources
 from app.services.rag.revision import bump_knowledge_revision, current_knowledge_revision
 from app.services.rag.legal_sources import chinese_number_to_int, int_to_chinese_number
+from app.services.rag.reranker import get_reranker
 from app.services.rag.snapshot import RetrievalSnapshot, SnapshotStore
+from app.services.rag.applicability import assess_applicability
 
 log = get_logger("rag")
 
@@ -122,8 +125,13 @@ def _load_docs_from_session(db: Session) -> tuple[tuple, ...]:
         KnowledgeChunk.embedding_dimension, KnowledgeChunk.scope_mode,
         KnowledgeChunk.legal_article_id, KnowledgeChunk.chunk_index,
         KnowledgeChunk.chunk_count, LegalArticle.content,
+        LegalSource.source_id, LegalSource.title, LegalSource.file_sha256, LegalArticle.content_hash,
+        KnowledgeChunk.trust_status, KnowledgeChunk.approved_by, KnowledgeChunk.approved_at,
+        KnowledgeChunk.approved_content_hash, KnowledgeChunk.approval_version,
     ).outerjoin(
         LegalArticle, KnowledgeChunk.legal_article_id == LegalArticle.id
+    ).outerjoin(
+        LegalSource, LegalArticle.source_id == LegalSource.source_id
     ).all()
     return tuple(tuple(row) for row in rows)
 
@@ -232,7 +240,7 @@ def retrieve(
         contract_type=contract_type,
         dimensions=dimensions or [],
         categories=categories or [],
-        as_of=as_of or date.today(),
+        as_of=as_of,
     )
     if not docs:
         log.info("rag.retrieve", mode="filtered_empty", matched=0)
@@ -248,6 +256,16 @@ def retrieve(
             doc for doc in docs
             if (_doc_value(doc, 5) or _extract_article_number(doc[1])) == article_number
         ]
+        named, identities = reference_sources(plan.original_query, docs)
+        if named:
+            exact_docs = [doc for doc in exact_docs if str(_doc_value(doc, 18) or doc[2]) in identities]
+        # 同名旧导入不能盖过有法源身份的正式父记录。
+        canonical_titles = {_doc_value(doc, 19) for doc in exact_docs if _doc_value(doc, 18)}
+        exact_docs = [doc for doc in exact_docs if _doc_value(doc, 18) or doc[2] not in canonical_titles]
+        source_keys = {str(_doc_value(doc, 18) or doc[2]) for doc in exact_docs}
+        if len(source_keys) > 1:
+            log.info("rag.ambiguous_reference", article_number=article_number, source_ids=sorted(source_keys))
+            return []
         if not exact_docs:
             return []
         exact_docs.sort(key=lambda doc: (
@@ -255,7 +273,12 @@ def retrieve(
             _doc_value(doc, 15, 0) or 0,
             doc[0],
         ))
-        result = _result_from_doc(exact_docs[0], score=1.0, retrieval_mode="exact")
+        result = _result_from_doc(
+            exact_docs[0],
+            score=1.0,
+            retrieval_mode="exact",
+            as_of=as_of,
+        )
         log.info("rag.retrieve", mode="exact", matched=1)
         return [result]
 
@@ -289,7 +312,12 @@ def retrieve(
 
     mode = "hybrid" if vec_ok else "bm25"
     ranked_results = [
-        _result_from_doc(id_to_doc[doc_id], score=score, retrieval_mode=mode)
+        _result_from_doc(
+            id_to_doc[doc_id],
+            score=score,
+            retrieval_mode=mode,
+            as_of=as_of,
+        )
         for doc_id, score in fused
     ]
     route_ranks = {
@@ -299,11 +327,10 @@ def retrieve(
         }
         for doc_id, _score in fused
     }
-    reranked = rerank_results(
+    reranked = _rerank_candidates(
         query,
         apply_contract_domain_boost(ranked_results, query),
         route_ranks=route_ranks,
-        top_k=len(ranked_results),
         expanded_query=plan.expanded_query,
     )
     results = collapse_by_article(reranked)[:top_k]
@@ -395,18 +422,128 @@ def rerank_results(
     return ranked[:top_k]
 
 
-def _result_from_doc(doc: tuple, *, score: float, retrieval_mode: str) -> dict:
+def _rerank_candidates(
+    query: str,
+    candidates: list[dict],
+    *,
+    route_ranks: dict[int, dict[str, int | None]],
+    expanded_query: str,
+) -> list[dict]:
+    """可选精排候选前缀；任意异常都保留完整 RRF 顺序。"""
+    try:
+        configured = get_reranker()
+    except Exception as exc:
+        log.warning("rag.reranker_unavailable", error_type=type(exc).__name__)
+        return _fallback_rerank(
+            query,
+            candidates,
+            route_ranks=route_ranks,
+            expanded_query=expanded_query,
+            error_code="RERANK_LOAD_FAILED",
+        )
+    if configured is None:
+        return rerank_results(
+            query,
+            candidates,
+            route_ranks=route_ranks,
+            top_k=len(candidates),
+            expanded_query=expanded_query,
+        )
+
+    candidate_k = min(settings.RERANK_CANDIDATE_K, len(candidates))
+    head = candidates[:candidate_k]
+    tail = candidates[candidate_k:]
+    try:
+        ranked_head = rerank_results(
+            query,
+            head,
+            route_ranks=route_ranks,
+            top_k=len(head),
+            scorer=configured.score,
+            expanded_query=expanded_query,
+        )
+    except Exception as exc:
+        log.warning("rag.reranker_scoring_failed", error_type=type(exc).__name__)
+        return _fallback_rerank(
+            query,
+            candidates,
+            route_ranks=route_ranks,
+            expanded_query=expanded_query,
+            error_code="RERANK_SCORING_FAILED",
+        )
+    ranked_tail = rerank_results(
+        query,
+        tail,
+        route_ranks=route_ranks,
+        top_k=len(tail),
+        expanded_query=expanded_query,
+    )
+    return [*ranked_head, *ranked_tail]
+
+
+def _fallback_rerank(
+    query: str,
+    candidates: list[dict],
+    *,
+    route_ranks: dict[int, dict[str, int | None]],
+    expanded_query: str,
+    error_code: str,
+) -> list[dict]:
+    ranked = rerank_results(
+        query,
+        candidates,
+        route_ranks=route_ranks,
+        top_k=len(candidates),
+        expanded_query=expanded_query,
+    )
+    for item in ranked:
+        item["retrieval_trace"]["rerank_error_code"] = error_code
+    return ranked
+
+
+def _result_from_doc(
+    doc: tuple,
+    *,
+    score: float,
+    retrieval_mode: str,
+    as_of: date | None = None,
+) -> dict:
     matched_content = doc[1]
+    effective_date = _doc_value(doc, 7)
+    expiry_date = _doc_value(doc, 8)
+    applicability = assess_applicability(
+        effective_date,
+        expiry_date,
+        as_of,
+    )
+    trust_status = _doc_value(doc, 22, "unverified")
+    authoritative = bool(
+        _doc_value(doc, 18) and _doc_value(doc, 20) and _doc_value(doc, 17)
+        and hashlib.sha256(str(_doc_value(doc, 17)).encode("utf-8")).hexdigest() == _doc_value(doc, 21)
+    )
+    approved = bool(
+        trust_status == "approved_internal" and _doc_value(doc, 23) and _doc_value(doc, 24)
+        and _doc_value(doc, 25) == approval_fingerprint(_doc_value(doc, i) for i in (1, 2, 4, 5, 6, 7, 8, 9, 10, 13))
+    )
+    reliable = trust_status != "rejected" and (authoritative or approved)
     return {
         "chunk_id": doc[0],
         "matched_content": matched_content,
         "content": _doc_value(doc, 17) or matched_content,
-        "source": doc[2],
+        "source": _doc_value(doc, 19) or doc[2],
+        "source_id": _doc_value(doc, 18),
+        "trust_status": "rejected" if trust_status == "rejected" else "authoritative" if authoritative else "approved_internal" if approved else "unverified",
+        "provenance_type": "official_legal_source" if authoritative else "approved_rule" if approved else "user_upload",
+        "approval_version": _doc_value(doc, 26, 0),
         "score": round(score, 4),
         "article_number": _doc_value(doc, 5) or _extract_article_number(matched_content),
         "version": _doc_value(doc, 6),
+        "effective_date": effective_date.isoformat() if effective_date else None,
+        "expiry_date": expiry_date.isoformat() if expiry_date else None,
+        "applicability_status": applicability.status,
+        "applicability_reason_code": applicability.reason_code,
         "retrieval_mode": retrieval_mode,
-        "reliable": _doc_value(doc, 13) in {"global", "scoped"},
+        "reliable": bool(reliable),
         "legal_article_id": _doc_value(doc, 14),
         "chunk_index": _doc_value(doc, 15),
         "chunk_count": _doc_value(doc, 16),
@@ -487,7 +624,6 @@ def _filter_docs(
     wanted_type = contract_type.strip().casefold()
     wanted_dimensions = {value.strip().casefold() for value in (dimensions or []) if value.strip()}
     wanted_categories = {value.strip().casefold() for value in (categories or []) if value.strip()}
-    effective_on = as_of or date.today()
     filtered: list[tuple] = []
     for doc in docs:
         scope_mode = str(_doc_value(doc, 13, "unclassified") or "unclassified").casefold()
@@ -498,9 +634,9 @@ def _filter_docs(
             continue
         effective_date = _doc_value(doc, 7)
         expiry_date = _doc_value(doc, 8)
-        if effective_date and effective_date > effective_on:
+        if as_of is not None and effective_date and effective_date > as_of:
             continue
-        if expiry_date and expiry_date < effective_on:
+        if as_of is not None and expiry_date and expiry_date < as_of:
             continue
         contract_types = {value.casefold() for value in _json_string_list(_doc_value(doc, 9, "[]"))}
         doc_dimensions = {value.casefold() for value in _json_string_list(_doc_value(doc, 10, "[]"))}
@@ -855,6 +991,10 @@ def _keyword_search(query: str, top_k: int) -> list[dict]:
                 "legal_article_id": None,
                 "chunk_index": None,
                 "chunk_count": None,
+                "effective_date": None,
+                "expiry_date": None,
+                "applicability_status": "unknown_as_of",
+                "applicability_reason_code": "AS_OF_DATE_UNKNOWN",
             })
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:top_k]

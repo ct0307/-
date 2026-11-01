@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { Delete, DocumentChecked, RefreshRight, UploadFilled } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
 
-import type { ImportItem } from '@/api/imports'
+import { getImportLimits, type ImportItem } from '@/api/imports'
 import { importErrorMeta } from '@/utils/import-errors'
+import type { UploadLimits } from '@/config/upload-limits'
 
 const props = defineProps<{
   items: ImportItem[]
@@ -15,6 +16,7 @@ const props = defineProps<{
   allReadySelected: boolean
   someReadySelected: boolean
   canChangeDepartment: boolean
+  canReview?: boolean
   loading: boolean
 }>()
 
@@ -33,6 +35,23 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const dragging = ref(false)
 const draftTypes = ref<Record<number, string>>({})
 const draftDepartments = ref<Record<number, string>>({})
+const uploadLimits = ref<UploadLimits | null>(null)
+const uploadLimitsStatus = ref<'loading' | 'ready' | 'error'>('loading')
+const uploadLimitsHint = computed(() => {
+  if (uploadLimitsStatus.value === 'loading') return '正在读取上传限制…'
+  if (!uploadLimits.value) return '无法读取上传限制，上传时由服务器校验'
+  const limits = uploadLimits.value
+  return `单批最多 ${limits.maxBatchFiles} 份、总大小 ${limits.maxBatchMb} MB，单文件 ${limits.maxFileMb} MB`
+})
+
+onMounted(async () => {
+  try {
+    uploadLimits.value = await getImportLimits()
+    uploadLimitsStatus.value = 'ready'
+  } catch {
+    uploadLimitsStatus.value = 'error'
+  }
+})
 
 watch(
   () => props.items,
@@ -53,6 +72,7 @@ const counts = computed(() => ({
 }))
 
 const auditButtonLabel = computed(() => {
+  if (props.canReview === false) return '请通过合同交接提交法务审查'
   if (!counts.value.ready) return '暂无就绪合同'
   if (props.selectedIds.length) return `审查选中的 ${props.selectedIds.length} 份合同`
   return `审查全部 ${counts.value.ready} 份就绪合同`
@@ -179,7 +199,7 @@ async function deleteDraft(item: ImportItem) {
       >
       <el-icon><UploadFilled /></el-icon>
       <span class="upload-primary">添加合同</span>
-      <span class="upload-secondary">拖拽或选择 PDF、Word、TXT，单次最多 200 份</span>
+      <span class="upload-secondary" aria-live="polite">拖拽或选择 PDF、Word、TXT；{{ uploadLimitsHint }}</span>
     </div>
 
     <div class="summary-strip" aria-label="导入状态摘要">
@@ -335,7 +355,7 @@ async function deleteDraft(item: ImportItem) {
       <el-button
         type="primary"
         :loading="loading"
-        :disabled="counts.ready === 0"
+        :disabled="counts.ready === 0 || canReview === false"
         :aria-label="auditButtonLabel"
         @click="emit('auditReady')"
       >{{ auditButtonLabel }}</el-button>

@@ -14,7 +14,9 @@ import {
   type TierKey,
 } from '@/mock/collaboration'
 import type { RiskOut } from '@/api/types'
-import { evidenceMeta } from '@/utils/risk-evidence'
+import { riskEvidenceMeta, isEvidenceVerified } from '@/utils/risk-evidence'
+import { decisionMeta } from '@/utils/audit-trace'
+import { finalizeWorkflow, getWorkflow, type WorkflowView } from '@/api/workflow'
 
 const router = useRouter()
 const session = useAuditSessionStore()
@@ -24,10 +26,46 @@ const isLive = computed(() => session.step >= 2 && session.contractId !== null)
 const restoreError = ref('')
 async function restore() {
   restoreError.value = ''
-  try { await session.restoreCompletedAudit() }
+  try { await session.restoreCompletedAudit(); await restoreWorkflow() }
   catch (error) { restoreError.value = error instanceof Error ? error.message : '审查结果恢复失败' }
 }
 onMounted(restore)
+
+const workflow = ref<WorkflowView | null>(null)
+const workflowLoading = ref(false)
+const workflowError = ref('')
+const workflowStateLabel = computed(() => {
+  if (workflowError.value) return '加载失败'
+  if (workflowLoading.value) return '加载中'
+  return ({ not_available: '暂无快照', stale: '结果已失效', awaiting_review: '待终审',
+    review_changed: '意见已变化', published: '已发布' })[workflow.value?.state || 'not_available']
+})
+async function restoreWorkflow() {
+  if (!session.contractId) return
+  workflowLoading.value = true; workflowError.value = ''
+  try { workflow.value = await getWorkflow(session.contractId) }
+  catch (error) { workflowError.value = error instanceof Error ? error.message : '工作流状态加载失败' }
+  finally { workflowLoading.value = false }
+}
+async function finalizeCurrentWorkflow() {
+  if (workflowLoading.value || !workflow.value?.can_finalize || !session.contractId || !workflow.value.review_fingerprint) return
+  const comment = window.prompt('请填写终审意见（必填）')?.trim()
+  if (!comment) return
+  const qualityComment = workflow.value.requires_quality_ack ? window.prompt('请填写解析/审查质量核验意见（必填）')?.trim() || '' : ''
+  if (workflow.value.requires_quality_ack && !qualityComment) return
+  const resolutions: Record<string, string> = {}
+  for (const conflict of workflow.value.conflicts || []) {
+    const value = window.prompt(`请填写冲突 ${conflict.id} 的裁决意见：${conflict.trigger}\n${conflict.note}`)?.trim()
+    if (!value) return
+    resolutions[conflict.id] = value
+  }
+  workflowLoading.value = true
+  try {
+    workflow.value = await finalizeWorkflow(session.contractId, { expected_generation: workflow.value.generation, expected_version: workflow.value.version, review_fingerprint: workflow.value.review_fingerprint, comment, quality_comment: qualityComment, conflict_resolutions: resolutions })
+    ElMessage.success('人工终审已发布')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '终审发布失败，请刷新后重试') }
+  finally { workflowLoading.value = false }
+}
 
 // 未选择合同不注入演示风险。
 const risks = computed<RiskOut[]>(() => isLive.value ? session.risks : [])
@@ -42,10 +80,7 @@ function risksOf(agent: AgentKey) {
 function statsOf(agent: AgentKey) {
   const list = risksOf(agent)
   const high = list.filter((r) => r.level === 'high').length
-  const supported = list.filter((r) =>
-    'evidence_status' in r && r.evidence_status === 'supported'
-    && 'original_text_verified' in r && r.original_text_verified === true,
-  ).length
+  const supported = list.filter(isEvidenceVerified).length
   return { count: list.length, high, supported }
 }
 
@@ -54,10 +89,7 @@ const overview = computed(() => {
   const total = risks.value.length
   const high = risks.value.filter((r) => r.level === 'high').length
   const confirmed = risks.value.filter((r) => r.review_status === 'confirmed').length
-  const supported = risks.value.filter((r) =>
-    'evidence_status' in r && r.evidence_status === 'supported'
-    && 'original_text_verified' in r && r.original_text_verified === true,
-  ).length
+  const supported = risks.value.filter(isEvidenceVerified).length
   return { total, high, confirmed, supported }
 })
 
@@ -111,8 +143,7 @@ function tierOf(r: RiskOut): TierKey {
   if (r.level === 'high' || sensitive) return 'red'
   if (
     r.level === 'low'
-    && 'evidence_status' in r && r.evidence_status === 'supported'
-    && 'original_text_verified' in r && r.original_text_verified === true
+    && isEvidenceVerified(r)
   ) return 'green'
   return 'yellow'
 }
@@ -229,6 +260,24 @@ function goAudit() {
     <!-- 以下仅在有真实审查会话时展示 -->
     <template v-if="isLive">
 
+    <el-card shadow="never" class="workflow-card" v-loading="workflowLoading">
+      <template #header><div class="card-head"><span>审查工作流 · 主风险与终审</span><el-tag size="small" :type="workflow?.state === 'published' ? 'success' : workflow?.state === 'stale' ? 'danger' : 'warning'">{{ workflowStateLabel }}</el-tag></div></template>
+      <el-alert v-if="workflowError" :title="workflowError" type="error" :closable="false" />
+      <el-empty v-else-if="workflow?.state === 'not_available'" :description="workflow.message || '当前代次尚无工作流快照，请先完成审查'" />
+      <template v-else-if="workflow">
+        <p class="status-note">主风险 {{ workflow.groups?.length || 0 }} 项 · 待复核风险 {{ workflow.pending_count || 0 }} 项 · 定向复查 {{ workflow.directed_reviews?.length || 0 }} 项</p>
+        <div v-if="workflow.groups?.length" class="workflow-groups"><span v-for="group in workflow.groups" :key="group.issue_id" class="workflow-group">{{ group.category }} · {{ group.agents.join(' / ') }}</span></div>
+        <p v-if="workflow.conflicts?.length" class="status-note">仍有 {{ workflow.conflicts.length }} 项冲突需要人工裁决；模型复查不能替代终审。</p>
+        <p v-for="conflict in workflow.conflicts" :key="conflict.id" class="status-note">{{ conflict.id }} · {{ conflict.trigger }}：{{ conflict.note }}</p>
+        <p v-for="review in workflow.directed_reviews" :key="review.check_id" class="status-note">{{ review.check_id }} · {{ review.target_agent === 'legal' ? '法务' : review.target_agent === 'finance' ? '财务' : '人工' }}复查：{{ review.status !== 'reviewed' ? '需人工核验' : review.verdict === 'agree' ? '事实意见一致' : '事实意见不一致' }}</p>
+        <el-button v-if="workflow.can_finalize && workflow.state !== 'published'" type="primary" :disabled="workflowLoading || !!workflow.pending_count" @click="finalizeCurrentWorkflow">填写终审并发布</el-button>
+        <el-button v-else-if="workflow.state === 'published'" disabled>已完成终审发布</el-button>
+        <p v-if="workflow.budget" class="status-note">调用预算 {{ workflow.budget.calls || 0 }} / {{ workflow.budget.max_calls || 0 }}</p>
+      </template>
+      <el-empty v-else description="当前代次尚无工作流快照，请先完成审查" />
+      <el-button :disabled="workflowLoading" @click="restoreWorkflow">刷新工作流</el-button>
+    </el-card>
+
     <!-- 交叉验证 / 冲突消解：协同核心，展示跨 Agent 触发 -->
     <el-card shadow="never" class="cross-card">
       <template #header>
@@ -298,7 +347,7 @@ function goAudit() {
           <ul v-if="t.items.length" class="tier-items">
             <li v-for="r in t.items" :key="r.id">
               <span class="ti-cat">{{ r.category }}</span>
-              <span class="ti-conf mono">{{ evidenceMeta('evidence_status' in r ? r.evidence_status : null).label }}</span>
+              <span class="ti-conf mono">{{ riskEvidenceMeta(r).label }}</span>
             </li>
             <li v-if="t.meta.key === 'red' && conflictCount" class="ti-extra">
               + {{ conflictCount }} 项跨 Agent 冲突
@@ -377,7 +426,8 @@ function goAudit() {
             <p class="risk-line">{{ r.suggestion }}</p>
             <div class="risk-foot">
               <span class="basis mono">{{ r.basis }}</span>
-              <span class="conf mono">{{ evidenceMeta('evidence_status' in r ? r.evidence_status : null).label }}</span>
+              <span class="conf mono">{{ riskEvidenceMeta(r).label }}</span>
+              <span class="trace mono">决策：{{ decisionMeta(r.decision_trace?.status).label }}</span>
             </div>
           </article>
         </div>
@@ -394,6 +444,9 @@ function goAudit() {
   flex-direction: column;
   gap: 20px;
 }
+.workflow-card { border-top: 3px solid var(--amber); }
+.workflow-groups { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 14px; }
+.workflow-group { border:1px solid var(--line); border-radius:999px; padding:5px 9px; font-size:12px; color:var(--ivory-dim); }
 .page-head {
   display: flex;
   align-items: center;

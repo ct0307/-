@@ -2,13 +2,14 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
-    admin, auth, batches, chat, contracts, dashboard, imports, knowledge,
-    lookup, rectifications, risks, reports, rules, runtime,
+    admin, auth, batches, chat, contracts, dashboard, documents, imports, knowledge,
+    lookup, rectifications, risks, reports, rules, runtime, workflow,
 )
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["认证"])
 api_router.include_router(contracts.router, prefix="/contracts", tags=["合同"])
+api_router.include_router(documents.router, prefix="/contracts", tags=["合同正文"])
 api_router.include_router(batches.router, prefix="/batches", tags=["异步审查批次"])
 api_router.include_router(imports.router, prefix="/imports", tags=["合同导入收件箱"])
 api_router.include_router(risks.router, prefix="/risks", tags=["风险"])
@@ -20,4 +21,7 @@ api_router.include_router(rules.router, prefix="", tags=["规则与模板"])
 api_router.include_router(admin.router, prefix="/admin", tags=["权限与审计"])
 api_router.include_router(lookup.router, prefix="/admin", tags=["基础配置"])
 api_router.include_router(chat.router, prefix="/chat", tags=["追问"])
+from app.api.v1.endpoints import handoffs
+api_router.include_router(handoffs.router, prefix="/handoffs", tags=["合同交接"])
 api_router.include_router(runtime.router, prefix="/runtime", tags=["模型运行时"])
+api_router.include_router(workflow.router, prefix='/workflows', tags=['审查工作流'])

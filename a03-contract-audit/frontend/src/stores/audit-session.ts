@@ -105,6 +105,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   let uploadSequence = 0
   let generation = 0
   let _auditAbort: AbortController | null = null
+  let completedAuditAbort: AbortController | null = null
   // 0 未上传 / 1 已解析 / 2 已审查
   const step = ref(0)
 
@@ -144,11 +145,12 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
       try { localStorage.removeItem(SESSION_KEYS.completedAudit) } catch { /* 存储不可用时保留页面可用性。 */ }
       return
     }
+    const requestGeneration = generation
     try {
       return await loadCompletedAudit(selected.contractId, selected.filename, selected.jobId)
     } catch (error) {
       const status = (error as { response?: { status?: number } })?.response?.status
-      if (status === 403 || status === 404) {
+      if (requestGeneration === generation && (status === 403 || status === 404)) {
         try { localStorage.removeItem(SESSION_KEYS.completedAudit) } catch { /* 不覆盖原始请求错误。 */ }
       }
       throw error
@@ -172,6 +174,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   }
 
   function reset() {
+    cancelCompletedAuditLoad()
     generation += 1
     _auditAbort?.abort()
     _auditAbort = null
@@ -413,14 +416,18 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   ) {
     if (busy.value) throw new Error('当前任务处理中，请稍后再试')
     const requestGeneration = generation
+    const abortController = new AbortController()
+    completedAuditAbort = abortController
     busy.value = true
     try {
-      const initial = await getAuditStatus(selectedContractId, selectedJobId)
+      const initial = await getAuditStatus(selectedContractId, selectedJobId, abortController.signal)
+      if (requestGeneration !== generation) return initial
       const result = await waitForAuditTerminal(
         async () => initial,
-        { intervalMs: 0, maxAttempts: 1 },
+        { intervalMs: 0, maxAttempts: 1, signal: abortController.signal },
       )
-      const loadedRisks = await getRisks(selectedContractId, result.job_id ?? selectedJobId)
+      if (requestGeneration !== generation) return result
+      const loadedRisks = await getRisks(selectedContractId, result.job_id ?? selectedJobId, abortController.signal)
       if (requestGeneration !== generation) return result
 
       contractId.value = selectedContractId
@@ -433,8 +440,19 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
       rememberCompleted(selectedContractId, selectedFilename, result.job_id ?? selectedJobId)
       return result
     } finally {
-      if (requestGeneration === generation) busy.value = false
+      if (requestGeneration === generation) {
+        completedAuditAbort = null
+        busy.value = false
+      }
     }
+  }
+
+  function cancelCompletedAuditLoad() {
+    if (!completedAuditAbort) return
+    completedAuditAbort.abort()
+    completedAuditAbort = null
+    generation += 1
+    busy.value = false
   }
 
   function abortAudit() {
@@ -445,11 +463,14 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     }
   }
 
-  async function setRiskStatus(risk: RiskOut, status: RiskOut['review_status']) {
+  async function setRiskStatus(risk: RiskOut, status: RiskOut['review_status'], reviewComment = '') {
     const requestGeneration = generation
-    await updateRiskStatus(risk.id, status)
+    const response = await updateRiskStatus(risk.id, status, reviewComment)
     if (requestGeneration !== generation) return
     risk.review_status = status
+    if (response?.human_review) {
+      risk.decision_trace = { ...risk.decision_trace, human_review: response.human_review }
+    }
   }
 
   return {
@@ -475,6 +496,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     runAudit,
     resumeActiveAudit,
     loadCompletedAudit,
+    cancelCompletedAuditLoad,
     restoreCompletedAudit,
     abortAudit,
     setRiskStatus,

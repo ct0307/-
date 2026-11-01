@@ -11,6 +11,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from app.services.audit.evidence_state import evidence_validation_mode
 
 
 class RiskOut(BaseModel):
@@ -32,6 +33,22 @@ class RiskOut(BaseModel):
     support_relation_status: str = "unclear"
     support_validation_reason: str = ""
     support_validator_version: str = "unvalidated"
+    support_validation_failed_stage: str = "none"
+    support_validation_reason_code: str = ""
+    support_validation_mode: str = "manual_only"
+    applicability_status: str = "unresolved"
+    applicability_reason_codes: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("applicability_reason_codes", "applicability_reason_codes_json"),
+    )
+    rule_executions: list[dict] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("rule_executions", "rule_executions_json"),
+    )
+    decision_trace: dict = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("decision_trace", "decision_trace_json"),
+    )
     secondary_review_status: str = "not_required"
     secondary_review_reason: str = ""
     claim_id: str | None = None
@@ -75,6 +92,8 @@ class RiskOut(BaseModel):
         "evidence_ids",
         "retrieval_attempts",
         "contract_evidence",
+        "applicability_reason_codes",
+        "rule_executions",
         mode="before",
     )
     @classmethod
@@ -86,6 +105,22 @@ class RiskOut(BaseModel):
                 return []
             return parsed if isinstance(parsed, list) else []
         return value if isinstance(value, list) else []
+
+    @field_validator("decision_trace", mode="before")
+    @classmethod
+    def _parse_decision_trace(cls, value):
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value) if value else {}
+            except (TypeError, ValueError):
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return value if isinstance(value, dict) else {}
+
+    @model_validator(mode="after")
+    def _restore_validation_mode(self):
+        self.support_validation_mode = evidence_validation_mode(self.decision_trace)
+        return self
 
 
 class CrossCheckOut(BaseModel):
@@ -176,6 +211,7 @@ class ContractOut(BaseModel):
 
 class RiskStatusUpdate(BaseModel):
     review_status: str  # confirmed/ignored/to_modify
+    review_comment: str = Field(default="", max_length=2000)
 
 
 class KnowledgeImport(BaseModel):
@@ -273,6 +309,24 @@ class ContractTemplateCreate(BaseModel):
     clauses: list[str] = Field(default_factory=list)
 
 
+class RectificationEvidence(BaseModel):
+    contract_id: int
+    filename: str
+    content_sha256: str | None = None
+    description: str
+
+
+class RectificationEventOut(BaseModel):
+    id: int
+    action: str
+    actor_id: int
+    actor: str
+    occurred_at: datetime
+    from_status: str | None = None
+    to_status: str
+    snapshot: dict = Field(default_factory=dict)
+
+
 class RectificationOut(BaseModel):
     """整改项输出：id 序列化成前端约定的 RC001 形态字符串。"""
     id: str
@@ -289,10 +343,37 @@ class RectificationOut(BaseModel):
     review_comment: str = ""
     submitted_at: datetime | None = None
     closed_at: datetime | None = None
+    contract_id: int | None = None
+    department: str = ""
+    before_text: str = ""
+    original_text_verified: bool | None = None
+    acceptance_criteria: str = ""
+    contract_stage: str = "unknown"
+    handling_method: str = ""
+    collaborators: list[str] = Field(default_factory=list)
+    evidence: list[RectificationEvidence] = Field(default_factory=list)
+    after_text: str = ""
+    submitted_by: int | None = None
+    reviewed_by: int | None = None
+    reviewed_at: datetime | None = None
+    acceptance_reason: str = ""
+    residual_risk: str = ""
+    accepted_at: datetime | None = None
+    escalation_reason: str = ""
+    escalated_at: datetime | None = None
+    escalated_by: int | None = None
+    version: int = 1
+    events: list[RectificationEventOut] = Field(default_factory=list)
+    can_manage: bool = False
+    can_execute: bool = False
+    can_review: bool = False
+    can_accept: bool = False
+    can_escalate: bool = False
+    can_reopen: bool = False
 
     @classmethod
     def from_orm_row(cls, row) -> "RectificationOut":
-        return cls(
+        result = cls(
             id=f"RC{row.id:03d}",
             contract=row.contract,
             risk=row.risk,
@@ -308,12 +389,20 @@ class RectificationOut(BaseModel):
             submitted_at=row.submitted_at,
             closed_at=row.closed_at,
         )
+        for name in ("acceptance_criteria", "contract_stage", "handling_method", "after_text", "submitted_by", "reviewed_by", "reviewed_at", "acceptance_reason", "residual_risk", "accepted_at", "escalation_reason", "escalated_at", "escalated_by", "version"):
+            value = getattr(row, name, None)
+            if value is not None:
+                setattr(result, name, value)
+        result.collaborators = json.loads(getattr(row, "collaborators_json", "[]") or "[]")
+        result.evidence = [RectificationEvidence(**item) for item in json.loads(getattr(row, "evidence_json", "[]") or "[]")]
+        return result
 
 
 class RectificationCreate(BaseModel):
-    """新建整改项：AuditView 复核确认风险时生成。due 省略则默认创建日 +7 天。"""
-    contract: str
-    risk: str
+    """先验证来源权限，再由服务校验必填计划，避免越权信息泄露。"""
+    model_config = ConfigDict(extra="forbid")
+    contract: str = ""
+    risk: str = ""
     level: str = "medium"
     owner: str = ""
     status: str = "待处理"
@@ -321,6 +410,28 @@ class RectificationCreate(BaseModel):
     due: str | None = None
     note: str = ""
     risk_id: int | None = None
+    acceptance_criteria: str = ""
+    contract_stage: str = "unknown"
+    handling_method: str = ""
+    collaborators: list[str] = Field(default_factory=list)
+
+
+class RectificationPlanUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int | None = None
+    owner: str | None = None
+    due: str | None = None
+    note: str | None = None
+    acceptance_criteria: str | None = None
+    contract_stage: str | None = None
+    handling_method: str | None = None
+    collaborators: list[str] | None = None
+
+
+class RectificationEscalate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int | None = None
+    reason: str
 
 
 class LLMCallLogOut(BaseModel):
@@ -371,24 +482,32 @@ class AuditLogRowOut(BaseModel):
 
 
 class RectificationStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     status: str  # 待处理/处理中/待复核/已闭环
+    version: int | None = None
     resolution: str | None = None
     review_comment: str | None = None
+    evidence_contract_ids: list[int] | None = None
+    after_text: str | None = None
+    acceptance_reason: str | None = None
+    residual_risk: str | None = None
 
 
 class HistoryRow(BaseModel):
-    """审查记录行：前端 HistoryView 台账展示。8 字段，与前端 mock/history.ts 精确对齐。
+    """审查记录行：保留原台账字段，并提供整体结论完整度。
 
-    level/status 用中文枚举，time 格式 YYYY-MM-DD HH:mm，搜索/筛选在前端本地做。
+    level/status 用中文枚举，time 为带时区的 ISO 8601 导入时间，搜索/筛选在前端本地做。
     """
     id: str            # 格式 "C{合同id:04d}"
     name: str          # 合同文件名
     type: str          # 合同类型
     submitter: str     # 上传人用户名
-    time: str          # YYYY-MM-DD HH:mm
-    level: str         # 高风险/中风险/低风险
-    riskCount: int
-    status: str        # 合规/待整改/已整改
+    time: str          # ISO 8601，含时区
+    level: str         # 高风险/中风险/低风险/未发现风险/尚无法判断
+    riskCount: int     # 当前任务的候选数量；完整度为 false 时不代表完整审查结论
+    status: str        # 审查失败/未审查/审查中/待人工复核/未发现风险/待整改/已整改等
+    assessmentComplete: bool = False
+    coverage: AuditCoverageOut | None = None
 
 
 class LookupItemOut(BaseModel):

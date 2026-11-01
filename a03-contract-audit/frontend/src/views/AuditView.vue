@@ -4,10 +4,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight, RefreshRight, View, WarningFilled } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { getLookups } from '@/api/admin'
+import { getAuditStatus } from '@/api/contract'
 
 import type { RiskOut } from '@/api/types'
+import type { Handoff } from '@/api/handoffs'
 import type { AuditBatchItem } from '@/api/batches'
 import { useAuditSessionStore } from '@/stores/audit-session'
 import { useRectifyStore } from '@/stores/rectify'
@@ -16,7 +18,10 @@ import { useAuthStore } from '@/stores/auth'
 import { useBatchStore } from '@/stores/batch'
 import { useImportInboxStore } from '@/stores/import-inbox'
 import ContractInbox from '@/components/audit/ContractInbox.vue'
+import HandoffQueue from '@/components/audit/HandoffQueue.vue'
 import RiskReviewDrawer from '@/components/audit/RiskReviewDrawer.vue'
+import RectificationPlanDialog from '@/components/rectify/RectificationPlanDialog.vue'
+import type { RectificationPlan } from '@/mock/rectify'
 import AnnotationModal from '@/components/audit/AnnotationModal.vue'
 import {
   auditProgressDisplay,
@@ -24,13 +29,26 @@ import {
   type AuditUiState,
 } from '@/utils/audit-progress'
 import { formatOcrConfidence, reviewStatusLabel } from '@/utils/ocr-quality'
-import { evidenceMeta } from '@/utils/risk-evidence'
+import { riskEvidenceMeta, isEvidenceVerified } from '@/utils/risk-evidence'
+import { batchTimingSummary, reviewReasonSummary } from '@/utils/professional-review'
 
 const session = useAuditSessionStore()
 const rectify = useRectifyStore()
 const notify = useNotifyStore()
 const auth = useAuthStore()
 const batchStore = useBatchStore()
+const auditSetup = ref<HTMLElement | null>(null)
+const auditResults = ref<HTMLElement | null>(null)
+
+async function focusAuditSection(target: 'setup' | 'results') {
+  await nextTick()
+  const element = target === 'setup' ? auditSetup.value : auditResults.value
+  element?.focus({ preventScroll: true })
+  element?.scrollIntoView({
+    behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+    block: 'start',
+  })
+}
 const inbox = useImportInboxStore()
 const route = useRoute()
 const router = useRouter()
@@ -76,6 +94,7 @@ onMounted(async () => {
 })
 
 onMounted(async () => {
+  if (route.query.contractId && !session.hasActiveAudit) return
   if (!session.hasActiveAudit) {
     try { await session.restoreCompletedAudit() }
     catch { ElMessage.error('上次审查结果恢复失败，请从审查历史重新选择') }
@@ -135,6 +154,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  session.cancelCompletedAuditLoad()
   inbox.stopPolling()
   batchStore.stopPolling()
 })
@@ -201,6 +221,10 @@ async function deleteImportDraft(itemId: number) {
 }
 
 async function auditReadyItems() {
+  if (!['legal', 'finance', 'admin'].includes(auth.role)) {
+    ElMessage.warning('当前角色无权发起审查')
+    return
+  }
   const targetIds = [...inbox.auditTargetIds]
   if (!targetIds.length) return
   try {
@@ -210,9 +234,32 @@ async function auditReadyItems() {
     )
     await router.replace({ query: { ...route.query, batch: String(created.id) } })
     ElMessage.success(`已提交 ${created.total} 份合同`)
-    await inbox.pollOnce()
+    await focusAuditSection('results')
+    await inbox.startPolling()
   } catch {
     ElMessage.error(batchStore.error || '审查批次提交失败')
+  }
+}
+
+async function reviewHandoff(row: Handoff) {
+  if (session.busy || session.hasActiveAudit) {
+    ElMessage.warning('请先完成当前审查任务')
+    return
+  }
+  try {
+    if (row.audit_job_id) {
+      await session.loadCompletedAudit(row.contract_id, row.filename, row.audit_job_id)
+    } else {
+      session.reset()
+      session.contractId = row.contract_id
+      session.filename = row.filename
+      await session.runAudit(row.contract_type, dimensions.value.filter(item => item.on).map(item => item.key))
+    }
+    ElMessage.success('已打开交接合同的审查结果')
+    await nextTick()
+    document.querySelector<HTMLElement>('[data-audit-detail]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '审查结果加载失败')
   }
 }
 
@@ -245,6 +292,30 @@ const batchItemStatusType = {
   failed: 'danger',
 } as const
 
+const legacyRetryableCodes = new Set([
+  'MODEL_TIMEOUT',
+  'MODEL_UNAVAILABLE',
+  'AUDIT_PERSISTENCE_UNAVAILABLE',
+  'OUTPUT_TRUNCATED',
+  'INVALID_MODEL_OUTPUT',
+  'PAGINATION_EXHAUSTED',
+  'AUDIT_DEADLINE_EXCEEDED',
+])
+
+function batchFailureMessage(item: AuditBatchItem) {
+  return item.error?.trim() || (item.status === 'failed' ? item.review_reason?.trim() : '') || ''
+}
+
+function isRetryableFailure(item: AuditBatchItem) {
+  if (item.status !== 'failed') return false
+  if (typeof item.retryable === 'boolean') return item.retryable
+  return Boolean(item.error_code && legacyRetryableCodes.has(item.error_code))
+}
+
+const hasRetryableFailures = computed(() => {
+  return batchStore.batch?.items.some(isRetryableFailure) ?? false
+})
+
 const batchProgressStatus = computed(() => {
   const batch = batchStore.batch
   if (!batch) return undefined
@@ -266,6 +337,8 @@ async function retryAuditBatch() {
       dimensions.value.filter((item) => item.on).map((item) => item.key),
     )
     ElMessage.success(`已重新提交 ${result?.retried ?? 0} 个失败项`)
+    await focusAuditSection('results')
+    await inbox.startPolling()
   } catch {
     ElMessage.error(batchStore.error || '失败项重试失败')
   }
@@ -333,7 +406,48 @@ const sortedRisks = computed(() => {
 // —— 复核抽屉 ——
 const drawerOpen = ref(false)
 const annotationOpen = ref(false)
+const selectedContext = ref<{ id: number; filename: string; message: string } | null>(null)
+
+watch(() => [route.query.contractId, route.query.jobId] as const, async ([rawId, rawJobId], _, onCleanup) => {
+  const id = Number(rawId)
+  if (!Number.isInteger(id) || id <= 0) { selectedContext.value = null; return }
+  if (session.busy || session.hasActiveAudit) {
+    ElMessage.warning('请先完成当前审查任务，再切换合同')
+    return
+  }
+  const request = new AbortController()
+  onCleanup(() => {
+    request.abort()
+    session.cancelCompletedAuditLoad()
+  })
+  const filename = typeof route.query.filename === 'string' ? route.query.filename : `合同 ${id}`
+  selectedContext.value = { id, filename, message: '正在读取所选合同的审查状态…' }
+  session.reset()
+  session.contractId = id
+  session.filename = filename
+  const requestedJob = Number(rawJobId)
+  try {
+    const result = await getAuditStatus(id, Number.isInteger(requestedJob) && requestedJob > 0 ? requestedJob : undefined, request.signal)
+    if (request.signal.aborted) return
+    if (result.job_id && ['done', 'review_required'].includes(result.status)) {
+      await session.loadCompletedAudit(id, filename, result.job_id)
+      if (!request.signal.aborted) selectedContext.value = null
+    } else if (result.batch_id) {
+      await router.replace({ path: '/audit', query: { batch: String(result.batch_id) } })
+    } else {
+      selectedContext.value = { id, filename, message: '该合同尚无完整审查结果，可先核对原文。' }
+    }
+  } catch (error) {
+    if (!request.signal.aborted) selectedContext.value = { id, filename,
+      message: error instanceof Error ? `状态读取失败：${error.message}` : '状态读取失败，请从历史记录重试。' }
+  }
+}, { immediate: true })
 const activeRisk = ref<RiskOut | null>(null)
+const planRisk = ref<RiskOut | null>(null)
+const planOpen = ref(false)
+const planSaving = ref(false)
+const planError = ref('')
+const planInitial = ref<Partial<RectificationPlan>>({})
 function openReview(risk: RiskOut) {
   activeRisk.value = risk
   drawerOpen.value = true
@@ -341,24 +455,57 @@ function openReview(risk: RiskOut) {
 
 async function confirmRisk(risk: RiskOut) {
   try {
-    await session.setRiskStatus(risk, 'confirmed')
-    // 跨模块联动：生成整改项 + 推通知
-    await rectify.addFromRisk(risk, session.filename || '当前合同', auth.username)
-    notify.push('rectify', '生成整改项', `已就"${risk.category}"生成整改项，进入整改跟踪。`)
-    ElMessage.success('已确认并生成整改项')
+    if (risk.review_status !== 'confirmed') {
+      const { value: comment } = await ElMessageBox.prompt('请记录确认该风险的依据、处置判断或复核范围', '填写人工复核意见', {
+        inputType: 'textarea', inputPlaceholder: '至少说明你核对了什么以及为何确认', inputValidator: value => !!value?.trim() || '复核意见不能为空',
+        confirmButtonText: '提交确认', cancelButtonText: '取消',
+      })
+      await session.setRiskStatus(risk, 'confirmed', comment)
+    }
+    await rectify.load(true)
+    if (rectify.items.some(item => item.risk_id === risk.id)) {
+      ElMessage.info('风险已确认，已有整改任务，可在整改跟踪中查看。')
+      drawerOpen.value = false
+      return
+    }
+    if (planRisk.value?.id !== risk.id) planInitial.value = { note: risk.suggestion, contract_stage: 'unknown', handling_method: 'revision' }
+    planRisk.value = risk
+    planError.value = ''
     drawerOpen.value = false
-  } catch {
-    ElMessage.error('操作失败')
+    planOpen.value = true
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '风险确认失败，请重试')
   }
+}
+
+async function createPlan(plan: RectificationPlan) {
+  const risk = planRisk.value
+  if (!risk || planSaving.value) return
+  planSaving.value = true
+  planError.value = ''
+  planInitial.value = { ...plan, collaborators: [...plan.collaborators] }
+  try {
+    await rectify.addFromRisk(risk, session.filename || '当前合同', plan)
+    notify.push('rectify', '生成整改项', `已就“${risk.category}”生成整改任务，责任人：${plan.owner}。`)
+    ElMessage.success('整改任务已生成')
+    planOpen.value = false
+    planRisk.value = null
+  } catch (error) {
+    planError.value = `风险已确认，但整改任务未生成：${error instanceof Error ? error.message : '创建失败，请重试'}。表单已保留，可重试。`
+  } finally { planSaving.value = false }
 }
 
 async function ignoreRisk(risk: RiskOut) {
   try {
-    await session.setRiskStatus(risk, 'ignored')
+    const { value: comment } = await ElMessageBox.prompt('请说明为何判断为误报或无需处理', '填写人工复核意见', {
+      inputType: 'textarea', inputPlaceholder: '至少说明误报依据或排除理由', inputValidator: value => !!value?.trim() || '复核意见不能为空',
+      confirmButtonText: '提交误报', cancelButtonText: '取消',
+    })
+    await session.setRiskStatus(risk, 'ignored', comment)
     ElMessage.success('已标记为误报')
     drawerOpen.value = false
-  } catch {
-    ElMessage.error('操作失败')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error('操作失败')
   }
 }
 
@@ -385,38 +532,46 @@ const elementLabels: Record<string, string> = {
 
 // 3 步引导数据
 const onboardSteps = [
-  { num: '1', title: '上传合同', desc: '支持 PDF / Word / TXT，文件即刻加密存储' },
+  { num: '1', title: '上传合同', desc: '支持 PDF / Word / TXT，文件存入当前部署环境' },
   { num: '2', title: '确认信息', desc: '逐份核对合同类型与归属部门' },
-  { num: '3', title: '人工复核 / 生成整改', desc: '确认风险条款，自动生成整改跟踪项' },
+  { num: '3', title: '人工复核 / 生成整改', desc: '确认风险条款，明确计划后生成整改任务' },
 ]
 </script>
 
 <template>
   <div class="audit-page">
-    <ContractInbox
-      :items="inbox.batch?.items ?? []"
-      :contract-types="contractTypeOptions"
-      :departments="availableDepartments"
-      :selected-ids="inbox.selectedIds"
-      :ready-ids="inbox.readyIds"
-      :all-ready-selected="inbox.allReadySelected"
-      :some-ready-selected="inbox.someReadySelected"
-      :can-change-department="canChangeDepartment"
-      :loading="inbox.loading || batchStore.loading"
-      @upload="uploadFiles"
-      @confirm="confirmImportItem"
-      @retry="retryImportItem"
-      @remove-record="removeImportRecord"
-      @delete-draft="deleteImportDraft"
-      @toggle-selected="inbox.toggleSelected"
-      @toggle-all-ready="inbox.toggleAllReady"
-      @audit-ready="auditReadyItems"
-    />
+    <section ref="auditSetup" class="audit-setup" tabindex="-1" aria-label="审查设置">
+      <ContractInbox
+        :items="inbox.batch?.items ?? []"
+        :contract-types="contractTypeOptions"
+        :departments="availableDepartments"
+        :selected-ids="inbox.selectedIds"
+        :ready-ids="inbox.readyIds"
+        :all-ready-selected="inbox.allReadySelected"
+        :some-ready-selected="inbox.someReadySelected"
+        :can-change-department="canChangeDepartment"
+        :can-review="['legal', 'finance', 'admin'].includes(auth.role)"
+        :loading="inbox.loading || batchStore.loading"
+        @upload="uploadFiles"
+        @confirm="confirmImportItem"
+        @retry="retryImportItem"
+        @remove-record="removeImportRecord"
+        @delete-draft="deleteImportDraft"
+        @toggle-selected="inbox.toggleSelected"
+        @toggle-all-ready="inbox.toggleAllReady"
+        @audit-ready="auditReadyItems"
+      />
+    </section>
 
     <!-- 既有单份审查结果继续保留，历史会话恢复后仍可复核和生成整改。 -->
-    <div class="right-stack">
+    <section ref="auditResults" class="right-stack" tabindex="-1" aria-label="智能审查结果">
       <el-card shadow="never" class="result-panel">
-        <template #header><span class="panel-title">智能审查结果</span></template>
+        <template #header>
+          <div class="result-panel-header">
+            <span class="panel-title">智能审查结果</span>
+            <el-button v-if="batchStore.batch" text @click="focusAuditSection('setup')">返回审查设置</el-button>
+          </div>
+        </template>
         <section
           v-if="batchStore.batch"
           class="batch-result"
@@ -429,20 +584,29 @@ const onboardSteps = [
               <h2>{{ batchStatusLabel[batchStore.batch.status] }}</h2>
             </div>
             <el-button
-              v-if="batchStore.batch.failed > 0"
+              v-if="hasRetryableFailures"
               :icon="RefreshRight"
               :loading="batchStore.loading"
               @click="retryAuditBatch"
             >重试失败项</el-button>
           </div>
+          <p class="batch-feedback">机器处理进度（100% 不代表人工复核完成）</p>
           <el-progress
             class="batch-result-progress"
             :percentage="batchStore.progress"
             :status="batchProgressStatus"
           />
-          <p class="batch-summary mono">
-            已处理 {{ batchStore.batch.completed }} / {{ batchStore.batch.total }}，失败 {{ batchStore.batch.failed }}
+          <p class="batch-summary mono" role="status" aria-live="polite">
+            机器已处理 {{ batchStore.batch.completed }} / {{ batchStore.batch.total }}，失败 {{ batchStore.batch.failed }}
           </p>
+          <p class="batch-feedback">人工复核以各风险的复核记录为准。</p>
+          <p v-if="['queued', 'running'].includes(batchStore.batch.status)" class="batch-feedback">
+            任务已提交，进度将自动更新。可以离开页面，稍后返回查看。
+          </p>
+          <p v-else-if="batchStore.batch.failed > 0" class="batch-feedback">
+            失败合同尚未完成有效审查，请按下方原因处理后重新提交。
+          </p>
+          <p v-else class="batch-feedback">请选择下方合同查看结果，并核对需人工复核的内容。</p>
           <div class="batch-result-items">
             <div
               v-for="item in batchStore.batch.items"
@@ -453,11 +617,25 @@ const onboardSteps = [
               <div class="batch-result-item-top">
                 <div class="batch-result-item-main">
                   <strong>{{ item.filename }}</strong>
-                  <span v-if="item.error" class="batch-result-item-error">{{ item.error }}</span>
-                  <span
-                    v-else-if="item.status === 'review_required' && item.review_reason"
-                    class="batch-result-item-review-reason"
-                  >{{ item.review_reason }}</span>
+                  <template v-if="item.status === 'failed'">
+                    <span class="batch-result-item-error">
+                      {{ batchFailureMessage(item) || '审查未能生成完整可靠结果' }}
+                    </span>
+                    <span v-if="item.error_code" class="batch-result-item-code mono">
+                      错误码：{{ item.error_code }}
+                    </span>
+                    <span v-if="item.error_action" class="batch-result-item-action-hint">
+                      {{ item.error_action }}
+                    </span>
+                  </template>
+                  <template v-else-if="item.status === 'review_required' && item.review_reason">
+                    <span class="batch-result-item-review-reason">{{ reviewReasonSummary(item.review_reason) }}</span>
+                    <details v-if="reviewReasonSummary(item.review_reason) !== item.review_reason" class="batch-review-details">
+                      <summary>完整复核说明</summary>
+                      <p>{{ item.review_reason }}</p>
+                    </details>
+                  </template>
+                  <span v-if="batchTimingSummary(item)" class="batch-result-item-timing">{{ batchTimingSummary(item) }}</span>
                 </div>
                 <div class="batch-result-item-meta">
                   <el-tag :type="batchItemStatusType[item.status]" size="small">
@@ -498,7 +676,7 @@ const onboardSteps = [
           </div>
         </section>
         <!-- 3 步引导：未上传 / 已上传未审查时显示，代替纯文字空状态 -->
-        <div v-if="session.step < 2" class="onboard">
+        <div v-if="session.step < 2 && !batchStore.batch" class="onboard">
           <div
             v-for="(step, i) in onboardSteps"
             :key="step.num"
@@ -514,22 +692,22 @@ const onboardSteps = [
           </div>
         </div>
 
-        <template v-else>
+        <template v-if="session.step >= 2">
           <div class="result-head" data-audit-detail>
             <div>
               <span class="eyebrow mono">当前查看</span>
               <h2>{{ session.filename }}</h2>
             </div>
-            <el-button :icon="'Document'" @click="annotationOpen = true">查看合同全文批注</el-button>
+            <el-button v-if="['legal', 'finance', 'admin'].includes(auth.role)" :icon="'Document'" @click="annotationOpen = true">查看合同原文与批注</el-button>
           </div>
 
           <div v-if="session.requiresReview" class="ocr-review-alert" role="alert">
             <el-icon><WarningFilled /></el-icon>
             <div>
-              <strong>扫描件需人工复核</strong>
+              <strong>审查结果需人工复核</strong>
               <p>
-                {{ session.reviewReason || 'OCR 结果未达到自动采信门槛' }}
-                · OCR 置信度 {{ formatOcrConfidence(session.ocrConfidence) }}
+                {{ session.reviewReason || '请核对解析质量、风险依据及适用条件' }}
+                <span v-if="session.ocrConfidence != null"> · OCR 置信度 {{ formatOcrConfidence(session.ocrConfidence) }}</span>
               </p>
             </div>
           </div>
@@ -537,7 +715,7 @@ const onboardSteps = [
           <div class="result-kpis">
             <div class="kpi-mini">
               <span>审查状态</span>
-              <strong class="mono">{{ session.requiresReview ? '待人工复核' : '已完成' }}</strong>
+              <strong class="mono">{{ session.requiresReview ? '待人工复核' : '机器处理完成' }}</strong>
             </div>
             <div class="kpi-mini">
               <span>风险数量</span><strong class="mono">{{ session.riskCount }}</strong>
@@ -557,7 +735,7 @@ const onboardSteps = [
                 <el-empty
                   v-if="session.risks.length === 0"
                   :image-size="72"
-                  description="该合同未检出风险"
+                  :description="session.requiresReview ? '审查结果不完整，暂不能据此判断合同无风险' : '该合同未检出风险'"
                 />
                 <article
                   v-for="r in sortedRisks"
@@ -569,17 +747,22 @@ const onboardSteps = [
                     { 'dim-focus': _isDimFocused(r) }
                   ]"
                   @click="openReview(r)"
+                  role="button"
+                  tabindex="0"
+                  :aria-label="`复核风险：${r.category}`"
+                  @keydown.enter.prevent="openReview(r)"
+                  @keydown.space.prevent="openReview(r)"
                 >
                   <div class="risk-head">
                     <el-tag :type="levelMeta[r.level].type" size="small">{{ levelMeta[r.level].label }}风险</el-tag>
                     <span class="risk-cat">{{ r.category }}</span>
                     <el-tag size="small" effect="plain" class="status-tag">{{ statusLabel[r.review_status] }}</el-tag>
                   </div>
-                  <p class="risk-line">{{ r.suggestion }}</p>
-                  <div class="risk-evidence" :class="{ 'is-missing': r.evidence_status !== 'supported' }">
+                  <p class="risk-line">{{ reviewReasonSummary(r.risk_reason || r.suggestion) }}</p>
+                  <div class="risk-evidence" :class="{ 'is-missing': !isEvidenceVerified(r) }">
                     <span class="evidence-dot" />
                     <span>
-                      {{ evidenceMeta(r.evidence_status).label }}
+                      {{ riskEvidenceMeta(r).label }}
                       <template v-if="r.rag_sources?.length">· {{ r.rag_sources.length }} 条来源</template>
                     </span>
                   </div>
@@ -603,20 +786,31 @@ const onboardSteps = [
           </div>
         </template>
       </el-card>
-    </div>
+    </section>
 
+    <section v-if="selectedContext" class="selected-context" role="region" aria-label="所选合同">
+      <div><strong>{{ selectedContext.filename }}</strong><p>{{ selectedContext.message }}</p></div>
+      <el-button v-if="['legal', 'finance', 'admin'].includes(auth.role)" @click="annotationOpen = true">查看所选合同原文</el-button>
+    </section>
+    <HandoffQueue @review="reviewHandoff" />
+
+    <el-alert v-if="planRisk && !planOpen" type="warning" :closable="false" title="风险已确认，整改任务尚未生成。"><el-button link type="primary" @click="planOpen = true">继续填写整改计划</el-button></el-alert>
+    <RectificationPlanDialog v-model="planOpen" :risk-id="planRisk?.id ?? null" :initial="planInitial" :saving="planSaving" :error="planError" confirmed @save="createPlan" />
     <RiskReviewDrawer
       v-model="drawerOpen"
       :risk="activeRisk"
       @confirm="confirmRisk"
       @ignore="ignoreRisk"
     />
-    <AnnotationModal v-model="annotationOpen" :risks="session.risks" :filename="session.filename" />
+    <AnnotationModal v-model="annotationOpen" :risks="session.risks" :filename="session.filename" :contract-id="session.contractId" />
 
   </div>
 </template>
 
 <style scoped>
+.selected-context { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 16px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--ink-2); }
+.selected-context p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.risk-card:focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; }
 .audit-page {
   display: flex;
   flex-direction: column;
@@ -641,8 +835,12 @@ const onboardSteps = [
   min-width: 0;
 }
 .result-panel {
-  min-height: calc(100vh - 124px);
+  min-height: 0;
 }
+.audit-setup, .right-stack { scroll-margin-top: 20px; }
+.audit-setup:focus-visible, .right-stack:focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; }
+.result-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.batch-feedback { color: var(--muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .batch-result {
   margin: -4px 0 20px;
   padding: 14px 0 18px;
@@ -687,6 +885,16 @@ const onboardSteps = [
   display: block;
   overflow-wrap: anywhere;
 }
+.batch-result-item-code,
+.batch-result-item-action-hint {
+  display: block;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.batch-result-item-code { color: var(--muted); }
+.batch-result-item-action-hint { color: var(--amber); }
 .batch-result-item-main strong {
   font-size: 13px;
 }
@@ -700,6 +908,23 @@ const onboardSteps = [
   color: var(--amber);
   font-size: 12px;
   line-height: 1.5;
+}
+.batch-review-details {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.batch-review-details summary { cursor: pointer; color: var(--brass); }
+.batch-review-details p { margin: 5px 0 0; }
+.batch-result-item-timing {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .batch-result-item-meta {
   display: flex;
