@@ -10,8 +10,16 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.models import AuditBatchItem, ImportBatchItem
 
-_local_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audit-local")
-# 导入解析与审查任务解耦：解析走独立线程池，避免上一轮审查占用单线程时
+def _create_local_audit_executor() -> ThreadPoolExecutor:
+    """用显式限额创建合同执行器；每份合同仍自行持有独立数据库会话。"""
+    return ThreadPoolExecutor(
+        max_workers=settings.AUDIT_LOCAL_CONCURRENCY,
+        thread_name_prefix="audit-local",
+    )
+
+
+_local_executor = _create_local_audit_executor()
+# 导入解析与审查任务解耦：解析走独立线程池，避免上一轮审查占满线程时
 # 新上传的合同一直卡在"等待解析"队列里。
 _import_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="import-parse")
 _sleep = time.sleep

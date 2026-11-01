@@ -103,6 +103,8 @@ test('兼容旧风险字段并展示未知适用性与异常规则状态', async
 
   await page.getByText('risk-with-abnormal-rule-status', { exact: true }).click()
   await expect(drawer.locator('section').filter({ hasText: '法规适用性' }).getByText(applicabilityMeta('unknown_as_of').label, { exact: true })).toBeVisible()
+  await expect(drawer.getByText(/原因码：DETERMINISTIC_RULE_NOT_PROVEN/)).not.toBeVisible()
+  await drawer.getByText('技术核验与检索记录', { exact: true }).click()
   await expect(drawer.locator('section').filter({ hasText: '规则核验' }).getByText(ruleStatusMeta('unexpected_status').label, { exact: true })).toBeVisible()
   await expect(drawer.getByText('核验方式：有限规则核验')).toBeVisible()
   await expect(drawer.getByText(/原因码：DETERMINISTIC_RULE_NOT_PROVEN/)).toBeVisible()

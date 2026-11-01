@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     # 审查是否走异步队列。生产开 True（需 Redis+worker）；本地无 Redis 时 False 同步执行。
     AUDIT_ASYNC: bool = False
+    # 本地同时处理的合同数，与单合同内部模型窗口并发分别限额。
+    AUDIT_LOCAL_CONCURRENCY: int = Field(default=2, ge=1, le=4)
 
     # 安全（生产环境必须通过 .env 覆盖）
     JWT_SECRET: str = "CHANGE_ME_IN_PRODUCTION"

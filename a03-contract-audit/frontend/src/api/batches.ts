@@ -25,6 +25,10 @@ export interface AuditBatchItem {
   requires_review?: boolean
   ocr_confidence?: number | null
   review_reason?: string | null
+  created_at?: string | null
+  queue_wait_ms?: number | null
+  processing_ms?: number | null
+  total_ms?: number | null
 }
 
 export interface AuditBatch {

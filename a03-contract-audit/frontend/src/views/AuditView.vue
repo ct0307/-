@@ -28,6 +28,7 @@ import {
 } from '@/utils/audit-progress'
 import { formatOcrConfidence, reviewStatusLabel } from '@/utils/ocr-quality'
 import { riskEvidenceMeta, isEvidenceVerified } from '@/utils/risk-evidence'
+import { batchTimingSummary, reviewReasonSummary } from '@/utils/professional-review'
 
 const session = useAuditSessionStore()
 const rectify = useRectifyStore()
@@ -557,14 +558,16 @@ const onboardSteps = [
               @click="retryAuditBatch"
             >重试失败项</el-button>
           </div>
+          <p class="batch-feedback">机器处理进度（100% 不代表人工复核完成）</p>
           <el-progress
             class="batch-result-progress"
             :percentage="batchStore.progress"
             :status="batchProgressStatus"
           />
           <p class="batch-summary mono" role="status" aria-live="polite">
-            已处理 {{ batchStore.batch.completed }} / {{ batchStore.batch.total }}，失败 {{ batchStore.batch.failed }}
+            机器已处理 {{ batchStore.batch.completed }} / {{ batchStore.batch.total }}，失败 {{ batchStore.batch.failed }}
           </p>
+          <p class="batch-feedback">人工复核以各风险的复核记录为准。</p>
           <p v-if="['queued', 'running'].includes(batchStore.batch.status)" class="batch-feedback">
             任务已提交，进度将自动更新。可以离开页面，稍后返回查看。
           </p>
@@ -593,10 +596,14 @@ const onboardSteps = [
                       {{ item.error_action }}
                     </span>
                   </template>
-                  <span
-                    v-else-if="item.status === 'review_required' && item.review_reason"
-                    class="batch-result-item-review-reason"
-                  >{{ item.review_reason }}</span>
+                  <template v-else-if="item.status === 'review_required' && item.review_reason">
+                    <span class="batch-result-item-review-reason">{{ reviewReasonSummary(item.review_reason) }}</span>
+                    <details v-if="reviewReasonSummary(item.review_reason) !== item.review_reason" class="batch-review-details">
+                      <summary>完整复核说明</summary>
+                      <p>{{ item.review_reason }}</p>
+                    </details>
+                  </template>
+                  <span v-if="batchTimingSummary(item)" class="batch-result-item-timing">{{ batchTimingSummary(item) }}</span>
                 </div>
                 <div class="batch-result-item-meta">
                   <el-tag :type="batchItemStatusType[item.status]" size="small">
@@ -676,7 +683,7 @@ const onboardSteps = [
           <div class="result-kpis">
             <div class="kpi-mini">
               <span>审查状态</span>
-              <strong class="mono">{{ session.requiresReview ? '待人工复核' : '已完成' }}</strong>
+              <strong class="mono">{{ session.requiresReview ? '待人工复核' : '机器处理完成' }}</strong>
             </div>
             <div class="kpi-mini">
               <span>风险数量</span><strong class="mono">{{ session.riskCount }}</strong>
@@ -719,7 +726,7 @@ const onboardSteps = [
                     <span class="risk-cat">{{ r.category }}</span>
                     <el-tag size="small" effect="plain" class="status-tag">{{ statusLabel[r.review_status] }}</el-tag>
                   </div>
-                  <p class="risk-line">{{ r.suggestion }}</p>
+                  <p class="risk-line">{{ reviewReasonSummary(r.risk_reason || r.suggestion) }}</p>
                   <div class="risk-evidence" :class="{ 'is-missing': !isEvidenceVerified(r) }">
                     <span class="evidence-dot" />
                     <span>
@@ -867,6 +874,23 @@ const onboardSteps = [
   color: var(--amber);
   font-size: 12px;
   line-height: 1.5;
+}
+.batch-review-details {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.batch-review-details summary { cursor: pointer; color: var(--brass); }
+.batch-review-details p { margin: 5px 0 0; }
+.batch-result-item-timing {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .batch-result-item-meta {
   display: flex;
