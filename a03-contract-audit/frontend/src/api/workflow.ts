@@ -8,6 +8,7 @@ export interface WorkflowView {
   conflicts?: Array<{ id: string; trigger: string; note: string }>
   directed_reviews?: Array<{ check_id: string; target_agent: string; status: string; verdict: string; reason_code: string }>
   pending_count?: number; requires_quality_ack?: boolean
+  missing_rectifications?: Array<{ risk_id: number; category: string }>
   budget?: { calls?: number; charged_tokens?: number; max_calls?: number; max_tokens?: number }
 }
 export function getWorkflow(contractId: number): Promise<WorkflowView> { return client.get(`/workflows/${contractId}`) }

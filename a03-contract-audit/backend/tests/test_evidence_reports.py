@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.session import Base
-from app.models.models import AuditBatch, AuditBatchItem, Contract, Rectification, Risk, User
+from app.models.models import AuditBatch, AuditBatchItem, Contract, ContractClause, Rectification, Risk, User
 from app.services.report.exporter import (
     build_report_snapshot,
     export_report_docx,
@@ -41,6 +41,7 @@ def _contract(db: Session, user: User, filename: str, department: str = "采购�
 
 
 def _job(db: Session, user: User, contract: Contract, status: str, generation: int) -> AuditBatchItem:
+    contract.audit_generation = generation
     batch = AuditBatch(
         owner_id=user.id,
         department=contract.department,
@@ -263,3 +264,119 @@ def test_report_quality_uses_job_snapshot_not_current_contract():
     assert row["review_reason"] is None
     assert row["ocr_confidence"] == 0.9
     assert row["coverage"] is None
+
+
+def test_date_confirmation_excludes_previous_job_results_but_keeps_historical_rectification():
+    from app.api.v1.endpoints.contracts import confirm_sign_date
+    from app.schemas.contract import SignDateConfirmation
+    from app.services.report.exporter import export_risk_ledger
+    db, user = _database()
+    user.role = 'legal'
+    contract = _contract(db, user, '日期变更报告.txt')
+    contract.content_sha256 = 'same-file'
+    old = _job(db, user, contract, 'done', 1)
+    old.result_json = '{"coverage":{"planned":4,"completed":4},"cross_checks":[{"note":"旧任务冲突"}]}'
+    risk = Risk(contract_id=contract.id, audit_job_id=old.id, category='旧付款风险', level='high',
+                original_text='旧代次独有原文', basis='旧代次依据', suggestion='旧建议')
+    db.add(risk)
+    db.add(ContractClause(contract_id=contract.id, audit_generation=1, chunk_id='old-payment',
+                          content='第一条 甲方应支付合同总价100%。'))
+    db.flush()
+    db.add(Rectification(contract=contract.filename, risk_id=risk.id, risk=risk.category, level='high',
+                          status='已接受风险', created='2026-11-01', due='2026-11-07', residual_risk='历史履约风险仍在'))
+    db.commit()
+    confirmation = confirm_sign_date(contract.id, SignDateConfirmation(sign_date='2026-10-02'), db, user)
+    assert confirmation['audit_invalidated'] is True
+
+    snapshot = build_report_snapshot(db, [contract.id])
+    current = snapshot['contracts'][0]
+    assert current['audit_generation'] == contract.audit_generation == 2
+    assert current['elements']['sign_date'] == '2026-10-02'
+    assert current['job_id'] is None
+    assert current['job_status'] is None
+    assert current['coverage'] is None
+    assert current['cross_checks'] == []
+    assert current['requires_review'] is True
+    assert '重新审查' in current['review_reason']
+    assert current['payment_analysis']['status'] == 'unavailable'
+    assert current['payment_analysis']['events'] == []
+    assert snapshot['risks'] == []
+    assert snapshot['summary']['completed'] == 0
+    assert snapshot['summary']['unreviewed'] == 1
+    assert snapshot['state'] == 'NO_COMPLETED_AUDIT'
+    assert snapshot['operations']['high_risk_contracts'] == 0
+    assert snapshot['operations']['accepted_risk_count'] == 1
+    assert snapshot['rectifications'][0]['source_scope'] == 'historical'
+    assert snapshot['rectifications'][0]['residual_risk'] == '历史履约风险仍在'
+    assert any('重新审查' in note for note in snapshot['notes'])
+    legacy_sheet = load_workbook(BytesIO(export_risk_ledger(db, [contract.id]))).active
+    assert legacy_sheet.max_row == 1
+    workbook = load_workbook(BytesIO(export_report_xlsx(snapshot)))
+    risk_sheet_text = '\n'.join(str(cell.value) for row in workbook['风险台账'] for cell in row)
+    payment_sheet_text = '\n'.join(str(cell.value) for row in workbook['付款节点'] for cell in row)
+    assert '旧代次独有原文' not in risk_sheet_text
+    assert '合同总价100%' not in payment_sheet_text
+    word_text = '\n'.join(p.text for p in Document(BytesIO(export_report_docx(snapshot))).paragraphs)
+    assert '重新审查' in word_text
+    db.close()
+
+
+def test_no_job_legacy_risk_remains_compatible_until_explicit_date_invalidation():
+    from app.api.v1.endpoints.contracts import confirm_sign_date
+    from app.schemas.contract import SignDateConfirmation
+    db, user = _database()
+    user.role = 'legal'
+    contract = _contract(db, user, '无任务历史.txt')
+    contract.audit_generation = 1
+    contract.content_sha256 = 'same-file'
+    risk = Risk(contract_id=contract.id, category='历史风险', level='medium', original_text='历史原文', basis='历史依据', suggestion='建议')
+    db.add(risk)
+    db.commit()
+    assert [row['id'] for row in build_report_snapshot(db)['risks']] == [risk.id]
+    db.rollback()
+    confirm_sign_date(contract.id, SignDateConfirmation(sign_date='2026-10-02'), db, user)
+    snapshot = build_report_snapshot(db)
+    assert snapshot['risks'] == []
+    assert snapshot['contracts'][0]['requires_review'] is True
+    assert any('重新审查' in note for note in snapshot['notes'])
+    db.close()
+
+
+def test_current_generation_job_only_exports_its_risks_and_payment_clauses():
+    db, user = _database()
+    contract = _contract(db, user, '当前代次.txt')
+    old = _job(db, user, contract, 'done', 1)
+    current = _job(db, user, contract, 'done', 3)
+    db.add_all([
+        Risk(contract_id=contract.id, audit_job_id=old.id, category='旧风险', level='high', original_text='旧原文', basis='旧依据', suggestion='旧建议'),
+        Risk(contract_id=contract.id, audit_job_id=current.id, category='新风险', level='low', original_text='新原文', basis='新依据', suggestion='新建议'),
+        ContractClause(contract_id=contract.id, audit_generation=1, chunk_id='old-payment', content='甲方支付合同总价100%。'),
+        ContractClause(contract_id=contract.id, audit_generation=3, chunk_id='new-payment', content='甲方验收后支付合同总价80%。'),
+    ])
+    db.commit()
+    snapshot = build_report_snapshot(db)
+    assert [row['category'] for row in snapshot['risks']] == ['新风险']
+    assert snapshot['summary']['completed'] == 1
+    assert snapshot['contracts'][0]['audit_generation'] == 3
+    assert snapshot['contracts'][0]['job_id'] == current.id
+    assert snapshot['contracts'][0]['payment_analysis']['total_percentage'] == '80'
+    db.close()
+
+
+def test_legacy_ledger_empty_selection_still_exports_all_authorized_current_risks():
+    from app.services.report.exporter import export_risk_ledger
+    db, user = _database()
+    visible = _contract(db, user, '授权合同.txt')
+    hidden = _contract(db, user, '其他部门合同.txt', department='其他部门')
+    for contract in (visible, hidden):
+        job = _job(db, user, contract, 'done', 1)
+        db.add(Risk(contract_id=contract.id, audit_job_id=job.id, category='付款风险', level='high',
+                    original_text='核对付款条款', basis='待核验', suggestion='人工复核'))
+    db.commit()
+    def rows(selection):
+        workbook = load_workbook(BytesIO(export_risk_ledger(db, selection, department_scope={'采购中心'})))
+        return list(workbook.active.values)
+    assert rows([]) == rows(None)
+    assert len(rows([])) == 2
+    assert rows([])[1][0] == '授权合同.txt'
+    db.close()

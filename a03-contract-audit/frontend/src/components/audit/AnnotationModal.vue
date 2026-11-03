@@ -2,11 +2,11 @@
 // 完整解析正文与风险联动；只对精确匹配的引用进行定位。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getContractDocument } from '@/api/contract'
+import { getContractDocument, parseContract } from '@/api/contract'
 import type { ContractDocument, RiskOut } from '@/api/types'
 import { useAuditSessionStore } from '@/stores/audit-session'
 
-const props = defineProps<{ modelValue: boolean; risks: RiskOut[]; filename: string; contractId: number | null }>()
+const props = defineProps<{ modelValue: boolean; risks: RiskOut[]; filename: string; contractId: number | null; allowParse?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [v: boolean] }>()
 
 const session = useAuditSessionStore()
@@ -20,6 +20,9 @@ const applyingId = ref<number | null>(null)
 const documentData = ref<ContractDocument | null>(null)
 const loading = ref(false)
 const loadError = ref('')
+const parsing = ref(false)
+const parseError = ref('')
+let parseVersion = 0
 const selectedId = ref<number | null>(null)
 const matchIndex = ref(0)
 let requestVersion = 0
@@ -54,11 +57,29 @@ async function loadDocument() {
 }
 
 watch(() => [props.modelValue, props.contractId] as const, () => {
+  parseVersion++
+  parsing.value = false
+  parseError.value = ''
   selectedId.value = props.risks[0]?.id ?? null
   matchIndex.value = 0
   void loadDocument()
 }, { immediate: true })
 onBeforeUnmount(cancelLoad)
+
+async function parseDocument() {
+  const id = props.contractId
+  if (!props.allowParse || !id || parsing.value) return
+  const version = ++parseVersion
+  parsing.value = true; parseError.value = ''
+  try {
+    await parseContract(id)
+    if (version === parseVersion) await loadDocument()
+  } catch (error) {
+    if (version === parseVersion) parseError.value = error instanceof Error ? error.message : '正文解析失败，请重试。'
+  } finally {
+    if (version === parseVersion) parsing.value = false
+  }
+}
 
 const selectedRisk = computed(() => props.risks.find(r => r.id === selectedId.value))
 const documentText = computed(() => documentData.value?.text ?? '')
@@ -89,6 +110,7 @@ async function applyAsSuggestion(risk: RiskOut) {
   try {
     const { value } = await ElMessageBox.prompt('请说明修改建议的复核判断和适用条件', '填写复核意见', {
       inputType: 'textarea', inputValidator: value => !!value?.trim() || '复核意见不能为空',
+      confirmButtonText: '保存复核意见', cancelButtonText: '取消',
     })
     await session.setRiskStatus(risk, 'to_modify', value)
     ElMessage.success('已标记为需修改，复核意见已保存')
@@ -137,7 +159,9 @@ async function nextMatch() {
         <p v-if="loading" class="doc-empty" role="status">正在加载解析正文…</p>
         <div v-else-if="loadError || !documentText" class="doc-empty" role="status">
           <p>{{ loadError || documentData?.message || '请先选择一份合同。' }}</p>
-          <el-button v-if="contractId" @click="loadDocument">重新加载正文</el-button>
+          <el-button v-if="contractId" :disabled="parsing" @click="loadDocument">重新加载正文</el-button>
+          <el-button v-if="contractId && allowParse && !loadError" type="primary" :loading="parsing" @click="parseDocument">解析材料正文</el-button>
+          <p v-if="parseError" role="alert">{{ parseError }}</p>
         </div>
         <template v-else>
           <div class="doc-hint">完整解析正文 · {{ documentText.length }} 字符</div>

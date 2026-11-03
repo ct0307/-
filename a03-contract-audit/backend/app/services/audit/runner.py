@@ -23,6 +23,7 @@ from app.services.audit.protocol import ReviewIssue
 from app.services.audit.progress import ProgressCallback
 from app.services.audit.result_quality import AuditCoverage, decide_audit_status
 from app.services.rag.applicability import resolve_legal_as_of
+from app.services.sign_date import read_elements
 from app.services.audit.failure import QUALITY_REASON_MESSAGES, audit_failure
 from app.services.parser.extractor import (
     DocumentParseResult,
@@ -202,10 +203,14 @@ def run_audit(
         publishing.requires_review = final_requires_review
         publishing.review_reason = review_reason
         if final_status in {"done", "review_required"}:
-            db.query(Risk).filter(
-                Risk.contract_id == contract_id,
-                Risk.review_status == "pending",
-            ).delete(synchronize_session=False)
+            # 重试只替换当前任务的候选；日期变更前的证据仍属于历史审查。
+            # 无任务编号的旧数据无法区分代次，发生日期变更后保留其原始记录。
+            if batch_item_id is not None or not read_elements(publishing.elements_json).get('sign_date_invalidated_generation'):
+                db.query(Risk).filter(
+                    Risk.contract_id == contract_id,
+                    Risk.audit_job_id == batch_item_id,
+                    Risk.review_status == "pending",
+                ).delete(synchronize_session=False)
             clauses = replace_contract_clauses(
                 db,
                 contract_id=contract_id,

@@ -99,6 +99,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   const requiresReview = ref(false)
   const ocrConfidence = ref<number | null>(null)
   const reviewReason = ref('')
+  const resultStale = ref(false)
   const busy = ref(false)
   const uploadRecords = ref<UploadRecord[]>([])
   const activeAudit = ref<ActiveAudit | null>(readActiveAudit())
@@ -171,6 +172,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     requiresReview.value = source.requires_review ?? false
     ocrConfidence.value = source.ocr_confidence ?? null
     reviewReason.value = source.review_reason ?? ''
+    resultStale.value = 'result_stale' in source && source.result_stale === true
   }
 
   function reset() {
@@ -186,6 +188,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     requiresReview.value = false
     ocrConfidence.value = null
     reviewReason.value = ''
+    resultStale.value = false
     busy.value = false
     uploadRecords.value = []
     saveActiveAudit(null)
@@ -464,6 +467,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
   }
 
   async function setRiskStatus(risk: RiskOut, status: RiskOut['review_status'], reviewComment = '') {
+    if (resultStale.value) throw new Error('签订日期或审查代次已变化，请重新审查后复核')
     const requestGeneration = generation
     const response = await updateRiskStatus(risk.id, status, reviewComment)
     if (requestGeneration !== generation) return
@@ -482,6 +486,7 @@ export const useAuditSessionStore = defineStore('auditSession', () => {
     requiresReview,
     ocrConfidence,
     reviewReason,
+    resultStale,
     busy,
     uploadRecords,
     step,

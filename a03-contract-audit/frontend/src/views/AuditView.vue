@@ -8,7 +8,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getLookups } from '@/api/admin'
 import { getAuditStatus } from '@/api/contract'
 
-import type { RiskOut } from '@/api/types'
+import type { RiskOut, SignDateConfirmation as SignDateState } from '@/api/types'
 import type { Handoff } from '@/api/handoffs'
 import type { AuditBatchItem } from '@/api/batches'
 import { useAuditSessionStore } from '@/stores/audit-session'
@@ -18,6 +18,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useBatchStore } from '@/stores/batch'
 import { useImportInboxStore } from '@/stores/import-inbox'
 import ContractInbox from '@/components/audit/ContractInbox.vue'
+import SignDateConfirmation from '@/components/audit/SignDateConfirmation.vue'
 import HandoffQueue from '@/components/audit/HandoffQueue.vue'
 import RiskReviewDrawer from '@/components/audit/RiskReviewDrawer.vue'
 import RectificationPlanDialog from '@/components/rectify/RectificationPlanDialog.vue'
@@ -448,9 +449,32 @@ const planOpen = ref(false)
 const planSaving = ref(false)
 const planError = ref('')
 const planInitial = ref<Partial<RectificationPlan>>({})
+const dateRefreshKey = ref(0)
+const reAuditType = ref('')
 function openReview(risk: RiskOut) {
+  if (session.resultStale) return
   activeRisk.value = risk
   drawerOpen.value = true
+}
+
+function applyConfirmedDate(value: SignDateState) {
+  reAuditType.value = value.contract_type
+  if (!value.audit_invalidated) return
+  session.resultStale = true
+  session.requiresReview = true
+  session.reviewReason = '此审查基于旧的签订日期或未确认时点，请重新运行审查。'
+  drawerOpen.value = false
+}
+
+async function rerunAfterDateChange() {
+  if (!reAuditType.value || session.busy) return
+  try {
+    await session.runAudit(reAuditType.value, dimensions.value.filter(item => item.on).map(item => item.key))
+    dateRefreshKey.value += 1
+    ElMessage.success('已按当前确认日期重新审查')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '重新审查失败，请重试')
+  }
 }
 
 async function confirmRisk(risk: RiskOut) {
@@ -701,6 +725,23 @@ const onboardSteps = [
             <el-button v-if="['legal', 'finance', 'admin'].includes(auth.role)" :icon="'Document'" @click="annotationOpen = true">查看合同原文与批注</el-button>
           </div>
 
+          <SignDateConfirmation
+            v-if="session.contractId"
+            :key="session.contractId"
+            :contract-id="session.contractId"
+            :disabled="session.busy || session.hasActiveAudit"
+            :can-edit="['legal', 'finance', 'admin'].includes(auth.role)"
+            :refresh-key="dateRefreshKey"
+            @loaded="value => reAuditType = value.contract_type"
+            @confirmed="applyConfirmedDate"
+          />
+          <div v-if="session.resultStale && ['legal', 'finance', 'admin'].includes(auth.role)" class="date-rerun">
+            <el-select v-model="reAuditType" aria-label="重新审查的合同类型" placeholder="请确认合同类型" :disabled="session.busy">
+              <el-option v-for="type in [...new Set([reAuditType, ...contractTypeOptions])].filter(Boolean)" :key="type" :label="type" :value="type" />
+            </el-select>
+            <el-button type="primary" :loading="session.busy" :disabled="!reAuditType" @click="rerunAfterDateChange">按确认日期重新审查</el-button>
+          </div>
+
           <div v-if="session.requiresReview" class="ocr-review-alert" role="alert">
             <el-icon><WarningFilled /></el-icon>
             <div>
@@ -715,7 +756,7 @@ const onboardSteps = [
           <div class="result-kpis">
             <div class="kpi-mini">
               <span>审查状态</span>
-              <strong class="mono">{{ session.requiresReview ? '待人工复核' : '机器处理完成' }}</strong>
+              <strong class="mono">{{ session.resultStale ? '历史结果已失效' : session.requiresReview ? '待人工复核' : '机器处理完成' }}</strong>
             </div>
             <div class="kpi-mini">
               <span>风险数量</span><strong class="mono">{{ session.riskCount }}</strong>
@@ -808,6 +849,8 @@ const onboardSteps = [
 </template>
 
 <style scoped>
+.date-rerun { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.date-rerun .el-select { width: 220px; max-width: 100%; }
 .selected-context { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 16px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--ink-2); }
 .selected-context p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
 .risk-card:focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; }

@@ -1,6 +1,6 @@
 // 合同相关接口封装
 import client from './client'
-import type { AuditResult, ContractDocument, ContractOut, LoginResult, ParseResult, RiskOut } from './types'
+import type { AuditResult, ContractDocument, ContractOut, LoginResult, ParseResult, RiskOut, SignDateConfirmation } from './types'
 
 export const PARSE_TIMEOUT_MS = 150_000
 
@@ -31,6 +31,14 @@ export function uploadContract(
 
 export function parseContract(id: number): Promise<ParseResult> {
   return client.post(`/contracts/${id}/parse`, undefined, { timeout: PARSE_TIMEOUT_MS })
+}
+
+export function getSignDate(id: number): Promise<SignDateConfirmation> {
+  return client.get(`/contracts/${id}/sign-date`)
+}
+
+export function confirmSignDate(id: number, signDate: string): Promise<SignDateConfirmation> {
+  return client.patch(`/contracts/${id}/sign-date`, { sign_date: signDate })
 }
 
 export function getContractDocument(id: number, signal?: AbortSignal): Promise<ContractDocument> {

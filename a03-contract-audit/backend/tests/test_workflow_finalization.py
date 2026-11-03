@@ -111,3 +111,23 @@ def test_quality_ack_and_rectification_are_required_before_publication(data):
     with pytest.raises(HTTPException) as caught:
         finalize_workflow(db, contract.id, user, payload(workflow_view(db, contract.id, user)))
     assert caught.value.status_code == 409
+
+
+def test_missing_rectification_is_visible_before_publish_and_clears_when_created(data):
+    from app.models.models import Rectification
+    db, user, contract, risk = data
+    risk.review_status = 'to_modify'
+    db.commit()
+    view = workflow_view(db, contract.id, user)
+    assert view['missing_rectifications'] == [{'risk_id': risk.id, 'category': '付款'}]
+    with pytest.raises(HTTPException) as caught:
+        finalize_workflow(db, contract.id, user, payload(view))
+    assert caught.value.status_code == 409
+    assert '整改任务' in caught.value.detail
+    db.add(Rectification(contract=contract.filename, risk='付款', level='high',
+                         risk_id=risk.id, created='2026-11-03', due='2026-11-10'))
+    db.commit()
+    current = workflow_view(db, contract.id, user)
+    assert current['missing_rectifications'] == []
+    assert current['review_fingerprint'] != view['review_fingerprint']
+    assert finalize_workflow(db, contract.id, user, payload(current))['state'] == 'published'

@@ -6,6 +6,7 @@ import { ElMessageBox } from 'element-plus'
 import { getImportLimits, type ImportItem } from '@/api/imports'
 import { importErrorMeta } from '@/utils/import-errors'
 import type { UploadLimits } from '@/config/upload-limits'
+import SignDateConfirmation from './SignDateConfirmation.vue'
 
 const props = defineProps<{
   items: ImportItem[]
@@ -259,6 +260,12 @@ async function deleteDraft(item: ImportItem) {
             <small v-else-if="item.confidence !== null" class="confidence mono">
               类型置信度 {{ confidencePercent(item.confidence) }}%
             </small>
+            <SignDateConfirmation
+              v-if="item.contract_id && ['awaiting_confirmation', 'ready', 'done'].includes(item.status)"
+              :contract-id="item.contract_id"
+              :disabled="loading || isLocked(item)"
+              :can-edit="canReview === true"
+            />
           </div>
         </div>
         <div role="cell" data-label="状态">

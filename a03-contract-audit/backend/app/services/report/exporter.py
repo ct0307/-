@@ -84,9 +84,18 @@ def build_report_snapshot(
     jobs = [] if not ids else db.query(AuditBatchItem).filter(
         AuditBatchItem.contract_id.in_(ids)
     ).order_by(AuditBatchItem.contract_id, AuditBatchItem.audit_generation.desc(), AuditBatchItem.id.desc()).all()
+    contracts_by_id = {contract.id: contract for contract in contracts}
+    contracts_with_jobs = {job.contract_id for job in jobs}
+    # 当前合同代次是报告口径；日期确认后不能拿旧任务配上新日期继续导出。
     latest_jobs: dict[int, AuditBatchItem] = {}
     for job in jobs:
-        latest_jobs.setdefault(job.contract_id, job)
+        if job.audit_generation == contracts_by_id[job.contract_id].audit_generation:
+            latest_jobs.setdefault(job.contract_id, job)
+    legacy_contract_ids = {
+        contract.id for contract in contracts
+        if contract.id not in contracts_with_jobs
+        and not _json_value(contract.elements_json, {}).get('sign_date_invalidated_generation')
+    }
 
     risk_query = db.query(Risk).filter(Risk.contract_id.in_(ids)) if ids else None
     all_risks = risk_query.order_by(Risk.contract_id, Risk.id).all() if risk_query is not None else []
@@ -95,7 +104,7 @@ def build_report_snapshot(
     for risk in all_risks:
         job = latest_jobs.get(risk.contract_id)
         if job is None:
-            if risk.audit_job_id is None:
+            if risk.contract_id in legacy_contract_ids and risk.audit_job_id is None:
                 visible_risks.append(risk)
             continue
         if job.status in _TERMINAL_SUCCESS and risk.audit_job_id == job.id:
@@ -110,6 +119,8 @@ def build_report_snapshot(
                 clauses_by_contract.setdefault(clause.contract_id, []).append(clause.content)
     for contract in contracts:
         job = latest_jobs.get(contract.id)
+        needs_reaudit = job is None and contract.id not in legacy_contract_ids
+        reaudit_reason = '签订日期或审查代次已变化，当前代次尚无审查结果，请重新审查；旧结果未计入本次报告。'
         elements = _json_value(contract.elements_json, {})
         job_payload = _json_value(job.result_json, {}) if job else {}
         quality = quality_snapshot(job, contract) if job else None
@@ -124,7 +135,7 @@ def build_report_snapshot(
             "department": contract.department or "",
             "status": contract.status,
             "content_sha256": contract.content_sha256,
-            "audit_generation": job.audit_generation if job else contract.audit_generation,
+            "audit_generation": contract.audit_generation,
             "elements": elements,
             "party_a": str(elements.get("party_a") or "—"),
             "subject": str(elements.get("subject") or "—"),
@@ -137,8 +148,8 @@ def build_report_snapshot(
             "element_evidence": _json_value(contract.element_evidence_json, {}),
             "parse_source": contract.parse_source,
             "ocr_confidence": quality.ocr_confidence if quality else contract.ocr_confidence,
-            "requires_review": quality.requires_review if quality else bool(contract.requires_review),
-            "review_reason": (job.error or quality.review_reason) if job else contract.review_reason,
+            "requires_review": True if needs_reaudit else quality.requires_review if quality else bool(contract.requires_review),
+            "review_reason": reaudit_reason if needs_reaudit else (job.error or quality.review_reason) if job else contract.review_reason,
             "job_id": job.id if job else None,
             "job_status": job.status if job else None,
             "coverage": safe_coverage(job_payload.get("coverage")),
@@ -147,7 +158,9 @@ def build_report_snapshot(
             "finished_at": _iso(job.finished_at) if job else None,
             "payment_analysis": analyze_payments("\n".join(clauses_by_contract.get(contract.id, []))),
         })
-        if job is None:
+        if needs_reaudit:
+            notes.append(f'{contract.filename}：{reaudit_reason}')
+        elif job is None:
             notes.append(f"{contract.filename}：无审查任务，风险为历史兼容数据且无任务质量信息。")
         elif job.status in _FAILED:
             notes.append(f"{contract.filename}：最新审查任务失败，未将旧任务风险作为当前结果。")
@@ -266,7 +279,7 @@ def build_report_snapshot(
     ])
     content["schema_version"] = "report-v2"
     content["state"] = "NO_AUTH_SCOPE" if department_scope == set() else "NO_DATA" if not contracts else "NO_COMPLETED_AUDIT" if not any(value in _TERMINAL_SUCCESS for value in statuses) else "READY"
-    notes.extend(["风险按各合同最新审查任务统计；失败或未完成任务不使用旧结果替代。", "证据已核验需原文精确定位且依据支持；无高风险不等于合规。", "上传日期用于导入趋势，不能解释为当日审查或整改效果。"])
+    notes.extend(["风险按各合同当前代次的最新审查任务统计；代次已变化、失败或未完成任务不使用旧结果替代。", "证据已核验需原文精确定位且依据支持；无高风险不等于合规。", "上传日期用于导入趋势，不能解释为当日审查或整改效果。"])
     report_id = hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return {"report_id": report_id, "generated_at": datetime.now(timezone.utc).isoformat(), **content}
 
@@ -327,7 +340,9 @@ def export_risk_ledger(
 
     contract_ids 为空则导出全部合同的风险。
     """
-    q = db.query(Risk, Contract).join(Contract, Risk.contract_id == Contract.id)
+    snapshot = build_report_snapshot(db, contract_ids or None, department_scope)
+    visible_risk_ids = [risk['id'] for risk in snapshot['risks']]
+    q = db.query(Risk, Contract).join(Contract, Risk.contract_id == Contract.id).filter(Risk.id.in_(visible_risk_ids))
     q = _scope_contracts(q, department_scope)
     if contract_ids:
         q = q.filter(Contract.id.in_(contract_ids))

@@ -133,7 +133,12 @@ test('版本冲突保留本次结果与材料选择，可刷新后重试', async
 test('上传证据沿用来源部门且不会自动触发模型审查', async ({ page }) => {
   await prepare(page, { item: { department: '研发部' } })
   const modelRequests: string[] = []
-  page.on('request', request => { if (/\/(audit|parse)$/.test(new URL(request.url()).pathname)) modelRequests.push(request.url()) })
+  page.on('request', request => { if (/\/audit$/.test(new URL(request.url()).pathname)) modelRequests.push(request.url()) })
+  let parsed = false
+  await page.route('**/api/v1/contracts/9/parse', route => {
+    parsed = true
+    return route.fulfill({ json: { contract_id: 9, text_length: 20, status: 'parsed', elements: {} } })
+  })
   await page.route('**/api/v1/contracts/upload?**', async route => {
     expect(new URL(route.request().url()).searchParams.get('department')).toBe('研发部')
     await route.fulfill({ json: { id: 9, filename: '修订稿.docx', status: 'uploaded' } })
@@ -141,7 +146,32 @@ test('上传证据沿用来源部门且不会自动触发模型审查', async ({
   await page.getByLabel('上传修订版或凭证').setInputFiles({ name: '修订稿.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from('测试材料') })
   await expect(page.getByText('材料已上传并关联，可核对原文；如需模型审查请主动进入审查页。')).toBeVisible()
   await expect(page.getByRole('button', { name: '查看材料原文', exact: true })).toBeVisible()
+  expect(parsed).toBe(true)
   expect(modelRequests).toHaveLength(0)
+})
+
+test('材料解析失败保留关联，通过原文入口重试后可读', async ({ page }) => {
+  await prepare(page, { item: { department: '研发部' } })
+  await page.route('**/api/v1/contracts/upload?**', route => route.fulfill({ json: { id: 9, filename: '修订稿.docx', status: 'uploaded' } }))
+  let parsed = false
+  let fail = true
+  await page.route('**/api/v1/contracts/9/parse', route => {
+    if (fail) return route.fulfill({ status: 503, json: { detail: '解析暂不可用' } })
+    parsed = true
+    return route.fulfill({ json: { contract_id: 9, text_length: 8, status: 'parsed', elements: {} } })
+  })
+  await page.route('**/api/v1/contracts/9/document', route => route.fulfill({ json: {
+    contract_id: 9, text: parsed ? '修订后的真实条款正文。' : '', message: '暂无有效解析正文，请完成合同解析后再查看。',
+  } }))
+  await page.getByLabel('上传修订版或凭证').setInputFiles({ name: '修订稿.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from('测试材料') })
+  await expect(page.getByText(/材料已上传并关联，但正文解析失败/)).toBeVisible()
+  await page.getByRole('button', { name: '查看材料原文', exact: true }).click()
+  const reader = page.getByRole('dialog', { name: /合同原文与风险批注/ })
+  await reader.getByRole('button', { name: '解析材料正文', exact: true }).click()
+  await expect(reader.getByText('解析暂不可用', { exact: true })).toBeVisible()
+  fail = false
+  await reader.getByRole('button', { name: '解析材料正文', exact: true }).click()
+  await expect(reader.getByRole('region', { name: '完整解析正文' })).toContainText('修订后的真实条款正文。')
 })
 
 test('高风险升级登记携带本次理由和版本', async ({ page }) => {

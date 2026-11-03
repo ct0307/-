@@ -21,9 +21,10 @@ def replace_contract_clauses(
     audit_generation: int,
     parsed: DocumentParseResult,
 ) -> list[ContractClause]:
-    """用本次解析结果替换合同当前条款，调用方负责提交事务。"""
+    """替换当前代次条款，保留历史风险引用的原文与定位锚点。"""
     db.query(ContractClause).filter(
-        ContractClause.contract_id == contract_id
+        ContractClause.contract_id == contract_id,
+        ContractClause.audit_generation == audit_generation,
     ).delete(synchronize_session=False)
 
     records = [

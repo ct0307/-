@@ -20,6 +20,7 @@ from app.services.parser.elements import (
 )
 from app.services.parser.extractor import extract_document
 from app.services.parser.cache import save_parse_cache
+from app.services.sign_date import merge_confirmed_sign_date
 from app.tasks.celery_app import celery_app
 
 log = get_logger("imports")
@@ -51,6 +52,7 @@ def parse_import_item(item_id: int) -> dict:
                 save_parse_cache(db, item.contract, parsed)
             element_result = extract_element_result(parsed)
             elements = legacy_element_values(element_result.values, text=parsed.text)
+            merge_confirmed_sign_date(elements, item.contract.elements_json, item.contract.content_sha256)
             evidence_payload = element_evidence_payload(element_result, parsed=parsed)
             requires_review, review_reason = merge_element_review(parsed, element_result)
             item.contract.requires_review = requires_review
@@ -104,7 +106,9 @@ def parse_import_item(item_id: int) -> dict:
                 item.contract.requires_review = False
                 item.contract.ocr_confidence = None
                 item.contract.review_reason = failure.message[:255]
-                item.contract.elements_json = "{}"
+                item.contract.elements_json = json.dumps(merge_confirmed_sign_date(
+                    {}, item.contract.elements_json, item.contract.content_sha256,
+                ), ensure_ascii=False)
                 item.contract.element_evidence_json = "{}"
             log.error(
                 "import.parse_failed",

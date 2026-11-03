@@ -46,6 +46,13 @@ def _view(contract,row,job,risks,user,db):
                 'risk_reason','suggestion','review_status','evidence_status','basis','support_validator_version',
                 'support_relation_status','original_text_verified','requires_manual_review','rag_sources')}
                for r in risks]
+    modification_ids = [risk.id for risk in risks if risk.review_status == 'to_modify']
+    links = db.query(Rectification.risk_id, Rectification.id).filter(
+        Rectification.risk_id.in_(modification_ids),
+    ).order_by(Rectification.risk_id, Rectification.id).all() if modification_ids else []
+    linked_ids = {risk_id for risk_id, _ in links}
+    missing_rectifications = [dict(risk_id=risk.id, category=risk.category) for risk in risks
+                              if risk.id in modification_ids and risk.id not in linked_ids]
     # 状态不变但人工意见更新也必须使旧发布失效；审计日志与风险复核同事务落库。
     review_revision = db.query(func.max(AuditLog.id)).filter(
         AuditLog.action == 'update_risk',
@@ -53,6 +60,7 @@ def _view(contract,row,job,risks,user,db):
     ).scalar() if risks else None
     current = fingerprint(dict(snapshot=snapshot,risks=records,generation=contract.audit_generation,
                                review_revision=review_revision,
+                               rectification_links=[list(link) for link in links],
                                elements=contract.elements_json,requires_review=contract.requires_review,
                                review_reason=contract.review_reason,parse_source=contract.parse_source,
                                ocr_confidence=contract.ocr_confidence,contract_type=contract.contract_type,
@@ -71,6 +79,7 @@ def _view(contract,row,job,risks,user,db):
     return dict(state=state,version=row.version,generation=row.audit_generation,audit_job_id=row.audit_job_id,
                 review_fingerprint=current,can_finalize=user.role in {'legal','admin'} and not stale,
                 groups=group_risks(records),pending_count=sum(r.review_status=='pending' for r in risks),
+                missing_rectifications=missing_rectifications,
                 requires_quality_ack=bool(contract.requires_review),conflicts=list(conflicts.values()),
                 directed_reviews=directed,identity=snapshot.get('identity',{}),budget=snapshot.get('budget',{}),
                 reviewed_by=row.reviewed_by,reviewed_at=row.reviewed_at,review=json.loads(row.review_json))
@@ -85,10 +94,28 @@ def finalize_workflow(db,contract_id,user,values):
     contract,row,job,risks = _load(db,contract_id,user)
     view = _view(contract,row,job,risks,user,db)
     if row is None or not view['can_finalize']: raise HTTPException(409,'当前审查尚不可终审')
+    # 条件写同时在SQLite取得事务写锁：日期确认或任务启动先到时必须拒绝旧快照。
+    locked = db.query(Contract).filter(
+        Contract.id == contract_id, Contract.deleted_at.is_(None),
+        Contract.audit_generation == view['generation'],
+        Contract.elements_json == contract.elements_json,
+        Contract.status.in_({'done', 'review_required'}),
+    ).update({Contract.audit_generation: Contract.audit_generation}, synchronize_session=False)
+    if locked != 1:
+        db.rollback()
+        raise HTTPException(409, '合同日期或审查代次已变化，请刷新后重新确认')
+    # 锁定之后重读意见，不能把锁定前的风险/整改状态当作最终依据。
+    db.expire_all()
+    contract,row,job,risks = _load(db,contract_id,user)
+    view = _view(contract,row,job,risks,user,db)
+    if row is None or not view['can_finalize']:
+        db.rollback()
+        raise HTTPException(409, '当前审查尚不可终审')
     if (values.get('expected_generation') != row.audit_generation or values.get('expected_version') != row.version
             or values.get('review_fingerprint') != view['review_fingerprint']):
         raise HTTPException(409,'审查或人工意见已变化，请刷新后重新确认')
     if view['pending_count']: raise HTTPException(409,'请先逐项复核所有风险')
+    if view['missing_rectifications']: raise HTTPException(409,'需修改风险必须先关联整改任务')
     if not str(values.get('comment','')).strip(): raise HTTPException(422,'必须填写终审意见')
     if view['requires_quality_ack'] and not str(values.get('quality_comment','')).strip():
         raise HTTPException(422,'必须记录解析和审查质量问题的人工核验情况')
@@ -96,9 +123,6 @@ def finalize_workflow(db,contract_id,user,values):
     required={c['id'] for c in view['conflicts']}
     if set(resolutions) != required or any(not str(v).strip() for v in resolutions.values()):
         raise HTTPException(422,'必须逐项填写当前冲突的裁决意见')
-    for risk in risks:
-        if risk.review_status=='to_modify' and not db.query(Rectification).filter_by(risk_id=risk.id).first():
-            raise HTTPException(409,'需修改风险必须先关联整改任务')
     # CAS 阻止重复终审覆盖；指纹使风险意见或代次的并发变化立即令终审失效。
     changed=db.query(AuditWorkflow).filter_by(id=row.id,version=values['expected_version']).update({
         'version':row.version+1,'published_fingerprint':view['review_fingerprint'],

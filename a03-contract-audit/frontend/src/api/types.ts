@@ -74,6 +74,17 @@ export interface ParseResult extends ContractQualityFields {
   missing_pages?: number[]
 }
 
+export interface SignDateConfirmation {
+  contract_id: number
+  contract_type: string
+  sign_date: string
+  confirmed: boolean
+  confirmed_by: number | null
+  confirmed_by_name: string | null
+  confirmed_at: string | null
+  audit_invalidated: boolean
+}
+
 export interface ContractDocument extends ContractQualityFields {
   contract_id: number
   filename: string
@@ -109,6 +120,7 @@ export interface AuditResult {
   retryable?: boolean
   cross_checks?: CrossCheckOut[]
   requires_review?: boolean
+  result_stale?: boolean
   ocr_confidence?: number | null
   review_reason?: string | null
 }

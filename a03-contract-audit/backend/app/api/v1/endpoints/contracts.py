@@ -3,9 +3,10 @@ import hashlib
 import json
 import os
 import uuid
-from datetime import timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
+from sqlalchemy import exists
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -13,7 +14,7 @@ from app.api.deps import allowed_departments, get_current_user, require_roles, r
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_db
-from app.models.models import AuditBatchItem, Contract, Risk, User
+from app.models.models import AuditBatchItem, Contract, ImportBatchItem, Risk, User
 from app.schemas.contract import (
     AuditRequest,
     AuditResponse,
@@ -23,7 +24,11 @@ from app.schemas.contract import (
     ParseErrorResponse,
     ParseResponse,
     RiskOut,
+    SignDateConfirmation,
+    SignDateOut,
 )
+from app.services.sign_date import merge_confirmed_sign_date, read_elements, sign_date_view
+from app.services.batch.service import ACTIVE_AUDIT_ITEM_STATUSES
 from app.services import audit_log
 from app.services.imports.file_validation import FileValidationError, validate_upload
 from app.services import masking
@@ -498,32 +503,51 @@ def parse_contract(
     user: User = Depends(get_current_user),
 ) -> ParseResponse:
     contract = _get_contract(db, contract_id, user)
+    _assert_date_writable(db, contract)
+    previous_generation = contract.audit_generation
+    previous_status = contract.status
+    previous_elements = contract.elements_json
+    previous_hash = contract.content_sha256
+    previous_path = contract.storage_path
+    previous_department = contract.department
+    actor_id = user.id
+    # 文档提取期间不保留数据库读事务；最终通过条件更新发布，避免覆盖并发确认或审查。
+    db.rollback()
     try:
-        parsed = extract_document(contract.storage_path)
+        parsed = extract_document(previous_path)
         if not parsed.text.strip():
             empty_error = ValueError("empty document text")
             db.rollback()
             _raise_parse_error(contract_id, empty_error, failure=pdf_text_empty_failure())
-        apply_parse_quality(contract, parsed)
-        if contract.content_sha256:
-            save_parse_cache(db, contract, parsed)
         # 同步解析只做确定性抽取；耗时且不确定的模型调用统一进入可恢复审查任务。
         element_result = extract_element_result(parsed)
         elements = legacy_element_values(element_result.values, text=parsed.text)
+        merge_confirmed_sign_date(elements, previous_elements, previous_hash)
         evidence_payload = element_evidence_payload(element_result, parsed=parsed)
         requires_review, review_reason = merge_element_review(parsed, element_result)
-        contract.requires_review = requires_review
-        contract.review_reason = review_reason
-        contract.status = "review_required" if requires_review else "parsed"
-        contract.elements_json = json.dumps(
-            elements,
-            ensure_ascii=False,
-        )
-        contract.element_evidence_json = json.dumps(
-            evidence_payload,
-            ensure_ascii=False,
-        )
-        audit_log.record(db, user_id=user.id, action="parse", target=f"contract:{contract_id}")
+        parsed_status = "review_required" if requires_review else "parsed"
+        active_audit = exists().where(AuditBatchItem.contract_id == Contract.id, AuditBatchItem.status.in_(ACTIVE_AUDIT_ITEM_STATUSES))
+        active_import = exists().where(ImportBatchItem.contract_id == Contract.id, ImportBatchItem.status.in_({'queued', 'parsing', 'auditing'}))
+        changed = db.query(Contract).filter(
+            Contract.id == contract_id, Contract.deleted_at.is_(None),
+            Contract.audit_generation == previous_generation, Contract.status == previous_status,
+            Contract.elements_json == previous_elements, Contract.content_sha256 == previous_hash,
+            Contract.storage_path == previous_path, Contract.department == previous_department,
+            ~active_audit, ~active_import,
+        ).update({
+            Contract.elements_json: json.dumps(elements, ensure_ascii=False),
+            Contract.element_evidence_json: json.dumps(evidence_payload, ensure_ascii=False),
+            Contract.status: parsed_status, Contract.requires_review: requires_review,
+            Contract.review_reason: review_reason, Contract.parse_source: parsed.source,
+            Contract.ocr_confidence: parsed.ocr_confidence,
+        }, synchronize_session=False)
+        if changed != 1:
+            db.rollback()
+            raise HTTPException(409, '合同状态或签订日期已变化，请刷新后重新解析')
+        db.refresh(contract)
+        if previous_hash:
+            save_parse_cache(db, contract, parsed)
+        audit_log.record(db, user_id=actor_id, action="parse", target=f"contract:{contract_id}")
         db.commit()
     except HTTPException:
         raise
@@ -532,16 +556,85 @@ def parse_contract(
         _raise_parse_error(contract_id, exc)
     return ParseResponse(
         contract_id=contract_id,
-        status=contract.status,
+        status=parsed_status,
         elements=elements,
         element_evidence=evidence_payload["fields"],
         text_length=len(parsed.text),
         total_pages=parsed.total_pages,
         missing_pages=list(parsed.missing_pages),
-        requires_review=contract.requires_review,
-        ocr_confidence=contract.ocr_confidence,
-        review_reason=contract.review_reason,
+        requires_review=requires_review,
+        ocr_confidence=parsed.ocr_confidence,
+        review_reason=review_reason,
     )
+
+
+def _assert_date_writable(db: Session, contract: Contract) -> None:
+    active_audit = db.query(AuditBatchItem.id).filter(
+        AuditBatchItem.contract_id == contract.id,
+        AuditBatchItem.status.in_(ACTIVE_AUDIT_ITEM_STATUSES),
+    ).first()
+    active_import = db.query(ImportBatchItem.id).filter(
+        ImportBatchItem.contract_id == contract.id,
+        ImportBatchItem.status.in_({'queued', 'parsing', 'auditing'}),
+    ).first()
+    if contract.status in ACTIVE_AUDIT_ITEM_STATUSES or active_audit or active_import:
+        raise HTTPException(409, '合同正在处理，请完成当前任务后确认签订日期')
+
+
+@router.get('/{contract_id}/sign-date', response_model=SignDateOut)
+def get_sign_date(contract_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return sign_date_view(_get_contract(db, contract_id, user))
+
+
+@router.patch('/{contract_id}/sign-date', response_model=SignDateOut)
+def confirm_sign_date(
+    contract_id: int, body: SignDateConfirmation, db: Session = Depends(get_db),
+    user: User = Depends(require_roles('legal', 'finance')),
+):
+    contract = _get_contract(db, contract_id, user)
+    db.refresh(contract, with_for_update=True)
+    _assert_date_writable(db, contract)
+    if contract.status in {'uploaded', 'failed'}:
+        raise HTTPException(409, '请先完成合同解析并核对原文，再确认签订日期')
+    if not contract.content_sha256:
+        raise HTTPException(409, '合同缺少文件指纹，请重新导入后确认日期')
+    prior = sign_date_view(contract)
+    if prior['confirmed'] and prior['sign_date'] == body.sign_date:
+        return prior
+    elements = read_elements(contract.elements_json)
+    old_date = elements.get('sign_date')
+    has_history = (
+        contract.audit_generation > 0 or contract.status in {'done', 'three_review', 'audit_failed'}
+        or db.query(AuditBatchItem.id).filter_by(contract_id=contract.id).first() is not None
+        or db.query(Risk.id).filter_by(contract_id=contract.id).first() is not None
+    )
+    generation = contract.audit_generation + (1 if has_history else 0)
+    elements.update(sign_date=body.sign_date, sign_date_confirmed=True,
+                    sign_date_confirmed_by=user.id, sign_date_confirmed_by_name=user.username,
+                    sign_date_confirmed_at=datetime.now(timezone.utc).isoformat(),
+                    sign_date_content_sha256=contract.content_sha256)
+    if has_history:
+        elements['sign_date_invalidated_generation'] = generation
+    active_audit = exists().where(AuditBatchItem.contract_id == Contract.id, AuditBatchItem.status.in_(ACTIVE_AUDIT_ITEM_STATUSES))
+    active_import = exists().where(ImportBatchItem.contract_id == Contract.id, ImportBatchItem.status.in_({'queued', 'parsing', 'auditing'}))
+    # 与审查任务领取共享合同条件更新，避免检查后并发启动任务覆盖日期。
+    changed = db.query(Contract).filter(
+        Contract.id == contract.id, Contract.deleted_at.is_(None),
+        Contract.audit_generation == contract.audit_generation,
+        Contract.elements_json == contract.elements_json,
+        Contract.status.notin_(ACTIVE_AUDIT_ITEM_STATUSES), ~active_audit, ~active_import,
+    ).update({Contract.elements_json: json.dumps(elements, ensure_ascii=False),
+              Contract.audit_generation: generation,
+              Contract.status: 'parsed' if has_history else contract.status}, synchronize_session=False)
+    if changed != 1:
+        db.rollback()
+        raise HTTPException(409, '合同状态已变化，请刷新后重新确认日期')
+    audit_log.record(db, user_id=user.id, action='confirm_sign_date', target=f'contract:{contract_id}',
+                     detail=json.dumps(dict(previous_date=old_date, sign_date=body.sign_date,
+                                            audit_invalidated=has_history, generation=generation), ensure_ascii=False))
+    db.commit()
+    db.refresh(contract)
+    return sign_date_view(contract)
 
 
 @router.post("/{contract_id}/audit", response_model=AuditResponse)
@@ -682,6 +775,11 @@ def _audit_response_from_item(
         issues = []
     issues = [value for value in issues if isinstance(value, dict)]
     coverage = safe_coverage(result.get("coverage"))
+    result_stale = bool(item is not None and item.audit_generation != contract.audit_generation)
+    if result_stale and read_elements(contract.elements_json).get('sign_date_invalidated_generation'):
+        requires_review = True
+        reason = '签订日期已确认或变更，请重新审查；此处仅为历史结果'
+        review_reason = '；'.join(value for value in (review_reason, reason) if value)
     retryable_codes = {
         "AUDIT_PERSISTENCE_UNAVAILABLE",
         "DISPATCH_PENDING",
@@ -701,6 +799,7 @@ def _audit_response_from_item(
         error_message=item.error if item is not None else None,
         retryable=bool(item is not None and item.error_code in retryable_codes),
         requires_review=requires_review,
+        result_stale=result_stale,
         ocr_confidence=ocr_confidence,
         review_reason=review_reason,
         quality_reasons=quality_reasons,

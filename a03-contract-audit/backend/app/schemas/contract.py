@@ -1,5 +1,6 @@
 """Pydantic 请求/响应模型。骨架：仅示例核心结构。"""
 import json
+import re
 from datetime import date, datetime
 from typing import Literal
 
@@ -141,6 +142,30 @@ class AuditRequest(BaseModel):
     dimensions: list[str] = Field(default_factory=list)
 
 
+class SignDateConfirmation(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    sign_date: str
+
+    @field_validator('sign_date')
+    @classmethod
+    def _valid_date(cls, value: str) -> str:
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+            raise ValueError('签订日期须为 YYYY-MM-DD 格式')
+        date.fromisoformat(value)
+        return value
+
+
+class SignDateOut(BaseModel):
+    contract_id: int
+    contract_type: str = ''
+    sign_date: str = ''
+    confirmed: bool = False
+    confirmed_by: int | None = None
+    confirmed_by_name: str | None = None
+    confirmed_at: str | None = None
+    audit_invalidated: bool = False
+
+
 AuditStatus = Literal[
     "queued", "parsing", "reviewing", "validating",
     "done", "review_required", "audit_failed",
@@ -165,6 +190,7 @@ class AuditResponse(BaseModel):
     error_message: str | None = None
     retryable: bool = False
     requires_review: bool = False
+    result_stale: bool = False
     ocr_confidence: float | None = None
     review_reason: str | None = None
     quality_reasons: list[str] = Field(default_factory=list)

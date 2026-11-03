@@ -5,7 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRectifyStore, type Rectification, type RectifyStatus } from '@/stores/rectify'
 import { useAuthStore } from '@/stores/auth'
 import { getRectificationMaterials } from '@/api/rectify'
-import { uploadContract } from '@/api/contract'
+import { uploadContract, parseContract } from '@/api/contract'
 import type { RectificationMaterial, RectificationPlan, RectificationUpdate } from '@/mock/rectify'
 import RectificationPlanDialog from '@/components/rectify/RectificationPlanDialog.vue'
 import AnnotationModal from '@/components/audit/AnnotationModal.vue'
@@ -233,6 +233,13 @@ async function uploadEvidence(event: Event) {
       return
     }
     evidenceIds.value = [...new Set([...evidenceIds.value, uploaded.id])]
+    try {
+      await parseContract(uploaded.id)
+    } catch {
+      if (activeId.value === item.id) ElMessage.warning('材料已上传并关联，但正文解析失败；请打开材料原文重试，无需重复上传。')
+      return
+    }
+    if (activeId.value !== item.id) return
     ElMessage.success('材料已上传并关联，可核对原文；如需模型审查请主动进入审查页。')
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '材料上传失败') }
   finally { uploading.value = false; input.value = '' }
@@ -372,7 +379,7 @@ function snapshotValue(value: unknown): string {
           <template v-if="activeItem.status === '处理中' && canExecute(activeItem)">
             <label class="field-label" for="evidence-materials">关联整改材料</label>
             <el-select id="evidence-materials" v-model="evidenceIds" aria-label="关联整改材料" multiple filterable :loading="materialsLoading" placeholder="选择修订版或实际履约凭证"><el-option v-for="material in materials" :key="material.id" :value="material.id" :label="`${material.filename} · #${material.id}`" /></el-select>
-            <div class="material-actions"><label class="upload-control" :class="{ disabled: uploading }">{{ uploading ? '正在上传材料…' : '上传修订版或凭证' }}<input type="file" aria-label="上传修订版或凭证" accept=".pdf,.docx,.txt" :disabled="uploading" @change="uploadEvidence" /></label><el-button link :loading="materialsLoading" @click="loadMaterials(activeItem)">刷新材料列表</el-button></div>
+            <div class="material-actions"><label class="upload-control" :class="{ disabled: uploading }">{{ uploading ? '正在上传并解析材料…' : '上传修订版或凭证' }}<input type="file" aria-label="上传修订版或凭证" accept=".pdf,.docx,.txt" :disabled="uploading" @change="uploadEvidence" /></label><el-button link :loading="materialsLoading" @click="loadMaterials(activeItem)">刷新材料列表</el-button></div>
             <p class="detail-copy">支持 PDF、DOCX、TXT。上传保留原合同，不自动运行模型审查。至少关联一份材料才能提交复核。</p>
             <el-alert v-if="materialsError" type="error" :closable="false" :title="materialsError" />
             <p v-else-if="!materialsLoading && !materials.length" class="detail-copy">暂无可关联材料，请上传修订版或凭证。</p>
@@ -416,7 +423,7 @@ function snapshotValue(value: unknown): string {
       </div></template>
     </el-drawer>
     <RectificationPlanDialog v-if="activeItem" v-model="planOpen" :risk-id="activeItem.risk_id ?? null" :initial="activeItem" :saving="planSaving" :error="planError" @save="savePlan" />
-    <AnnotationModal v-model="documentOpen" :risks="[]" :filename="documentFilename" :contract-id="documentId" />
+    <AnnotationModal v-model="documentOpen" :risks="[]" :filename="documentFilename" :contract-id="documentId" allow-parse />
   </div>
 </template>
 

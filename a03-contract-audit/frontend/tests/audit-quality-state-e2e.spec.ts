@@ -112,6 +112,10 @@ async function prepare(page: Page, itemStatus: ItemStatus, options: PrepareOptio
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     const method = route.request().method()
+    if (/\/contracts\/\d+\/sign-date$/.test(path) && method === 'GET') {
+      const contractId = Number(path.split('/').at(-2))
+      return fulfillJson(route, { contract_id: contractId, sign_date: '', confirmed: false, audit_invalidated: false })
+    }
     if (path.endsWith('/runtime/status')) {
       return fulfillJson(route, { status: 'online', checked_at: '2026-09-13T10:00:00Z' })
     }

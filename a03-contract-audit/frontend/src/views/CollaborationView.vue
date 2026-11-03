@@ -34,6 +34,15 @@ onMounted(restore)
 const workflow = ref<WorkflowView | null>(null)
 const workflowLoading = ref(false)
 const workflowError = ref('')
+const finalReviewOpen = ref(false)
+const finalReviewError = ref('')
+const finalComment = ref('')
+const qualityComment = ref('')
+const conflictComments = ref<Record<string, string>>({})
+const finalReviewSnapshot = ref<WorkflowView | null>(null)
+const finalReviewContractId = ref<number | null>(null)
+const missingRectifications = computed(() => workflow.value?.missing_rectifications ?? [])
+const finalizationBlocked = computed(() => !!workflow.value?.pending_count || missingRectifications.value.length > 0)
 const workflowStateLabel = computed(() => {
   if (workflowError.value) return '加载失败'
   if (workflowLoading.value) return '加载中'
@@ -47,23 +56,48 @@ async function restoreWorkflow() {
   catch (error) { workflowError.value = error instanceof Error ? error.message : '工作流状态加载失败' }
   finally { workflowLoading.value = false }
 }
+function openFinalReview() {
+  if (workflowLoading.value || !workflow.value?.can_finalize || finalizationBlocked.value) return
+  // 表单绑定打开时的快照，不能把已变化的审查静默当作已确认。
+  finalReviewSnapshot.value = workflow.value
+  finalReviewContractId.value = session.contractId
+  finalComment.value = ''; qualityComment.value = ''; conflictComments.value = {}; finalReviewError.value = ''
+  finalReviewOpen.value = true
+}
 async function finalizeCurrentWorkflow() {
-  if (workflowLoading.value || !workflow.value?.can_finalize || !session.contractId || !workflow.value.review_fingerprint) return
-  const comment = window.prompt('请填写终审意见（必填）')?.trim()
-  if (!comment) return
-  const qualityComment = workflow.value.requires_quality_ack ? window.prompt('请填写解析/审查质量核验意见（必填）')?.trim() || '' : ''
-  if (workflow.value.requires_quality_ack && !qualityComment) return
+  const snapshot = finalReviewSnapshot.value
+  if (workflowLoading.value || !snapshot?.can_finalize || !finalReviewContractId.value || !snapshot.review_fingerprint) return
+  if (snapshot.pending_count || snapshot.missing_rectifications?.length || snapshot.state === 'stale' || snapshot.state === 'published') {
+    finalReviewError.value = '当前审查尚不可终审，请先补齐复核与整改任务'; return
+  }
+  const comment = finalComment.value.trim()
+  if (comment.length < 2) { finalReviewError.value = '请填写终审意见（至少2字）'; return }
+  if (snapshot.requires_quality_ack && !qualityComment.value.trim()) { finalReviewError.value = '请填写质量核验意见'; return }
   const resolutions: Record<string, string> = {}
-  for (const conflict of workflow.value.conflicts || []) {
-    const value = window.prompt(`请填写冲突 ${conflict.id} 的裁决意见：${conflict.trigger}\n${conflict.note}`)?.trim()
-    if (!value) return
+  for (const conflict of snapshot.conflicts || []) {
+    const value = conflictComments.value[conflict.id]?.trim()
+    if (!value) { finalReviewError.value = `请填写 ${conflict.id} 裁决意见`; return }
     resolutions[conflict.id] = value
   }
+  finalReviewError.value = ''
   workflowLoading.value = true
   try {
-    workflow.value = await finalizeWorkflow(session.contractId, { expected_generation: workflow.value.generation, expected_version: workflow.value.version, review_fingerprint: workflow.value.review_fingerprint, comment, quality_comment: qualityComment, conflict_resolutions: resolutions })
+    workflow.value = await finalizeWorkflow(finalReviewContractId.value, { expected_generation: snapshot.generation, expected_version: snapshot.version, review_fingerprint: snapshot.review_fingerprint, comment, quality_comment: qualityComment.value.trim(), conflict_resolutions: resolutions })
+    finalReviewOpen.value = false
     ElMessage.success('人工终审已发布')
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '终审发布失败，请刷新后重试') }
+  } catch (error) { finalReviewError.value = error instanceof Error ? error.message : '终审发布失败，请刷新后重试' }
+  finally { workflowLoading.value = false }
+}
+
+async function refreshFinalReview() {
+  if (workflowLoading.value || !finalReviewContractId.value) return
+  workflowLoading.value = true
+  try {
+    const updated = await getWorkflow(finalReviewContractId.value)
+    workflow.value = updated
+    finalReviewSnapshot.value = updated
+    finalReviewError.value = '已刷新，请重新核对当前审查、质量说明和冲突裁决后确认发布。'
+  } catch (error) { finalReviewError.value = error instanceof Error ? error.message : '终审状态刷新失败' }
   finally { workflowLoading.value = false }
 }
 
@@ -267,10 +301,15 @@ function goAudit() {
       <template v-else-if="workflow">
         <p class="status-note">主风险 {{ workflow.groups?.length || 0 }} 项 · 待复核风险 {{ workflow.pending_count || 0 }} 项 · 定向复查 {{ workflow.directed_reviews?.length || 0 }} 项</p>
         <div v-if="workflow.groups?.length" class="workflow-groups"><span v-for="group in workflow.groups" :key="group.issue_id" class="workflow-group">{{ group.category }} · {{ group.agents.join(' / ') }}</span></div>
-        <p v-if="workflow.conflicts?.length" class="status-note">仍有 {{ workflow.conflicts.length }} 项冲突需要人工裁决；模型复查不能替代终审。</p>
+        <p v-if="workflow.conflicts?.length" class="status-note"><template v-if="workflow.state === 'published'">已记录 {{ workflow.conflicts.length }} 项冲突的人工裁决；模型复查记录仍保留供追溯。</template><template v-else>仍有 {{ workflow.conflicts.length }} 项冲突需要人工裁决；模型复查不能替代终审。</template></p>
         <p v-for="conflict in workflow.conflicts" :key="conflict.id" class="status-note">{{ conflict.id }} · {{ conflict.trigger }}：{{ conflict.note }}</p>
         <p v-for="review in workflow.directed_reviews" :key="review.check_id" class="status-note">{{ review.check_id }} · {{ review.target_agent === 'legal' ? '法务' : review.target_agent === 'finance' ? '财务' : '人工' }}复查：{{ review.status !== 'reviewed' ? '需人工核验' : review.verdict === 'agree' ? '事实意见一致' : '事实意见不一致' }}</p>
-        <el-button v-if="workflow.can_finalize && workflow.state !== 'published'" type="primary" :disabled="workflowLoading || !!workflow.pending_count" @click="finalizeCurrentWorkflow">填写终审并发布</el-button>
+        <el-alert v-if="missingRectifications.length" title="需修改风险尚未关联整改任务，请先补齐" type="warning" :closable="false">
+          <ul><li v-for="risk in missingRectifications" :key="risk.risk_id">{{ risk.category }} · 风险 #{{ risk.risk_id }}</li></ul>
+          <el-button @click="goAudit">补齐整改计划</el-button>
+        </el-alert>
+        <p v-if="workflow.pending_count" class="status-note">请先逐项完成人工复核，再进行终审发布。</p>
+        <el-button v-if="workflow.can_finalize && workflow.state !== 'published'" type="primary" :disabled="workflowLoading || finalizationBlocked" @click="openFinalReview">填写终审并发布</el-button>
         <el-button v-else-if="workflow.state === 'published'" disabled>已完成终审发布</el-button>
         <p v-if="workflow.budget" class="status-note">调用预算 {{ workflow.budget.calls || 0 }} / {{ workflow.budget.max_calls || 0 }}</p>
       </template>
@@ -435,6 +474,27 @@ function goAudit() {
     </div>
 
     </template><!-- end v-if="isLive" -->
+    <el-dialog v-model="finalReviewOpen" title="人工终审" width="min(640px, calc(100vw - 24px))" :close-on-click-modal="false" :close-on-press-escape="!workflowLoading" :show-close="!workflowLoading">
+      <el-form label-position="top" @submit.prevent="finalizeCurrentWorkflow">
+        <el-form-item label="终审意见" label-for="final-review-comment" required>
+          <el-input id="final-review-comment" v-model="finalComment" type="textarea" :rows="3" :maxlength="2000" :disabled="workflowLoading" />
+        </el-form-item>
+        <el-form-item v-if="finalReviewSnapshot?.requires_quality_ack" label="质量核验意见" label-for="final-quality-comment" required>
+          <p class="status-note">请记录对解析缺页、事实校验或依据待核验等问题的人工核对情况。</p>
+          <el-input id="final-quality-comment" v-model="qualityComment" type="textarea" :rows="3" :maxlength="2000" :disabled="workflowLoading" />
+        </el-form-item>
+        <el-form-item v-for="conflict in finalReviewSnapshot?.conflicts" :key="conflict.id" :label="`${conflict.id} 裁决意见`" :label-for="`conflict-${conflict.id}`" required>
+          <p class="status-note">{{ conflict.trigger }}：{{ conflict.note }}</p>
+          <el-input :id="`conflict-${conflict.id}`" v-model="conflictComments[conflict.id]" type="textarea" :rows="2" :maxlength="2000" :disabled="workflowLoading" />
+        </el-form-item>
+        <el-alert v-if="finalReviewError" :title="finalReviewError" type="error" :closable="false" />
+      </el-form>
+      <template #footer>
+        <el-button :disabled="workflowLoading" @click="refreshFinalReview">刷新终审状态</el-button>
+        <el-button :disabled="workflowLoading" @click="finalReviewOpen = false">取消</el-button>
+        <el-button type="primary" :loading="workflowLoading" @click="finalizeCurrentWorkflow">确认发布</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
